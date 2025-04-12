@@ -1,23 +1,11 @@
 # Twitch Adblock Fix & Force Source Quality (with Monitoring)
 
-**Version:** 17.2.0
 
-**(RU)** Скрипт для блокировки рекламы на Twitch и автоматической установки максимального качества ("Источник") с постоянным мониторингом.
-**(EN)** Userscript to block ads on Twitch and automatically set the maximum ("Source") quality with continuous monitoring.
+**(RU)** Скрипт для блокировки рекламы на Twitch и автоматической установки максимального качества ("Источник").
+**(EN)** Userscript to block ads on Twitch and automatically set the maximum ("Source") quality.
 
 ---
 
-## English
-
-### Features
-
-*   **Ad Blocking:** Attempts to block Twitch video ads (pre-roll and mid-roll) by intercepting and modifying stream manifest files (M3U8) using a Worker-based proxy approach.
-*   **Force Source Quality:** Automatically sets the video quality to the highest available option ("Source" or equivalent, often labeled as `chunked`) when a stream starts.
-*   **Quality Monitoring:** Continuously monitors the video quality at a set interval (default: 3 seconds).
-*   **Automatic Correction:** If the quality drops below "Source" (e.g., due to network fluctuations or Twitch's adjustments, especially when switching tabs/windows), the script automatically attempts to set it back to "Source".
-*   **Configurable:** Various logging and behavior options can be adjusted through the Tampermonkey storage interface.
-*   **Update Checker:** Checks for new script versions automatically.
-*   **(Optional) Ad Banner:** Displays a small, temporary banner indicating when ads were removed.
 
 ### Requirements
 
@@ -53,50 +41,24 @@ You can fine-tune the script's behavior via Tampermonkey's storage settings:
 1.  Open the Tampermonkey Dashboard.
 2.  Click on the script name: `Twitch Adblock Fix & Force Source Quality (with Monitoring)`.
 3.  Go to the **Storage** tab.
-4.  You can modify the values for the following keys:
-    *   `TTV_AdBlock_DebugLog` (true/false): Enable verbose debug messages in the browser console. Default: `false`.
-    *   `TTV_AdBlock_ShowBanner` (true/false): Show the "Ad removed" banner. Default: `true`.
-    *   `TTV_AdBlock_InjectWorkers` (true/false): Enable the core ad-blocking method via Worker injection. **Disabling this will likely break ad blocking.** Default: `true`.
-    *   `TTV_AdBlock_ForceSource` (true/false): Enable automatic setting and monitoring of "Source" quality. Default: `true`.
-    *   `TTV_AdBlock_MonitorQuality` (true/false): Enable the *continuous* monitoring and correction of quality after initial setup. Requires `TTV_AdBlock_ForceSource` to be `true`. Default: `true`.
-    *   `TTV_AdBlock_MonitorInterval` (number): Interval in milliseconds for checking video quality. Default: `3000` (3 seconds).
-    *   `TTV_AdBlock_Log...` (true/false): Various other logging options (M3U8 cleaning, network blocking, etc.). Defaults vary.
-5.  **Important:** After changing any values, you **must save** them (often automatic, but check your Tampermonkey version) and **refresh** any open Twitch pages for the changes to take effect.
+4.  **Important:** After changing any values, you **must save** them (often automatic, but check your Tampermonkey version) and **refresh** any open Twitch pages for the changes to take effect.
 
 ### How it Works (Briefly)
 
 *   **Ad Blocking:** The script intercepts network requests made by the Twitch player, specifically those requesting stream playlists (M3U8 files). It injects code into a Web Worker which then filters these playlists to remove segments marked as advertisements before they reach the player.
-*   **Quality Control:** The script interacts with the Twitch player's internal API. It finds the player instance, retrieves the list of available qualities, identifies the "Source" quality (usually `chunked`), and calls the player's function to set that quality. The monitoring feature periodically repeats the check and correction process.
+*   **Quality Control:** The script interacts with the Twitch player's internal API. It finds the player instance, retrieves the list of available qualities, identifies the "Source" quality (usually `chunked`), and calls the player's function to set that quality.
 
 ### Troubleshooting / Notes
 
-*   **Twitch Updates:** Twitch frequently updates its site and player. This can break the script's functionality (both ad blocking and quality control). Keep the script updated via Tampermonkey.
-*   **Conflicts:** Other ad blockers or Twitch-modifying extensions might conflict with this script. If you encounter issues, try disabling other related extensions temporarily.
-*   **Console Logs:** If experiencing problems, open your browser's developer console (usually F12) and look for messages prefixed with `[TTV ADBLOCK vX.Y.Z]`. Enabling `TTV_AdBlock_DebugLog` can provide more detailed information.
+*   **Twitch Updates:** Twitch frequently updates its site and player. This can break the script's functionality (both ad blocking and quality control).
 *   **Effectiveness:** Ad blocking methods are constantly evolving. While this script uses a common technique, its effectiveness may vary and might not block all ad types perfectly.
 
 ### License
 
 MIT License
 
-### Author / Credits
-
-*   Adapted and Enhanced by ShmidtS & Assistant
-*   Based on previous ad-blocking techniques and scripts from the community.
-
 ---
 
-## Русский
-
-### Возможности
-
-*   **Блокировка рекламы:** Пытается блокировать видеорекламу на Twitch (pre-roll и mid-roll) путем перехвата и изменения файлов манифеста потока (M3U8) с использованием прокси-подхода на основе Worker'ов.
-*   **Принудительное качество "Источник":** Автоматически устанавливает качество видео на максимально доступное ("Источник" или эквивалент, часто обозначаемый как `chunked`) при запуске трансляции.
-*   **Мониторинг качества:** Постоянно отслеживает качество видео с заданным интервалом (по умолчанию: 3 секунды).
-*   **Автоматическая коррекция:** Если качество падает ниже "Источника" (например, из-за колебаний сети или настроек Twitch, особенно при переключении вкладок/окон), скрипт автоматически пытается вернуть его к "Источнику".
-*   **Настраиваемый:** Различные параметры логирования и поведения можно настроить через интерфейс хранилища Tampermonkey.
-*   **Проверка обновлений:** Автоматически проверяет наличие новых версий скрипта.
-*   **(Опционально) Баннер о рекламе:** Отображает небольшой временный баннер, сообщающий об удалении рекламы.
 
 ### Требования
 
@@ -132,33 +94,18 @@ MIT License
 1.  Откройте Панель управления Tampermonkey.
 2.  Нажмите на имя скрипта: `Twitch Adblock Fix & Force Source Quality (with Monitoring)`.
 3.  Перейдите на вкладку **Хранилище** (Storage).
-4.  Вы можете изменить значения для следующих ключей:
-    *   `TTV_AdBlock_DebugLog` (true/false): Включить подробные отладочные сообщения в консоли браузера. По умолчанию: `false`.
-    *   `TTV_AdBlock_ShowBanner` (true/false): Показывать баннер "Реклама удалена". По умолчанию: `true`.
-    *   `TTV_AdBlock_InjectWorkers` (true/false): Включить основной метод блокировки рекламы через внедрение в Worker'ы. **Отключение этого параметра, скорее всего, сломает блокировку рекламы.** По умолчанию: `true`.
-    *   `TTV_AdBlock_ForceSource` (true/false): Включить автоматическую установку и мониторинг качества "Источник". По умолчанию: `true`.
-    *   `TTV_AdBlock_MonitorQuality` (true/false): Включить *постоянный* мониторинг и коррекцию качества после первоначальной установки. Требует, чтобы `TTV_AdBlock_ForceSource` был `true`. По умолчанию: `true`.
-    *   `TTV_AdBlock_MonitorInterval` (число): Интервал проверки качества видео в миллисекундах. По умолчанию: `3000` (3 секунды).
-    *   `TTV_AdBlock_Log...` (true/false): Различные другие опции логирования (очистка M3U8, блокировка сети и т. д.). Значения по умолчанию могут различаться.
-5.  **Важно:** После изменения любых значений вы **должны сохранить** их (часто происходит автоматически, но проверьте вашу версию Tampermonkey) и **обновить** все открытые страницы Twitch, чтобы изменения вступили в силу.
+4.  **Важно:** После изменения любых значений вы **должны сохранить** их (часто происходит автоматически, но проверьте вашу версию Tampermonkey) и **обновить** все открытые страницы Twitch, чтобы изменения вступили в силу.
 
 ### Как это работает (кратко)
 
 *   **Блокировка рекламы:** Скрипт перехватывает сетевые запросы плеера Twitch, особенно запросы плейлистов потока (файлы M3U8). Он внедряет код в Web Worker, который затем фильтрует эти плейлисты, удаляя сегменты, помеченные как реклама, прежде чем они достигнут плеера.
-*   **Контроль качества:** Скрипт взаимодействует с внутренним API плеера Twitch. Он находит экземпляр плеера, получает список доступных качеств, определяет качество "Источник" (обычно `chunked`) и вызывает функцию плеера для установки этого качества. Функция мониторинга периодически повторяет процесс проверки и коррекции.
+*   **Контроль качества:** Скрипт взаимодействует с внутренним API плеера Twitch. Он находит экземпляр плеера, получает список доступных качеств, определяет качество "Источник" (обычно `chunked`) и вызывает функцию плеера для установки этого качества.
 
 ### Устранение неполадок / Примечания
 
-*   **Обновления Twitch:** Twitch часто обновляет свой сайт и плеер. Это может нарушить функциональность скрипта (как блокировку рекламы, так и контроль качества). Поддерживайте скрипт в актуальном состоянии через Tampermonkey.
-*   **Конфликты:** Другие блокировщики рекламы или расширения, изменяющие Twitch, могут конфликтовать с этим скриптом. Если вы столкнулись с проблемами, попробуйте временно отключить другие связанные расширения.
-*   **Логи консоли:** При возникновении проблем откройте консоль разработчика вашего браузера (обычно F12) и ищите сообщения с префиксом `[TTV ADBLOCK vX.Y.Z]`. Включение `TTV_AdBlock_DebugLog` может предоставить более подробную информацию.
+*   **Обновления Twitch:** Twitch часто обновляет свой сайт и плеер. Это может нарушить функциональность скрипта (как блокировку рекламы, так и контроль качества).
 *   **Эффективность:** Методы блокировки рекламы постоянно развиваются. Хотя этот скрипт использует распространенный метод, его эффективность может варьироваться и он может не идеально блокировать все типы рекламы.
 
 ### Лицензия
 
 MIT License
-
-### Автор / Благодарности
-
-*   Адаптировано и дополнено ShmidtS & Assistant
-*   Основано на предыдущих методах блокировки рекламы и скриптах сообщества.
