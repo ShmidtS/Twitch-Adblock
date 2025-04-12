@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Twitch Adblock Fix & Force Source Quality (with Monitoring)
-// @namespace    TwitchAdblockOptimizedWorkerM3U8Proxy_ForceSource_ShmidtS_Mod_Monitor
-// @version      17.2.0 // Версия увеличена: Добавлено постоянное отслеживание качества
-// @description  Блокировка рекламы Twitch через Worker + Автоматическая установка качества "Источник" (Source) с постоянным мониторингом и коррекцией. Адаптировано и дополнено.
-// @author       AI Generated & Adapted by ShmidtS & Assistant (Optimized + Force Source + Monitor + Updater)
+// @name         Twitch Adblock Fix & Force Source Quality (v2 Method)
+// @namespace    TwitchAdblockOptimizedWorkerM3U8Proxy_ForceSource_ShmidtS_Mod_Monitor_V2Quality
+// @version      18.0.0
+// @description  Блокировка рекламы Twitch через Worker + Установка качества "Источник"
+// @author       AI Generated & Adapted by ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
 // @match        https://player.twitch.tv/*
@@ -18,8 +18,8 @@
 // @connect      github.com
 // @connect      raw.githubusercontent.com
 // @connect      *
-// @updateURL    https://raw.githubusercontent.com/ShmidtS/Twitch-Adblock/main/Twitch%20Adblock%20Fix%20%26%20Force%20Source%20Quality.user.js // TODO: Обновить URL если имя файла изменится
-// @downloadURL  https://raw.githubusercontent.com/ShmidtS/Twitch-Adblock/main/Twitch%20Adblock%20Fix%20%26%20Force%20Source%20Quality.user.js // TODO: Обновить URL если имя файла изменится
+// @updateURL    https://raw.githubusercontent.com/ShmidtS/Twitch-Adblock/main/Twitch%20Adblock%20Fix%20%26%20Force%20Source%20Quality%20V2.user.js
+// @downloadURL  https://raw.githubusercontent.com/ShmidtS/Twitch-Adblock/main/Twitch%20Adblock%20Fix%20%26%20Force%20Source%20Quality%20V2.user.js
 // @run-at       document-start
 // @license      MIT
 // ==/UserScript==
@@ -28,29 +28,25 @@
     'use strict';
 
     // --- НАСТРОЙКИ (Конфигурируемые через GM_setValue) ---
-    const SCRIPT_VERSION = '17.2.0';
+    const SCRIPT_VERSION = '18.0.0';
     const DEBUG_LOGGING = GM_getValue('TTV_AdBlock_DebugLog', false);
     const SHOW_ERRORS = true;
     const LOG_M3U8_CLEANING = GM_getValue('TTV_AdBlock_LogM3U8Clean', true);
     const LOG_NETWORK_BLOCKING = GM_getValue('TTV_AdBlock_LogNetBlock', true);
     const LOG_GQL_INTERCEPTION = GM_getValue('TTV_AdBlock_LogGQLIntercept', false);
     const LOG_WORKER_INJECTION = GM_getValue('TTV_AdBlock_LogWorkerInject', true);
-    const LOG_FORCE_QUALITY = GM_getValue('TTV_AdBlock_LogForceQuality', true);
     const OPT_SHOW_AD_BANNER = GM_getValue('TTV_AdBlock_ShowBanner', true);
     const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true);
-    const ENABLE_FORCE_SOURCE_QUALITY = GM_getValue('TTV_AdBlock_ForceSource', true);
+    // --- Удалены настройки качества: ENABLE_FORCE_SOURCE_QUALITY, ENABLE_QUALITY_MONITORING, QUALITY_MONITOR_INTERVAL_MS ---
+    // --- Качество теперь всегда устанавливается через localStorage, мониторинг удален ---
     const CHECK_FOR_UPDATES = true;
-    // *** НОВАЯ НАСТРОЙКА: Включить постоянный мониторинг и коррекцию качества ***
-    const ENABLE_QUALITY_MONITORING = GM_getValue('TTV_AdBlock_MonitorQuality', true);
-    // *** НОВАЯ НАСТРОЙКА: Интервал проверки качества (в миллисекундах) ***
-    const QUALITY_MONITOR_INTERVAL_MS = GM_getValue('TTV_AdBlock_MonitorInterval', 3000); // 3 секунды по умолчанию
 
     // --- КОНСТАНТЫ ---
     const LOG_PREFIX = `[TTV ADBLOCK v${SCRIPT_VERSION}]`;
-    const LS_KEY_QUALITY = 'video-quality';
+    const LS_KEY_QUALITY = 'video-quality'; // Используем для нового метода
     const GQL_OPERATION_ACCESS_TOKEN = 'PlaybackAccessToken';
     const UPDATE_CHECK_INTERVAL_HOURS = 24;
-    const UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/ShmidtS/Twitch-Adblock/main/Twitch%20Adblock%20Fix%20%26%20Force%20Source%20Quality.user.js'; // TODO: Обновить URL если имя файла изменится
+    const UPDATE_SCRIPT_URL = 'https://raw.githubusercontent.com/ShmidtS/Twitch-Adblock/main/Twitch%20Adblock%20Fix%20%26%20Force%20Source%20Quality%20V2.user.js';
 
     const AD_SIGNIFIER_DATERANGE = 'stitched-ad';
     const AD_SIGNIFIERS_TAGS = ['#EXT-X-DATERANGE', '#EXT-X-DISCONTINUITY', '#EXT-X-CUE-OUT', '#EXT-X-CUE-IN', '#EXT-X-SCTE35', '#EXT-X-ASSET'];
@@ -62,12 +58,7 @@
     var hooksInstalledMain = false;
     var workerHookAttempted = false;
     var hookedWorkers = new Set();
-    var qualityObserver = null;
-    var playerInstanceCache = null;
-    var qualityMonitorIntervalId = null; // ID для интервала мониторинга качества
-    var sourceQualityCache = null; // Кеш для объекта качества "Источник"
 
-    // Оригинальные функции (оставлены без изменений)
     const originalFetch = unsafeWindow.fetch;
     const originalXhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
     const originalXhrSend = unsafeWindow.XMLHttpRequest.prototype.send;
@@ -81,15 +72,11 @@
     function logInfo(source, message, ...args) { console.info(`${LOG_PREFIX} [${source}] INFO:`, message, ...args); }
     function logDebug(source, message, ...args) { if (DEBUG_LOGGING) console.log(`${LOG_PREFIX} [${source}] DEBUG:`, message, ...args); }
     function logTrace(source, message, ...args) { if (DEBUG_LOGGING) console.debug(`${LOG_PREFIX} [${source}] TRACE:`, message, ...args); }
-    function logQuality(message, ...args) { if (LOG_FORCE_QUALITY) console.info(`${LOG_PREFIX} [Quality] INFO:`, message, ...args); }
-    function logQualityDebug(message, ...args) { if (LOG_FORCE_QUALITY && DEBUG_LOGGING) console.log(`${LOG_PREFIX} [Quality] DEBUG:`, message, ...args); }
-    function logQualityMonitor(message, ...args) { if (LOG_FORCE_QUALITY && ENABLE_QUALITY_MONITORING) console.info(`${LOG_PREFIX} [QualityMonitor] INFO:`, message, ...args); }
-    function logQualityMonitorDebug(message, ...args) { if (LOG_FORCE_QUALITY && ENABLE_QUALITY_MONITORING && DEBUG_LOGGING) console.log(`${LOG_PREFIX} [QualityMonitor] DEBUG:`, message, ...args); }
 
-    logInfo('MAIN', `Скрипт запускается. Версия: ${SCRIPT_VERSION}. Метод: Optimized Worker M3U8 Proxy + Force Source. Debug: ${DEBUG_LOGGING}. Worker Inject: ${INJECT_INTO_WORKERS}. Force Quality: ${ENABLE_FORCE_SOURCE_QUALITY}. Quality Monitor: ${ENABLE_QUALITY_MONITORING} (Interval: ${QUALITY_MONITOR_INTERVAL_MS}ms).`);
+    logInfo('MAIN', `Скрипт запускается. Версия: ${SCRIPT_VERSION}. Метод: Optimized Worker M3U8 Proxy + localStorage Quality (v2 method). Debug: ${DEBUG_LOGGING}. Worker Inject: ${INJECT_INTO_WORKERS}.`);
 
-    // --- УПРАВЛЕНИЕ БАННЕРОМ (без изменений) ---
-    function getAdDiv() { /* ... код без изменений ... */
+    // --- УПРАВЛЕНИЕ БАННЕРОМ () ---
+    function getAdDiv() { 
         logTrace("Banner", "getAdDiv вызвана");
         if (!OPT_SHOW_AD_BANNER) return null;
         if (adBannerElement && document.body.contains(adBannerElement)) { return adBannerElement; }
@@ -111,7 +98,7 @@
             return adBannerElement;
         } catch (e) { logError("Banner", "Ошибка создания баннера:", e); adBannerElement = null; return null; }
     }
-    function showAdBanner(isMidroll) { /* ... код без изменений ... */
+    function showAdBanner(isMidroll) { 
         logTrace("Banner", `showAdBanner вызвана. isMidroll: ${isMidroll}`);
         if (!OPT_SHOW_AD_BANNER) return;
         const adDiv = getAdDiv();
@@ -134,274 +121,21 @@
         } else { logWarn("Banner", "Не удалось получить/создать баннер для показа."); }
     }
 
-    // --- ЛОГИКА УСТАНОВКИ КАЧЕСТВА ---
-
-    // 1. Метод через localStorage (оставлен для совместимости/ранней инициализации)
-    function setQualitySettingsLocalStorage() { /* ... код без изменений ... */
-        logTrace('Quality', "setQualitySettingsLocalStorage вызвана");
+    function setQualitySettings() {
+        const context = 'QualityV2'; // Новый контекст для логов
         try {
-            const qualitySettings = {
-                default: 'chunked', // 'chunked' обычно соответствует Source/Исходному качеству
-                restricted: null,
-                adaptive: false // Отключаем адаптивное изменение качества
-            };
-            unsafeWindow.localStorage.setItem(LS_KEY_QUALITY, JSON.stringify(qualitySettings));
-            logQuality(`Попытка установить качество через localStorage:`, qualitySettings);
+            // Устанавливаем значение '{"default":"chunked"}' для ключа 'video-quality'
+            // 'chunked' обычно соответствует качеству "Источник" (Source).
+            unsafeWindow.localStorage.setItem(LS_KEY_QUALITY, '{"default":"chunked"}');
+            logInfo(context, `Установлено качество 'Источник' через localStorage: {"default":"chunked"}`);
         } catch (e) {
-            logError('Quality', 'Ошибка установки настроек качества в localStorage:', e);
-        }
-    }
-
-    // 2. Поиск экземпляра плеера (УЛУЧШЕН поиск и кеширование)
-    function findPlayerInstance() {
-        // Проверяем валидность кеша не только по наличию, но и по функциям
-        if (playerInstanceCache && typeof playerInstanceCache.getQualities === 'function' && typeof playerInstanceCache.setQuality === 'function' /* && typeof playerInstanceCache.getQuality === 'function' - добавлено в проверку ниже */) {
-            // Дополнительная проверка: Убедимся, что элемент плеера все еще существует в DOM, чтобы избежать работы с устаревшим экземпляром
-            // (Это эвристика, т.к. прямой связи между DOM и React instance нет)
-            const playerElementCheck = document.querySelector('.video-player__container') || document.querySelector('.video-player');
-            if (playerElementCheck) {
-                 logQualityDebug("Возвращаем кешированный и предположительно валидный экземпляр плеера.");
-                 return playerInstanceCache;
-            } else {
-                logQualityDebug("Элемент плеера в DOM не найден, сбрасываем кеш экземпляра плеера.");
-                playerInstanceCache = null;
-                sourceQualityCache = null; // Сбрасываем и кеш качества Source
-            }
-        } else if (playerInstanceCache) {
-             logQualityDebug("Кешированный экземпляр плеера невалиден (отсутствуют методы?), сбрасываем кеш.");
-             playerInstanceCache = null; // Сбрасываем невалидный кеш
-             sourceQualityCache = null;
-        }
-
-
-        logQualityDebug("Поиск нового экземпляра плеера...");
-        // Используем более широкий набор селекторов для поиска корневого элемента плеера
-        const playerSelectors = [
-            '.video-player__container',
-            '.video-player .persistent-player',
-            'div[data-a-target="video-player-layout"]',
-            'div[data-a-target="video-player"]',
-            '.video-player'
-        ];
-        let playerElement = null;
-        for(const selector of playerSelectors) {
-             playerElement = document.querySelector(selector);
-             if (playerElement) {
-                 logQualityDebug(`Найден корневой элемент плеера по селектору: '${selector}'`);
-                 break;
-             }
-        }
-
-        if (!playerElement) {
-            logQualityDebug("Ни один из корневых элементов плеера не найден.");
-            return null;
-        }
-
-        const reactKey = Object.keys(playerElement).find(key => key.startsWith('__reactFiber$') || key.startsWith('__reactInternalInstance$'));
-        if (!reactKey) {
-            logQualityDebug("React key ('__reactFiber$' или '__reactInternalInstance$') не найден на элементе плеера.");
-            return null;
-        }
-
-        let instance = playerElement[reactKey];
-        if (!instance) {
-            logQualityDebug("Экземпляр React не найден по ключу:", reactKey);
-            return null;
-        }
-
-        logQualityDebug("Начало поиска объекта плеера во вложенной структуре React (макс. глубина 20)...");
-        const MAX_DEPTH = 20;
-        let depth = 0;
-        let queue = [instance];
-        let visited = new Set(); // Используем Set для эффективности
-
-        while (queue.length > 0 && depth < MAX_DEPTH) {
-            const queueLength = queue.length; // Обрабатываем узлы по уровням
-            for (let i = 0; i < queueLength; i++) {
-                let current = queue.shift();
-
-                // Пропускаем, если null/undefined или уже посещали
-                if (!current || visited.has(current)) continue;
-                visited.add(current);
-
-                // Проверяем различные возможные места хранения плеера
-                const candidates = [
-                    current,
-                    current.stateNode,
-                    current.memoizedProps?.player,
-                    current.memoizedProps?.playerApi,
-                    current.memoizedProps?.videoPlayer, // Еще вариант
-                    current.memoizedState?.player,
-                    current.memoizedState?.playerApi,
-                    current.memoizedState?.videoPlayer
-                ];
-
-                for (const candidate of candidates) {
-                     // Ищем объект, у которого есть *все* нужные методы
-                    if (candidate &&
-                        typeof candidate.getQualities === 'function' &&
-                        typeof candidate.setQuality === 'function' &&
-                        typeof candidate.getQuality === 'function') { // Добавлена проверка getQuality для мониторинга
-                        logQuality(`Найден подходящий экземпляр плеера на глубине ${depth} с методами getQualities, setQuality, getQuality.`, candidate);
-                        playerInstanceCache = candidate; // Кешируем валидный экземпляр
-                        sourceQualityCache = null; // Сбрасываем кеш качества при нахождении нового плеера
-                        return candidate;
-                    }
-                }
-
-                // Добавляем дочерние и соседние узлы в очередь для следующего уровня
-                if (current.child && !visited.has(current.child)) queue.push(current.child);
-                if (current.sibling && !visited.has(current.sibling)) queue.push(current.sibling);
-                // Иногда полезно идти вверх по дереву, но это может привести к зацикливанию или избыточному поиску
-                // if (current.return && !visited.has(current.return)) queue.push(current.return);
-            }
-            depth++;
-        }
-
-        logWarn('Quality', `Не удалось найти рабочий экземпляр плеера Twitch с методами getQualities/setQuality/getQuality после исчерпывающего поиска (глубина ${depth}). Возможно, структура плеера изменилась.`);
-        return null;
-    }
-
-    // 3. Функция определения "Source" качества (вынесена для кеширования)
-    function getSourceQuality(player) {
-        if (sourceQualityCache) {
-            logQualityDebug("Возвращаем кешированное качество 'Источник'.");
-            return sourceQualityCache;
-        }
-        if (!player || typeof player.getQualities !== 'function') {
-            logWarn('Quality', "Невозможно получить качества: плеер не найден или отсутствует метод getQualities.");
-            return null;
-        }
-        try {
-            const qualities = player.getQualities();
-            logQualityDebug("Доступные качества для определения 'Источник':", JSON.stringify(qualities));
-
-            if (!qualities || qualities.length === 0) {
-                logWarn('Quality', "Список доступных качеств пуст или не получен.");
-                return null;
-            }
-
-            // Ищем качество с group 'chunked' (это обычно Source)
-            let sourceQuality = qualities.find(q => q.group === 'chunked');
-
-            if (!sourceQuality && qualities.length > 0) {
-                 // Запасной вариант: ищем качество с максимальным битрейтом или разрешением
-                 // Создаем копию для сортировки, чтобы не изменять оригинал
-                 const sortedQualities = [...qualities].sort((a, b) =>
-                     (b.bitrate || 0) - (a.bitrate || 0) || (b.height || 0) - (a.height || 0)
-                 );
-                 sourceQuality = sortedQualities[0];
-                 logQualityDebug("Качество с group='chunked' не найдено. Используем качество с наивысшим битрейтом/разрешением как 'Source':", sourceQuality);
-             }
-
-            if (!sourceQuality) {
-                logWarn('Quality', "Не удалось идентифицировать качество 'Источник' (Source) ни по 'chunked', ни по битрейту.");
-                return null;
-            }
-
-            logQualityDebug("Качество 'Источник' определено:", sourceQuality);
-            sourceQualityCache = sourceQuality; // Кешируем найденное качество
-            return sourceQuality;
-
-        } catch (error) {
-            logError('Quality', "Ошибка при получении или обработке списка качеств:", error);
-            return null;
+            logError(context, 'Ошибка установки настроек качества в localStorage:', e);
         }
     }
 
 
-    // 4. Функция принудительной установки качества (используется для инициализации и мониторинга)
-    function forceSpecificQuality(player, targetQuality) {
-        if (!player || typeof player.setQuality !== 'function') {
-            logWarn('Quality', "Невозможно установить качество: плеер не найден или отсутствует метод setQuality.", player);
-            return false;
-        }
-        if (!targetQuality || !targetQuality.group) {
-             logWarn('Quality', "Невозможно установить качество: не указано целевое качество или отсутствует group.", targetQuality);
-             return false;
-        }
-
-        try {
-             logQuality(`Попытка установить качество '${targetQuality.name}' (group: ${targetQuality.group}) через API...`);
-             // Twitch API может ожидать group ID или сам объект качества. Пробуем group ID ('chunked').
-             // В некоторых версиях API требовался объект { group: 'chunked' }
-             // Экспериментально кажется, что передача group ID ('chunked') работает надежнее.
-             player.setQuality(targetQuality.group); // Или player.setQuality(targetQuality); если это перестанет работать
-
-             // Небольшая задержка для проверки результата (опционально, можно убрать для скорости)
-             /* setTimeout(() => {
-                 try {
-                     if (typeof player.getQuality === 'function') {
-                         const finalQuality = player.getQuality();
-                         if (finalQuality && finalQuality.group === targetQuality.group) {
-                             logQuality(`Качество успешно установлено на '${finalQuality.name}' (${finalQuality.group}).`);
-                         } else {
-                             logWarn('Quality', `Не удалось подтвердить установку качества. Текущее после попытки:`, finalQuality);
-                         }
-                     }
-                 } catch(e) { logWarn('Quality', "Ошибка проверки качества после установки:", e); }
-             }, 1000); */
-             return true; // Возвращаем успех попытки установки
-        } catch (error) {
-             logError('Quality', 'Критическая ошибка при вызове player.setQuality():', error);
-             return false; // Возвращаем неудачу
-        }
-    }
-
-     // 5. *** НОВАЯ ФУНКЦИЯ: Мониторинг и коррекция качества ***
-     function monitorAndForceQuality() {
-         logQualityMonitorDebug("Запуск проверки качества...");
-         const player = findPlayerInstance(); // Получаем (возможно кешированный) экземпляр плеера
-
-         if (!player) {
-             logQualityMonitorDebug("Плеер не найден. Остановка мониторинга (если был запущен).");
-             if (qualityMonitorIntervalId !== null) {
-                 clearInterval(qualityMonitorIntervalId);
-                 qualityMonitorIntervalId = null;
-                 playerInstanceCache = null; // Сброс кеша при остановке
-                 sourceQualityCache = null;
-                 logQualityMonitor("Мониторинг качества остановлен (плеер исчез).");
-             }
-             return;
-         }
-
-         // Убедимся, что у плеера есть метод getQuality
-         if (typeof player.getQuality !== 'function') {
-              logWarn('QualityMonitor', "Метод player.getQuality() отсутствует на текущем экземпляре плеера. Мониторинг невозможен.");
-              // Не останавливаем интервал, возможно, плеер переинициализируется
-              return;
-         }
-
-         const sourceQuality = getSourceQuality(player); // Получаем (возможно кешированное) качество Source
-         if (!sourceQuality) {
-             logWarn('QualityMonitor', "Не удалось определить качество 'Источник'. Коррекция невозможна.");
-             return;
-         }
-
-         try {
-             const currentQuality = player.getQuality();
-             logQualityMonitorDebug("Текущее качество:", JSON.stringify(currentQuality));
-
-             if (!currentQuality || !currentQuality.group) {
-                  logWarn('QualityMonitor', "Не удалось получить текущее качество или оно невалидно. Пропуск проверки.");
-                  return;
-             }
-
-             // Сравниваем group ID текущего качества и качества Source
-             if (currentQuality.group !== sourceQuality.group) {
-                 logQualityMonitor(`Обнаружено отклонение качества! Текущее: '${currentQuality.name}' (${currentQuality.group}), Ожидаемое: '${sourceQuality.name}' (${sourceQuality.group}). Попытка коррекции...`);
-                 forceSpecificQuality(player, sourceQuality);
-             } else {
-                 logQualityMonitorDebug("Текущее качество соответствует 'Источник'. Коррекция не требуется.");
-             }
-
-         } catch (error) {
-             logError('QualityMonitor', "Ошибка при получении или сравнении текущего качества:", error);
-         }
-     }
-
-    // --- КОД ДЛЯ ВНЕДРЕНИЯ В WORKER (без изменений) ---
-    function getWorkerInjectionCode() { /* ... код без изменений ... */
+    // --- КОД ДЛЯ ВНЕДРЕНИЯ В WORKER () ---
+    function getWorkerInjectionCode() { 
         return `
         // --- Worker AdBlock Code Start (v${SCRIPT_VERSION}) ---
         const SCRIPT_VERSION_WORKER = '${SCRIPT_VERSION}';
@@ -518,8 +252,8 @@
         `;
     }
 
-    // --- ПЕРЕХВАТЫ СЕТЕВЫХ ЗАПРОСОВ (ОСНОВНОЙ ПОТОК - без изменений) ---
-    async function fetchOverride(input, init) { /* ... код без изменений ... */
+    // --- ПЕРЕХВАТЫ СЕТЕВЫХ ЗАПРОСОВ (ОСНОВНОЙ ПОТОК - ) ---
+    async function fetchOverride(input, init) { 
         const context = 'MainFetch'; let requestUrl = ''; let method = 'GET';
         if (input instanceof Request) { requestUrl = input.url; method = input.method; } else { requestUrl = String(input); }
         if (init && init.method) { method = init.method; }
@@ -550,7 +284,7 @@
         }
     }
     const xhrRequestData = new WeakMap();
-    function xhrOpenOverride(method, url, async, user, password) { /* ... код без изменений ... */
+    function xhrOpenOverride(method, url, async, user, password) { 
         const context = 'MainXHR'; const urlString = String(url); const urlShort = urlString.split(/[?#]/)[0].split('/').pop() || urlString;
         xhrRequestData.set(this, { method: method, url: urlString, urlShort: urlShort });
         if (AD_URL_KEYWORDS_BLOCK.some(keyword => urlString.includes(keyword))) { if (LOG_NETWORK_BLOCKING) logWarn(context, `БЛОКИРОВКА XHR запроса к: ${urlShort}`); xhrRequestData.get(this).blocked = true; return; }
@@ -558,7 +292,7 @@
         if (LOG_GQL_INTERCEPTION && urlString.includes('/gql')) { logDebug(context, `Обнаружен GraphQL XHR запрос (до send): ${urlShort}`); }
         try { return originalXhrOpen.call(this, method, url, async, user, password); } catch (error) { logError(context, `Ошибка выполнения оригинального xhr.open для ${urlShort}:`, error); throw error; }
     }
-    function xhrSendOverride(data) { /* ... код без изменений ... */
+    function xhrSendOverride(data) { 
         const context = 'MainXHR'; const requestInfo = xhrRequestData.get(this);
         if (!requestInfo) { logWarn(context, "Не удалось получить данные запроса для XHR.send. Вызов оригинала."); try { return originalXhrSend.call(this, data); } catch(e) { logError(context, "Ошибка вызова оригинального xhr.send без requestInfo:", e); throw e;} }
         const { method, url, urlShort, blocked } = requestInfo;
@@ -574,8 +308,8 @@
         try { return originalXhrSend.call(this, data); } catch (error) { logError(context, `Ошибка выполнения оригинального xhr.send для ${urlShort}:`, error); throw error; }
     }
 
-    // --- ЛОГИКА ВНЕДРЕНИЯ В WORKER (без изменений) ---
-    function createObjectURLOverride(blob) { /* ... код без изменений ... */
+    // --- ЛОГИКА ВНЕДРЕНИЯ В WORKER () ---
+    function createObjectURLOverride(blob) { 
         const context = 'ObjectURL'; const blobType = blob?.type || 'unknown'; const blobSize = blob?.size || 0;
         if (INJECT_INTO_WORKERS && blob instanceof Blob && (blobType.includes('javascript') || blobType.includes('worker'))) {
             if (LOG_WORKER_INJECTION) logInfo(context, `Перехвачен createObjectURL для Blob типа: ${blobType}, размер: ${blobSize}`);
@@ -607,7 +341,7 @@
             return originalCreateObjectURL.call(unsafeWindow.URL, blob);
         }
     }
-    function addWorkerMessageListeners(workerInstance, label) { /* ... код без изменений ... */
+    function addWorkerMessageListeners(workerInstance, label) { 
         if (!workerInstance || typeof workerInstance.addEventListener !== 'function' || workerInstance._listenersAddedByAdblock) return;
          workerInstance._listenersAddedByAdblock = true; const context = 'WorkerMsg';
          if (DEBUG_LOGGING) { workerInstance.addEventListener('message', (e) => { logTrace(context, `Сообщение ОТ Worker'а (${label}):`, e.data); }); }
@@ -619,7 +353,7 @@
          workerInstance.addEventListener('message', adBlockListener); workerInstance._adBlockListener = adBlockListener;
          logDebug(context, `Слушатели сообщений AdBlock установлены для Worker'а (${label})`);
     }
-    function hookWorkerConstructor() { /* ... код без изменений ... */
+    function hookWorkerConstructor() { 
         if (!INJECT_INTO_WORKERS) { logWarn('WorkerHook', "Внедрение кода в Worker'ы отключено в настройках."); return; }
         if (workerHookAttempted) { logWarn('WorkerHook', "Повторная попытка перехвата конструктора Worker (уже перехвачен?)."); return; }
         if (typeof unsafeWindow.Worker === 'undefined') { logError('WorkerHook', 'Конструктор Worker (unsafeWindow.Worker) не определен. Невозможно перехватить.'); return; }
@@ -662,7 +396,7 @@
          logInfo('WorkerHook', "Конструктор Worker успешно перехвачен.");
     }
 
-    // --- УСТАНОВКА ХУКОВ (ОСНОВНОЙ ПОТОК - без изменений) ---
+    // --- УСТАНОВКА ХУКОВ (ОСНОВНОЙ ПОТОК - ) ---
     function installHooks() {
         if (hooksInstalledMain) { logWarn('Hooks', "Попытка повторной установки хуков."); return; }
         logDebug('Hooks', "Начало установки хуков в основном потоке...");
@@ -681,90 +415,10 @@
         logInfo('Hooks', "Установка перехватов в основном потоке завершена.");
     }
 
-    // --- НАБЛЮДАТЕЛЬ ЗА ПОЯВЛЕНИЕМ ПЛЕЕРА И ЗАПУСК МОНИТОРИНГА ---
-    function startPlayerObserver() {
-        if (!ENABLE_FORCE_SOURCE_QUALITY) {
-            logQuality("Принудительная установка качества отключена (ENABLE_FORCE_SOURCE_QUALITY = false). Мониторинг также не будет запущен.");
-            return;
-        }
-        if (qualityObserver) {
-            logQualityDebug("Наблюдатель MutationObserver за плеером уже запущен.");
-            return;
-        }
-        // Если мониторинг уже активен (например, после перезагрузки плеера без перезагрузки страницы), не запускаем новый Observer
-        if (qualityMonitorIntervalId !== null) {
-             logQualityMonitorDebug("Мониторинг качества уже активен, MutationObserver для инициализации не требуется.");
-             return;
-        }
 
-        const targetNode = document.body;
-        if (!targetNode) {
-            logError('QualityObserver', "Не удалось найти document.body для запуска MutationObserver.");
-            return;
-        }
 
-        const observerOptions = { childList: true, subtree: true };
-
-        const callback = function(mutationsList, observer) {
-            const playerSelectors = [
-                '.video-player__container', 'div[data-a-target="video-player-layout"]',
-                'div[data-a-target="video-player"]', '.video-player .persistent-player', '.video-player'
-            ];
-            let playerFound = false;
-            for (const selector of playerSelectors) {
-                 const element = document.querySelector(selector);
-                 if (element && element.querySelector('video')) {
-                     logQuality(`Обнаружен элемент плеера ('${selector}') содержащий <video> через MutationObserver.`);
-                     playerFound = true;
-                     break;
-                 }
-            }
-
-            if (playerFound) {
-                 logQuality("Плеер обнаружен MutationObserver'ом. Отключаем Observer.");
-                 observer.disconnect();
-                 qualityObserver = null;
-
-                 // 1. Найти экземпляр плеера
-                 const player = findPlayerInstance();
-                 if (player) {
-                    // 2. Определить качество Source
-                    const sourceQuality = getSourceQuality(player);
-                     if (sourceQuality) {
-                         // 3. Выполнить *первоначальную* установку качества Source
-                         logQuality("Запуск первоначальной установки качества 'Источник'...");
-                         forceSpecificQuality(player, sourceQuality);
-
-                         // 4. *** ЗАПУСК ПОСТОЯННОГО МОНИТОРИНГА (если включен) ***
-                         if (ENABLE_QUALITY_MONITORING) {
-                             if (qualityMonitorIntervalId === null) {
-                                 logQualityMonitor(`Запуск постоянного мониторинга качества с интервалом ${QUALITY_MONITOR_INTERVAL_MS}ms.`);
-                                 // Запускаем первую проверку чуть быстрее, потом по интервалу
-                                 setTimeout(monitorAndForceQuality, 500);
-                                 qualityMonitorIntervalId = setInterval(monitorAndForceQuality, QUALITY_MONITOR_INTERVAL_MS);
-                             } else {
-                                 logQualityMonitorDebug("Мониторинг качества уже был активен.");
-                             }
-                         } else {
-                              logQualityMonitor("Постоянный мониторинг качества отключен в настройках.");
-                         }
-                     } else {
-                         logWarn('QualityObserver', "Не удалось определить качество 'Источник' после обнаружения плеера. Мониторинг не запущен.");
-                     }
-                 } else {
-                     logWarn('QualityObserver', "Плеер обнаружен в DOM, но не удалось найти его React-экземпляр для установки качества/мониторинга.");
-                     // Попытаться снова через некоторое время? Или положиться на будущие запуски monitorAndForceQuality, если интервал вдруг запустится.
-                 }
-             }
-        };
-
-        qualityObserver = new MutationObserver(callback);
-        qualityObserver.observe(targetNode, observerOptions);
-        logQuality("MutationObserver запущен для ожидания плеера.");
-    }
-
-    // --- ПРОВЕРКА ОБНОВЛЕНИЙ (без изменений) ---
-    function checkForUpdates() { /* ... код без изменений ... */
+    // --- ПРОВЕРКА ОБНОВЛЕНИЙ () ---
+    function checkForUpdates() { 
         if (!CHECK_FOR_UPDATES) return;
         const lastCheck = GM_getValue('TTV_AdBlock_LastUpdateCheck', 0);
         const now = Date.now();
@@ -801,7 +455,7 @@
             timeout: 15000
         });
     }
-    function compareVersions(v1, v2) { /* ... код без изменений ... */
+    function compareVersions(v1, v2) { 
         const parts1 = v1.split('.').map(Number);
         const parts2 = v2.split('.').map(Number);
         const len = Math.max(parts1.length, parts2.length);
@@ -815,7 +469,7 @@
     }
 
     // --- ИНИЦИАЛИЗАЦИЯ СКРИПТА ---
-    logInfo('Init', `--- Начало инициализации Twitch Adblock (v${SCRIPT_VERSION}) ---`);
+    logInfo('Init', `--- Начало инициализации Twitch Adblock (v${SCRIPT_VERSION}, Качество V2) ---`);
 
     if (OPT_SHOW_AD_BANNER) {
         try {
@@ -834,24 +488,35 @@
         } catch (e) { logError('Init', "Не удалось добавить стили для баннера:", e); }
     }
 
+    // Устанавливаем хуки как можно раньше
     installHooks();
 
-    if (ENABLE_FORCE_SOURCE_QUALITY) {
-         setQualitySettingsLocalStorage();
+    // Устанавливаем качество через localStorage СРАЗУ
+    setQualitySettings();
+
+
+    try {
+        unsafeWindow.addEventListener('popstate', () => {
+            logInfo('Navigation', "Обнаружено событие 'popstate'. Повторная установка качества через localStorage.");
+            setQualitySettings();
+        });
+    } catch (e) {
+        logError('Navigation', "Не удалось добавить слушатель 'popstate':", e);
     }
 
+
     function onDomReady() {
-         startPlayerObserver(); // Запускает поиск плеера и, если найдет, инициализирует качество и мониторинг
          checkForUpdates();
     }
 
+    // Запускаем onDomReady, когда DOM будет готов
     if (document.readyState === 'loading') {
         window.addEventListener('DOMContentLoaded', onDomReady, { once: true });
     } else {
         onDomReady();
     }
 
-    logInfo('Init', `--- Twitch Adblock (v${SCRIPT_VERSION}) Инициализирован УСПЕШНО ---`);
+    logInfo('Init', `--- Twitch Adblock (v${SCRIPT_VERSION}, Качество V2) Инициализирован УСПЕШНО ---`);
     if (DEBUG_LOGGING) { logWarn('Init', "РЕЖИМ ОТЛАДКИ АКТИВЕН (DEBUG_LOGGING = true). В консоли будет много сообщений."); }
 
 })();
