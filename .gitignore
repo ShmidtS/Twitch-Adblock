@@ -1,0 +1,128 @@
+### Python ###
+# Байт-код, кэш и артефакты компиляции
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.egg
+build/
+dist/
+__pypackages__/
+
+# Виртуальные окружения
+.venv
+venv/
+.env/
+env/
+ENV/
+env.bak/
+venv.bak
+ta-lib-python-master/
+
+# Тестирование и покрытие кода
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.pytest/
+tox.ini
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+### Environment ###
+# Файлы с секретами и настройками окружения
+.env
+.env.local
+.env.*.local
+.secrets
+.envrc
+.vault-password
+
+### Логи и дампы ###
+*.log
+*.log.*
+*.bak
+*.dump
+*.pot
+*.sqlite
+*.db
+*.sql
+*.session
+logs/
+
+### IDE ###
+# VS Code
+.vscode/
+.vs/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+
+# PyCharm/IntelliJ
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-workspace
+
+### Системные файлы ###
+# Windows
+Thumbs.db
+[Dd]esktop.ini
+ehthumbs.db
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+
+# Linux
+.fuse_hidden*
+.directory
+.nfs*
+
+### Библиотеки и зависимости ###
+# Poetry
+poetry.lock
+
+# Pipenv
+Pipfile.lock
+
+# PyInstaller
+*.spec
+
+### Документация ###
+docs/_build/
+docs/source/_static/
+docs/source/_templates/
+
+### Прочее ###
+# Временные файлы редакторов
+*~
+*.swp
+*.swo
+*.swn
+*.swm
+*.swo
+
+# Файлы проекта
+.project
+.pydevproject
+upgrade.py
+.db-journal
+crypto_data.db-journal
+crypto_data.db-wal
+crypto_data.db-shm
+crypto_data.lmdb/data.mdb
+crypto_data.lmdb/lock.mdb
+crypto_analyzer_data.lmdb/
