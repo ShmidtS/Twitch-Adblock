@@ -1,4 +1,4 @@
-# Twitch Adblock Fix & Force Source Quality (with Monitoring)
+# Twitch Adblock Fix & Force Source Quality
 
 
 **(RU)** Скрипт для блокировки рекламы на Twitch и автоматической установки максимального качества ("Источник").
@@ -39,7 +39,7 @@
 You can fine-tune the script's behavior via Tampermonkey's storage settings:
 
 1.  Open the Tampermonkey Dashboard.
-2.  Click on the script name: `Twitch Adblock Fix & Force Source Quality (with Monitoring)`.
+2.  Click on the script name: `Twitch Adblock Fix & Force Source Quality`.
 3.  Go to the **Storage** tab.
 4.  **Important:** After changing any values, you **must save** them (often automatic, but check your Tampermonkey version) and **refresh** any open Twitch pages for the changes to take effect.
 
@@ -92,7 +92,7 @@ MIT License
 Вы можете точно настроить поведение скрипта через параметры хранилища Tampermonkey:
 
 1.  Откройте Панель управления Tampermonkey.
-2.  Нажмите на имя скрипта: `Twitch Adblock Fix & Force Source Quality (with Monitoring)`.
+2.  Нажмите на имя скрипта: `Twitch Adblock Fix & Force Source Quality`.
 3.  Перейдите на вкладку **Хранилище** (Storage).
 4.  **Важно:** После изменения любых значений вы **должны сохранить** их (часто происходит автоматически, но проверьте вашу версию Tampermonkey) и **обновить** все открытые страницы Twitch, чтобы изменения вступили в силу.
 
