@@ -35,7 +35,6 @@
     const LOG_NETWORK_BLOCKING = GM_getValue('TTV_AdBlock_LogNetBlock', true);
     const LOG_GQL_INTERCEPTION = GM_getValue('TTV_AdBlock_LogGQLIntercept', false);
     const LOG_WORKER_INJECTION = GM_getValue('TTV_AdBlock_LogWorkerInject', true);
-    const OPT_SHOW_AD_BANNER = GM_getValue('TTV_AdBlock_ShowBanner', true);
     const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true);
     const ENABLE_PERIODIC_QUALITY_CHECK = GM_getValue('TTV_AdBlock_PeriodicQualityCheck', true);
     const PERIODIC_QUALITY_CHECK_INTERVAL_MS = GM_getValue('TTV_AdBlock_QualityCheckInterval', 1000);
@@ -88,10 +87,6 @@
 
 
     logDebug('MAIN', `Скрипт запускается. Версия: ${SCRIPT_VERSION}. Worker Inject: ${INJECT_INTO_WORKERS}. Periodic Quality Check: ${ENABLE_PERIODIC_QUALITY_CHECK}. Auto Reload: ${ENABLE_AUTO_RELOAD}.`);
-
-    // --- УПРАВЛЕНИЕ БАННЕРОМ ---
-    function getAdDiv() { if (!OPT_SHOW_AD_BANNER) return null; if (adBannerElement && document.body.contains(adBannerElement)) { return adBannerElement; } adBannerElement = document.querySelector('.tch-adblock-banner'); if (adBannerElement) { return adBannerElement; } try { const playerRootDiv = document.querySelector('.video-player__container') || document.querySelector('.video-player .persistent-player') || document.querySelector('div[data-a-target="video-player-layout"]') || document.querySelector('div[data-a-target="video-player"]') || document.querySelector('.video-player') || document.body; if (!playerRootDiv || !(playerRootDiv instanceof Node)) { logWarn("Banner", "Не удалось найти валидный контейнер плеера для баннера."); return null; } const div = document.createElement('div'); div.className = 'tch-adblock-banner'; const currentPosition = window.getComputedStyle(playerRootDiv).position; if (currentPosition === 'static') { playerRootDiv.style.position = 'relative'; } playerRootDiv.appendChild(div); adBannerElement = div; logDebug("Banner", "Баннер успешно создан и добавлен."); return adBannerElement; } catch (e) { logError("Banner", "Ошибка создания баннера:", e); adBannerElement = null; return null; } }
-    function showAdBanner(isMidroll) { if (!OPT_SHOW_AD_BANNER) return; const adDiv = getAdDiv(); if (adDiv) { requestAnimationFrame(() => { try { if (adDiv._fadeOutTimeout) clearTimeout(adDiv._fadeOutTimeout); if (adDiv._hideTimeout) clearTimeout(adDiv._hideTimeout); const bannerText = `Реклама удалена v${SCRIPT_VERSION.substring(0, 6)}` + (isMidroll ? ' (midroll)' : ''); adDiv.textContent = bannerText; adDiv.style.display = 'block'; adDiv.style.opacity = '1'; logDebug("Banner", "Баннер показан. Текст:", bannerText); let fadeOutTimeout = setTimeout(() => { if (adDiv) { adDiv.style.opacity = '0'; let hideTimeout = setTimeout(() => { if (adDiv) adDiv.style.display = 'none'; }, 600); adDiv._hideTimeout = hideTimeout; } }, 5000); adDiv._fadeOutTimeout = fadeOutTimeout; } catch(e) { logError("Banner", "Ошибка отображения баннера:", e); } }); } else { logWarn("Banner", "Не удалось получить/создать баннер для показа."); } }
 
     // --- ЛОГИКА УСТАНОВКИ КАЧЕСТВА ---
     function setQualitySettings() { const context = 'QualityV2Enhanced'; try { const currentValue = unsafeWindow.localStorage.getItem(LS_KEY_QUALITY); const targetValue = '{"default":"chunked"}'; // 'chunked' соответствует качеству "Источник"
@@ -542,13 +537,7 @@
             else if (messageData?.type === 'ADBLOCK_ADS_REMOVED') {
 
                 if (LOG_M3U8_CLEANING) logDebug('WorkerHook', `ПОЛУЧЕНО СООБЩЕНИЕ ADBLOCK_ADS_REMOVED от Worker'а (${label}). Midroll: ${messageData.isMidroll}. URL: ${messageData.url}`);
-                if (OPT_SHOW_AD_BANNER) {
-                    showAdBanner(messageData.isMidroll);
-                }
             }
-            // else { // Removed TRACE logging for all other messages
-            //     if (DEBUG_LOGGING) logTrace(context, `Сообщение ОТ Worker'а (${label}):`, messageData);
-            // }
         };
         workerInstance.addEventListener('message', adBlockListener);
         workerInstance._adBlockListener = adBlockListener;
@@ -906,10 +895,6 @@
 
     logDebug('Init', `--- Начало инициализации Twitch Adblock (v${SCRIPT_VERSION}) ---`);
 
-    if (OPT_SHOW_AD_BANNER) {
-        try { GM_addStyle(`.tch-adblock-banner { position: absolute; top: 10px; left: 10px; z-index: 2000; pointer-events: none; display: none; color: white; background-color: rgba(0, 0, 0, 0.8); padding: 6px 12px; font-size: 13px; border-radius: 5px; font-family: Roobert, Inter, "Helvetica Neue", Helvetica, Arial, sans-serif; text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.6); text-align: center; opacity: 0; transition: opacity 0.5s ease-in-out; }`); logTrace('Init', "Стили для баннера добавлены."); }
-        catch (e) { logError('Init', "Не удалось добавить стили для баннера:", e); }
-    }
 
     installHooks();
     setQualitySettings();
