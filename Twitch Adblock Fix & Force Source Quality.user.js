@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Fix & Force Source Quality
-// @namespace    TwitchAdblockOptimizedWorkerM3U8Proxy_ForceSource
-// @version      18.3.1
+// @namespace    TwitchAdblockOptimizedWorkerM3U8Proxy_ForceSource_TriggerBased
+// @version      18.3.2
 // @description  Блокировка рекламы Twitch + Качество "Источник" + Авто-перезагрузка плеера при ошибках/зависании.
 // @author       ShmidtS & AI
 // @match        https://www.twitch.tv/*
@@ -28,53 +28,49 @@
     'use strict';
 
     // --- НАСТРОЙКИ СКРИПТА (Конфигурируемые через Tampermonkey/Greasemonkey меню) ---
-    const SCRIPT_VERSION = '18.3.1';
+    const SCRIPT_VERSION = '18.3.2';
 
     // Настройки отображения ошибок и логирования
-    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrors', true);
-    const DEBUG_LOGGING = GM_getValue('TTV_AdBlock_DebugLog', false);
+    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrors', false);
+    const DEBUG_LOGGING = GM_getValue('TTV_AdBlock_DebugLog', false); //
     const LOG_M3U8_CLEANING = GM_getValue('TTV_AdBlock_LogM3U8Clean', false);
-    const LOG_NETWORK_BLOCKING = GM_getValue('TTV_AdBlock_LogNetBlock', false); // Defaulted to false to reduce noise
+    const LOG_NETWORK_BLOCKING = GM_getValue('TTV_AdBlock_LogNetBlock', false);
     const LOG_GQL_INTERCEPTION = GM_getValue('TTV_AdBlock_LogGQLIntercept', false);
-    const LOG_WORKER_INJECTION = GM_getValue('TTV_AdBlock_LogWorkerInject', true); // Keep true for essential injection logs
+    const LOG_WORKER_INJECTION = GM_getValue('TTV_AdBlock_LogWorkerInject', false); //
     const LOG_PLAYER_MONITOR = GM_getValue('TTV_AdBlock_LogPlayerMon', false);
     const LOG_QUALITY_SETTER = GM_getValue('TTV_AdBlock_LogQualitySet', false);
 
     // Основные переключатели функций
     const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true);
-    const ENABLE_PERIODIC_QUALITY_CHECK = GM_getValue('TTV_AdBlock_PeriodicQualityCheck', true);
-    const PERIODIC_QUALITY_CHECK_INTERVAL_MS = GM_getValue('TTV_AdBlock_QualityCheckInterval', 5000);
 
     // Настройки для авто-перезагрузки плеера
     const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
     const RELOAD_ON_ERROR_CODES = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', [2, 3, 4, 1000, 2000, 3000, 4000, 5000]);
-    const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 3000);
+    const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 5000);
     const RELOAD_BUFFERING_THRESHOLD_MS = GM_getValue('TTV_AdBlock_BufferingThresholdMs', 15000);
     const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 15000);
 
     // --- КОНСТАНТЫ СКРИПТА ---
-    const LOG_PREFIX = `[TTV ADBLOCK v${SCRIPT_VERSION}]`;
-    const LS_KEY_QUALITY = 'video-quality';
-    const TARGET_QUALITY_VALUE = '{"default":"chunked"}'; // "Source" quality
-    const GQL_OPERATION_ACCESS_TOKEN = 'PlaybackAccessToken';
-    const AD_SIGNIFIER_DATERANGE_ATTR = 'twitch-stitched-ad';
+    const LOG_PREFIX = `[TTV ADBLOCK v${SCRIPT_VERSION}]`; // Префикс для логов
+    const LS_KEY_QUALITY = 'video-quality'; // Ключ в localStorage для настроек качества
+    const TARGET_QUALITY_VALUE = '{"default":"chunked"}'; // Значение для качества "Источник" ("Source")
+    const GQL_OPERATION_ACCESS_TOKEN = 'PlaybackAccessToken'; // Имя GraphQL операции для получения токена доступа к плееру
+    const AD_SIGNIFIER_DATERANGE_ATTR = 'twitch-stitched-ad'; // Атрибут в M3U8, указывающий на сшитую рекламу
     const AD_SIGNIFIERS_GENERAL = ['#EXT-X-DATERANGE', '#EXT-X-CUE-OUT', '#EXT-X-SCTE35'];
     const AD_DATERANGE_ATTRIBUTE_KEYWORDS = ['ADVERTISING', 'ADVERTISEMENT', 'PROMOTIONAL', 'SPONSORED'];
     const AD_URL_KEYWORDS_BLOCK = [
         'amazon-adsystem.com', 'doubleclick.net', 'googleadservices.com', 'scorecardresearch.com',
         'imasdk.googleapis.com', '/ads/', '/advertisement/', 'omnitagjs', 'omnitag',
-        'ttvl-o.cloudfront.net',
-        'd2v02itv0y9u9t.cloudfront.net', // Seen in logs, related to ads/tracking
-        'edge.ads.twitch.tv',
-        '.google.com/pagead/conversion/',
-        '.youtube.com/api/stats/ads',
-        // '.cloudfront.net/prod/vod-manifests/', // Potential VOD ads - TEST CAREFULLY IF UNCOMMENTING
-        // 'video-edge-.*\.abs\.hls\.ttvnw\.net/v1/segment/.*\.ts', // BLOCKS .ts segments - EXTREMELY DANGEROUS, CAN BREAK PLAYER - KEEP COMMENTED
+        'ttvl-o.cloudfront.net', // Рекламный CDN Twitch
+        'd2v02itv0y9u9t.cloudfront.net', // Замечен в логах, связан с рекламой/трекингом
+        'edge.ads.twitch.tv', // Прямой домен рекламы Twitch
+        '.google.com/pagead/conversion/', // Трекинг конверсий Google Ads
+        '.youtube.com/api/stats/ads', // Статистика рекламы YouTube (может использоваться Twitch)
+        '.cloudfront.net/prod/vod-manifests/', // Потенциальная реклама в VOD
         'googletagservices.com', 'pubmatic.com', 'rubiconproject.com', 'adsrvr.org',
         'adnxs.com', 'taboola.com', 'outbrain.com', 'ads.yieldmo.com', 'ads.adaptv.advertising.com',
-        'twitch.tv/api/ads' // Hypothetical ad API endpoint
+        'twitch.tv/api/ads' // Гипотетическая точка API рекламы
     ];
-    // Set for faster URL checks (case-insensitive)
     const blockedUrlKeywordsSet = new Set(AD_URL_KEYWORDS_BLOCK.map(keyword => keyword.toLowerCase()));
     const PLAYER_SELECTOR = 'video[playsinline]';
 
@@ -82,7 +78,6 @@
     let hooksInstalledMain = false;
     let workerHookAttempted = false;
     const hookedWorkers = new Set();
-    let qualitySetIntervalId = null;
     let playerMonitorIntervalId = null;
     let videoElement = null;
     let lastVideoTimeUpdateTimestamp = 0;
@@ -106,51 +101,56 @@
     function logError(source, message, ...args) { if (SHOW_ERRORS_CONSOLE) console.error(`${LOG_PREFIX} [${source}] ERROR:`, message, ...args); }
     function logWarn(source, message, ...args) { console.warn(`${LOG_PREFIX} [${source}] WARN:`, message, ...args); }
     function logDebug(source, message, ...args) { if (DEBUG_LOGGING) console.log(`${LOG_PREFIX} [${source}] DEBUG:`, message, ...args); }
-    // Reduced trace logging, only shown if specific flags OR general DEBUG_LOGGING is on
     function logTrace(source, message, ...args) {
         const lowerSource = source.toLowerCase();
+        // Логирование включается соответствующим флагом ИЛИ общим DEBUG_LOGGING
+        // Исключаем частые логи монитора из DEBUG для чистоты, если не включен LOG_PLAYER_MONITOR
         if ( (lowerSource.includes('m3u8') && LOG_M3U8_CLEANING) ||
-            (lowerSource.includes('netblock') && LOG_NETWORK_BLOCKING) || // Only logs if specifically enabled
+            (lowerSource.includes('netblock') && LOG_NETWORK_BLOCKING) ||
             (lowerSource.includes('gql') && LOG_GQL_INTERCEPTION) ||
-            (lowerSource.includes('workerinject') && LOG_WORKER_INJECTION) || // Keep essential worker injection trace
+            (lowerSource.includes('workerinject') && LOG_WORKER_INJECTION) ||
             (lowerSource.includes('playermon') && LOG_PLAYER_MONITOR) ||
             (lowerSource.includes('qualityset') && LOG_QUALITY_SETTER) ||
-            (DEBUG_LOGGING && !lowerSource.includes('playermon') && !lowerSource.includes('qualityset')) // General DEBUG shows most traces except frequent monitors
+            (DEBUG_LOGGING && !(lowerSource.includes('playermon') && !LOG_PLAYER_MONITOR)) // Общий DEBUG показывает всё, кроме PlayerMon, если он выключен
            ) {
             console.debug(`${LOG_PREFIX} [${source}] TRACE:`, message, ...args);
         }
     }
 
-    logDebug('Main', `Запуск скрипта. Версия: ${SCRIPT_VERSION}. Worker Inject: ${INJECT_INTO_WORKERS}. Quality Check: ${ENABLE_PERIODIC_QUALITY_CHECK}. Auto Reload: ${ENABLE_AUTO_RELOAD}.`);
+    logDebug('Main', `Запуск скрипта. Версия: ${SCRIPT_VERSION}. Worker Inject: ${INJECT_INTO_WORKERS}. Quality Check: Trigger-Based. Auto Reload: ${ENABLE_AUTO_RELOAD}.`);
 
-    // --- ЛОГИКА УСТАНОВКИ КАЧЕСТВА "ИСТОЧНИК" ---
+    // --- ЛОГИКА УСТАНОВКИ КАЧЕСТВА "ИСТОЧНИК" (ПО ТРИГГЕРАМ) ---
+    /**
+     * Проверяет и устанавливает качество видео "Источник" в localStorage.
+     * Использует кэширование. Вызывается по триггерам (инициализация, навигация, смена видимости, загрузка метаданных плеера).
+     * @param {boolean} forceCheck - Если true, принудительно читает значение из localStorage, игнорируя кэш.
+     */
     function setQualitySettings(forceCheck = false) {
         const context = 'QualitySet';
         try {
             let currentValue = cachedQualityValue;
             if (currentValue === null || forceCheck) {
                 currentValue = originalLocalStorageGetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY);
-                cachedQualityValue = currentValue;
-                logTrace(context, `Прочитано из localStorage: ${currentValue}.`);
+                cachedQualityValue = currentValue; // Обновляем кэш
+                logTrace(context, `Прочитано из localStorage: ${currentValue}. (Force Check: ${forceCheck})`);
             } else {
                 logTrace(context, `Используем кэш: ${currentValue}`);
             }
 
             if (currentValue !== TARGET_QUALITY_VALUE) {
                 originalLocalStorageSetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY, TARGET_QUALITY_VALUE);
-                cachedQualityValue = TARGET_QUALITY_VALUE;
+                cachedQualityValue = TARGET_QUALITY_VALUE; // Обновляем кэш после успешной установки
                 logDebug(context, `Установлено качество 'Источник' ('${TARGET_QUALITY_VALUE}') через localStorage.`);
-                // Player interaction removed for stability, relying on Twitch reading localStorage.
             } else {
                 logTrace(context, `Качество 'Источник' уже установлено.`);
             }
         } catch (e) {
             logError(context, 'Ошибка установки/проверки настроек качества:', e);
-            cachedQualityValue = null; // Reset cache on error
+            cachedQualityValue = null; // Сбрасываем кэш при ошибке
         }
     }
 
-    // Hook localStorage.setItem to keep cache consistent
+    // Перехватываем localStorage.setItem для поддержания актуальности кэша `cachedQualityValue`.
     try {
         unsafeWindow.localStorage.setItem = function(key, value) {
             if (key === LS_KEY_QUALITY) {
@@ -161,11 +161,11 @@
                 return originalLocalStorageSetItem.apply(unsafeWindow.localStorage, arguments);
             } catch (e) {
                 logError('QualitySet:LocalStorageHook', `Ошибка вызова оригинального localStorage.setItem для ключа '${key}':`, e);
-                if (key === LS_KEY_QUALITY) cachedQualityValue = null; // Invalidate cache if set failed
+                if (key === LS_KEY_QUALITY) cachedQualityValue = null;
                 throw e;
             }
         };
-        // Initialize cache
+        // Инициализируем кэш текущим значением из localStorage при запуске скрипта
         cachedQualityValue = originalLocalStorageGetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY);
         logTrace('QualitySet:LocalStorageHook', `Начальное значение качества кэшировано: ${cachedQualityValue}`);
     } catch(e) {
@@ -173,9 +173,13 @@
         if(originalLocalStorageSetItem) unsafeWindow.localStorage.setItem = originalLocalStorageSetItem;
     }
 
-
     // --- КОД ДЛЯ ВНЕДРЕНИЯ В WEB WORKER (Оптимизированное логирование) ---
+    /**
+     * Генерирует код, который будет внедрен в Web Worker'ы Twitch.
+     * @returns {string} Код для внедрения.
+     */
     function getWorkerInjectionCode() {
+        // Используем шаблонные строки для вставки актуальных настроек и констант
         return `
 // --- Worker AdBlock Code Start (v${SCRIPT_VERSION}) ---
 const SCRIPT_VERSION_WORKER = '${SCRIPT_VERSION}';
@@ -186,7 +190,7 @@ const AD_SIGNIFIERS_GENERAL_WORKER = ${JSON.stringify(AD_SIGNIFIERS_GENERAL)};
 const AD_DATERANGE_ATTRIBUTE_KEYWORDS_WORKER = ${JSON.stringify(AD_DATERANGE_ATTRIBUTE_KEYWORDS)}.map(kw => kw.toUpperCase());
 const LOG_PREFIX_WORKER_BASE = '[TTV ADBLOCK v' + SCRIPT_VERSION_WORKER + '] [WORKER]';
 
-// --- Worker Logging ---
+// --- Функции логирования внутри Worker'а ---
 function workerLogError(message, ...args) { console.error(LOG_PREFIX_WORKER_BASE + ' ERROR:', message, ...args); }
 function workerLogWarn(message, ...args) { console.warn(LOG_PREFIX_WORKER_BASE + ' WARN:', message, ...args); }
 function workerLogDebug(message, ...args) { if (DEBUG_LOGGING_WORKER) console.log(LOG_PREFIX_WORKER_BASE + ' DEBUG:', message, ...args); }
@@ -194,6 +198,12 @@ function workerLogTrace(source, message, ...args) { if (LOG_M3U8_CLEANING_WORKER
 
 workerLogDebug("--- Worker AdBlock Code Initializing ---");
 
+/**
+ * Парсит и очищает M3U8 плейлист от рекламных сегментов.
+ * @param {string} m3u8Text - Текст M3U8 плейлиста.
+ * @param {string} [url="N/A"] - URL плейлиста (для логирования).
+ * @returns {{cleanedText: string, adsFound: boolean, linesRemoved: number}} - Объект с очищенным текстом, флагом нахождения рекламы и количеством удаленных строк.
+ */
 function parseAndCleanM3U8_WORKER(m3u8Text, url = "N/A") {
     const context = 'M3U8 Clean';
     const urlShort = url.split(/[?#]/)[0].split('/').pop() || url;
@@ -203,8 +213,9 @@ function parseAndCleanM3U8_WORKER(m3u8Text, url = "N/A") {
         return { cleanedText: m3u8Text, adsFound: false, linesRemoved: 0 };
     }
 
+    // --- Оптимизация: Быстрая проверка на наличие потенциальных маркеров рекламы ---
     let potentialAdContent = false;
-    const upperM3U8Text = m3u8Text.toUpperCase(); // Check in upper case once
+    const upperM3U8Text = m3u8Text.toUpperCase();
     if (m3u8Text.includes(AD_SIGNIFIER_DATERANGE_ATTR_WORKER) ||
         AD_SIGNIFIERS_GENERAL_WORKER.some(sig => m3u8Text.includes(sig)) ||
         AD_DATERANGE_ATTRIBUTE_KEYWORDS_WORKER.some(kw => upperM3U8Text.includes(kw))) {
@@ -212,12 +223,12 @@ function parseAndCleanM3U8_WORKER(m3u8Text, url = "N/A") {
     }
 
     if (!potentialAdContent) {
-        // workerLogTrace(context, \`(\${urlShort}): No potential ad markers found. Skipping detailed parse.\`); // Too verbose
         return { cleanedText: m3u8Text, adsFound: false, linesRemoved: 0 };
     }
 
     workerLogTrace(context, \`(\${urlShort}): Potential ad markers found. Starting detailed parse...\`);
 
+    // --- Детальный парсинг и очистка ---
     const lines = m3u8Text.split('\\n');
     const cleanLines = [];
     let isAdSection = false;
@@ -258,12 +269,12 @@ function parseAndCleanM3U8_WORKER(m3u8Text, url = "N/A") {
                  workerLogWarn(\`[\${context}] (\${urlShort}): Found \${removalReason} [Line \${i+1}]. Removing.\`);
             }
         } else if (isAdSection) {
-            shouldRemoveLine = true; // Remove content within ad section
+            shouldRemoveLine = true;
         }
 
         if (shouldRemoveLine) {
             linesRemoved++;
-            if (isAdMarkerLine && LOG_M3U8_CLEANING_WORKER) { // Only trace marker removal if flag is on
+            if (isAdMarkerLine && LOG_M3U8_CLEANING_WORKER) {
                 workerLogTrace(context, \`(\${urlShort}): Removing Ad Marker [Line \${i+1}, Reason: \${removalReason}]: \${trimmedLine.substring(0, 60)}...\`);
             }
         } else {
@@ -284,12 +295,17 @@ function parseAndCleanM3U8_WORKER(m3u8Text, url = "N/A") {
     return { cleanedText: cleanedText, adsFound: adsFound, linesRemoved: linesRemoved };
 }
 
+/**
+ * Устанавливает хук на функцию fetch внутри Worker'а.
+ * @returns {boolean} - True, если хук успешно установлен, иначе false.
+ */
 function installWorkerFetchHook() {
     const context = 'WorkerInject:FetchHook';
     if (typeof self.fetch !== 'function') { workerLogWarn(\`[\${context}] Fetch API not available.\`); return false; }
     if (self.fetch.hooked_by_adblock) { workerLogDebug(\`[\${context}] Fetch already hooked.\`); return true; }
 
     const workerRealFetch = self.fetch;
+
     self.fetch = async (input, init) => {
         let requestUrl = (input instanceof Request) ? input.url : String(input);
         let method = ((input instanceof Request) ? input.method : (init?.method || 'GET')).toUpperCase();
@@ -302,6 +318,7 @@ function installWorkerFetchHook() {
             workerLogTrace(fetchContext, \`Intercepted M3U8/Usher GET: \${urlShort}\`);
             try {
                 const originalResponse = await workerRealFetch(input, init);
+
                 if (!originalResponse.ok) {
                      workerLogWarn(\`[\${fetchContext}] (\${urlShort}) Original response NOT OK (Status: \${originalResponse.status}). Passing through.\`);
                      return originalResponse;
@@ -324,7 +341,6 @@ function installWorkerFetchHook() {
                          workerLogDebug(\`[\${fetchContext}] (\${urlShort}) Returning CLEANED M3U8. Removed: \${linesRemoved} lines.\`);
                          return new Response(cleanedText, { status: originalResponse.status, statusText: originalResponse.statusText, headers: newHeaders });
                      } else {
-                          // workerLogTrace(fetchContext, \`(\${urlShort}) No ads found, returning original M3U8.\`); // Too verbose
                           return originalResponse;
                      }
                 } else {
@@ -336,7 +352,6 @@ function installWorkerFetchHook() {
                 return new Response(\`AdBlock Error: \${error.message}\`, { status: 500, statusText: "AdBlock Internal Error" });
             }
         } else {
-             // workerLogTrace(fetchContext, \`Passing through request: (\${method}) \${urlShort}\`); // Too verbose
              return workerRealFetch(input, init);
         }
     };
@@ -345,6 +360,7 @@ function installWorkerFetchHook() {
     return true;
 }
 
+// Слушатель сообщений от основного потока (для eval-инъекции как fallback)
 self.addEventListener('message', function(e) {
     if (e.data?.type === 'EVAL_ADBLOCK_CODE' && e.data.code) {
         workerLogDebug("[WorkerInject:EvalMsg] Received EVAL_ADBLOCK_CODE. Executing...");
@@ -362,7 +378,7 @@ self.addEventListener('message', function(e) {
     }
  });
 
-// --- Initial hook install attempt ---
+// --- Первоначальная попытка установки хука при загрузке Worker'а ---
 if (installWorkerFetchHook()) {
     try {
         workerLogDebug("[WorkerInject:Init] Sending initial ADBLOCK_WORKER_HOOKS_READY...");
@@ -376,20 +392,23 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
     }
 
     // --- ПЕРЕХВАТЫ СЕТЕВЫХ ЗАПРОСОВ (ОСНОВНОЙ ПОТОК) ---
+
+    /**
+     * Переопределенная функция fetch для блокировки рекламных запросов и логирования GQL.
+     */
     async function fetchOverride(input, init) {
         const context = 'NetBlock:Fetch';
         let requestUrl = (input instanceof Request) ? input.url : String(input);
         let method = ((input instanceof Request) ? input.method : (init?.method || 'GET')).toUpperCase();
         const lowerCaseUrl = requestUrl.toLowerCase();
 
-        // Check against blocklist (optimized check)
-        if (AD_URL_KEYWORDS_BLOCK.some(keyword => lowerCaseUrl.includes(keyword.toLowerCase()))) { // Keep includes check for partial matches
-            if (blockedUrlKeywordsSet.has(lowerCaseUrl.split('/')[2])) { // Check domain with Set if needed
-                logTrace(context, `Blocking Fetch (${method}) to: ${requestUrl}`); // Only trace if LOG_NETWORK_BLOCKING is true
-                return Promise.resolve(new Response(null, { status: 204, statusText: "No Content (Blocked)" }));
-            }
+        // --- Оптимизированная проверка на блокировку ---
+        let potentiallyBlocked = AD_URL_KEYWORDS_BLOCK.some(keyword => lowerCaseUrl.includes(keyword.toLowerCase()));
+        if (potentiallyBlocked && blockedUrlKeywordsSet.has(lowerCaseUrl.split('/')[2])) {
+            if (LOG_NETWORK_BLOCKING) logTrace(context, `Blocking Fetch (${method}) to: ${requestUrl}`);
+            return Promise.resolve(new Response(null, { status: 204, statusText: "No Content (Blocked by AdBlocker)" }));
         }
-
+        // --- Конец проверки на блокировку ---
 
         if (requestUrl.includes('/gql') && method === 'POST') {
             logGqlOperation('GQL:Fetch', init?.body);
@@ -398,10 +417,9 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         try {
             return await originalFetch(input, init);
         } catch (error) {
-            // Log common network errors quietly unless debug is on
             if (error.name === 'TypeError' && (error.message.includes('Failed to fetch') || error.message.includes('NetworkError') || error.message.includes('ERR_CONNECTION_CLOSED'))) {
                 logWarn(context, `Fetch to ${requestUrl.substring(0,100)}... failed (likely blocked or network issue): ${error.message}`);
-                return Promise.resolve(new Response(null, { status: 0, statusText: "Blocked/Failed" })); // Return a dummy response
+                return Promise.resolve(new Response(null, { status: 0, statusText: "Blocked/Failed" }));
             } else {
                 logError(context, `Unknown fetch error for ${requestUrl.substring(0,100)}...:`, error);
                 throw error;
@@ -411,18 +429,22 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
 
     const xhrRequestData = new WeakMap();
 
+    /**
+     * Переопределенная функция XMLHttpRequest.prototype.open для пометки рекламных запросов.
+     */
     function xhrOpenOverride(method, url /*, async, user, password*/) {
         const context = 'NetBlock:XHR';
         const urlString = String(url);
         const lowerCaseUrl = urlString.toLowerCase();
         let blocked = false;
 
-        if (AD_URL_KEYWORDS_BLOCK.some(keyword => lowerCaseUrl.includes(keyword.toLowerCase()))) {
-            if (blockedUrlKeywordsSet.has(lowerCaseUrl.split('/')[2])) { // Check domain
-                logTrace(context, `Marking XHR (${method}) for blocking: ${urlString}`); // Only trace if LOG_NETWORK_BLOCKING is true
-                blocked = true;
-            }
+        // --- Оптимизированная проверка на блокировку ---
+        let potentiallyBlocked = AD_URL_KEYWORDS_BLOCK.some(keyword => lowerCaseUrl.includes(keyword.toLowerCase()));
+        if (potentiallyBlocked && blockedUrlKeywordsSet.has(lowerCaseUrl.split('/')[2])) {
+            if (LOG_NETWORK_BLOCKING) logTrace(context, `Marking XHR (${method}) for blocking: ${urlString}`);
+            blocked = true;
         }
+        // --- Конец проверки ---
 
         xhrRequestData.set(this, { method: method, url: urlString, blocked: blocked });
 
@@ -430,15 +452,16 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
             try { return originalXhrOpen.apply(this, arguments); }
             catch (error) { logError(context, `Error in original xhr.open for ${urlString.substring(0,100)}...:`, error); throw error; }
         }
-        // If blocked, original open is not called.
     }
 
+    /**
+     * Переопределенная функция XMLHttpRequest.prototype.send для фактической блокировки и логирования GQL.
+     */
     function xhrSendOverride(data) {
         const context = 'NetBlock:XHR';
         const requestInfo = xhrRequestData.get(this);
 
         if (!requestInfo) {
-            // logWarn(context, "No request info for XHR.send. Calling original."); // Can be noisy
             try { return originalXhrSend.apply(this, arguments); }
             catch(e) { logError(context, "Error calling original xhr.send without requestInfo:", e); throw e;}
         }
@@ -448,11 +471,14 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         if (blocked) {
             logWarn(context, `Blocking XHR (${method}) send to ${url.substring(0,100)}...`);
             try {
-                // Simulate a network error event to avoid breaking Twitch scripts expecting a response/error
-                this.dispatchEvent(new ProgressEvent('error'));
-                if (typeof this.abort === 'function') this.abort();
-            } catch (e) { logWarn(context, `Failed to simulate error/abort for blocked XHR: ${e.message}`); }
-            return; // Prevent actual send
+                if (typeof this.dispatchEvent === 'function') {
+                    this.dispatchEvent(new ProgressEvent('error'));
+                }
+                if (typeof this.abort === 'function') {
+                    this.abort();
+                }
+            } catch (e) { logWarn(context, `Failed to dispatch error/abort for blocked XHR: ${e.message}`); }
+            return;
         }
 
         if (url.includes('/gql') && method.toUpperCase() === 'POST') {
@@ -467,32 +493,41 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
             } else {
                 logError(context, `Unknown error in xhr.send for ${url.substring(0,100)}...:`, error);
             }
-            throw error; // Re-throw the error
+            throw error;
         }
     }
 
+    /**
+     * Логирует имя GraphQL операции из тела запроса.
+     */
     function logGqlOperation(context, body) {
         if (!LOG_GQL_INTERCEPTION || !body) return;
         try {
             let operationName = 'UnknownOperation';
             let parsedBody = (typeof body === 'string') ? JSON.parse(body) : body;
 
-            if (Array.isArray(parsedBody)) { operationName = parsedBody[0]?.operationName || operationName; }
-            else if (typeof parsedBody === 'object' && parsedBody !== null) { operationName = parsedBody.operationName || operationName; }
+            if (Array.isArray(parsedBody)) {
+                operationName = parsedBody[0]?.operationName || operationName;
+            } else if (typeof parsedBody === 'object' && parsedBody !== null) {
+                operationName = parsedBody.operationName || operationName;
+            }
 
             logTrace(context, `GraphQL Request: ${operationName}`);
             if (operationName === GQL_OPERATION_ACCESS_TOKEN) {
                 logDebug(context, `--> Intercepted crucial GQL operation: ${GQL_OPERATION_ACCESS_TOKEN}`);
             }
-        } catch (e) { /* Silently ignore parsing errors for logging */ }
+        } catch (e) { /* Ignore parsing errors for logging */ }
     }
 
     // --- ЛОГИКА ВНЕДРЕНИЯ КОДА В WEB WORKER'Ы (ОСНОВНОЙ ПОТОК) ---
+
+    /**
+     * Переопределенная функция URL.createObjectURL для отслеживания создания Blob URL'ов Worker'ов.
+     */
     function createObjectURLOverride_Sync(obj) {
         const context = 'WorkerInject:ObjectURL';
         const isBlob = obj instanceof Blob;
 
-        // Only log potential worker blobs if worker logging is enabled
         if (LOG_WORKER_INJECTION && INJECT_INTO_WORKERS && isBlob) {
             const blobType = obj.type || 'empty';
             if(blobType.includes('javascript') || blobType.includes('worker') || blobType === 'empty') {
@@ -504,9 +539,12 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         catch (e) { logError(context, `Error calling original createObjectURL:`, e); throw e; }
     }
 
+    /**
+     * Добавляет слушатели сообщений 'message' и 'error' к экземпляру Worker'а.
+     */
     function addWorkerMessageListeners(workerInstance, label) {
         if (!workerInstance || typeof workerInstance.addEventListener !== 'function' || workerInstance._listenersAddedByAdblock) return;
-        workerInstance._listenersAddedByAdblock = true; // Prevent adding multiple times
+        workerInstance._listenersAddedByAdblock = true;
         const context = 'WorkerInject:MsgListener';
 
         workerInstance.addEventListener('error', (e) => {
@@ -523,10 +561,13 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
             }
         };
         workerInstance.addEventListener('message', adBlockListener, { passive: true });
-        workerInstance._adBlockListener = adBlockListener; // Store reference for potential removal if needed
+        workerInstance._adBlockListener = adBlockListener;
         logTrace(context, `AdBlock message/error listeners installed for Worker (${label})`);
     }
 
+    /**
+     * Перехватывает конструктор Worker для внедрения кода и добавления слушателей.
+     */
     function hookWorkerConstructor() {
         const context = 'WorkerInject:HookSetup';
         if (!INJECT_INTO_WORKERS) { logWarn(context, "Worker injection disabled."); return; }
@@ -541,7 +582,7 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
                 let urlString = (scriptURL instanceof URL) ? scriptURL.href : String(scriptURL);
                 let isBlobURL = urlString.startsWith('blob:');
                 let workerLabel = 'unknown';
-                let isIVSWorker = false; // Flag for Amazon IVS workers
+                let isIVSWorker = false;
 
                 try {
                     if (isBlobURL) { workerLabel = `blob:${urlString.substring(5, 40)}...`; }
@@ -556,51 +597,52 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
                     logTrace(context, `Worker constructor called. Source: ${workerLabel}, Type: ${isBlobURL ? 'Blob' : 'Script'}${isIVSWorker ? ', Skipping injection' : ''}`);
 
                     if(isIVSWorker) {
-                        // Call original constructor directly for IVS workers and exit early
                         super(scriptURL, options);
                         this._workerLabel = workerLabel;
-                        addWorkerMessageListeners(this, workerLabel); // Still listen for errors
+                        addWorkerMessageListeners(this, workerLabel);
                         return;
                     }
 
-                    // --- Main Injection Logic (non-IVS) ---
-                    // Call original constructor FIRST
                     super(scriptURL, options);
                     this._workerLabel = workerLabel;
                     addWorkerMessageListeners(this, workerLabel);
 
-                    // Fallback injection attempt for non-Blob URLs via postMessage
                     if (!isBlobURL && urlString) {
                         setTimeout(() => {
                             if (!hookedWorkers.has(this._workerLabel)) {
                                 logWarn(context, `Worker (${this._workerLabel}) not from Blob. Attempting fallback injection via postMessage...`);
-                                try { this.postMessage({ type: 'EVAL_ADBLOCK_CODE', code: getWorkerInjectionCode() }); }
-                                catch(e) { logError(context, `Error using postMessage fallback for ${this._workerLabel}:`, e); }
+                                try {
+                                    this.postMessage({ type: 'EVAL_ADBLOCK_CODE', code: getWorkerInjectionCode() });
+                                } catch(e) { logError(context, `Error using postMessage fallback for ${this._workerLabel}:`, e); }
                             }
-                        }, 500); // Delay slightly
+                        }, 500);
                     } else if (isBlobURL) {
                         logTrace(context, `Worker (${workerLabel}) from Blob URL. Awaiting ADBLOCK_WORKER_HOOKS_READY confirmation.`);
                     }
 
                 } catch (constructorError) {
                     logError(context, `Error in HookedWorker constructor for ${workerLabel}:`, constructorError);
-                    if(!this._workerLabel) throw constructorError; // Rethrow if super() failed before label assignment
+                    if(!this._workerLabel) throw constructorError;
                 }
             }
         };
 
-        // Restore prototype chain
-        try { Object.setPrototypeOf(unsafeWindow.Worker, OriginalWorker); Object.setPrototypeOf(unsafeWindow.Worker.prototype, OriginalWorker.prototype); }
-        catch (e) { logError(context, "Failed to restore Worker prototype chain:", e); }
+        try {
+            Object.setPrototypeOf(unsafeWindow.Worker, OriginalWorker);
+            Object.setPrototypeOf(unsafeWindow.Worker.prototype, OriginalWorker.prototype);
+        } catch (e) { logError(context, "Failed to restore Worker prototype chain:", e); }
 
         unsafeWindow.Worker.hooked_by_adblock = true;
         logDebug(context, "Worker constructor hooked successfully.");
     }
 
     // --- УСТАНОВКА ХУКОВ В ОСНОВНОМ ПОТОКЕ ---
+    /**
+     * Устанавливает все необходимые хуки в основном потоке страницы.
+     */
     function installHooks() {
         const context = 'MainHooks';
-        if (hooksInstalledMain) { /*logWarn(context, "Attempted re-install.");*/ return; }
+        if (hooksInstalledMain) { return; }
         logDebug(context, "Installing main thread hooks...");
 
         try { unsafeWindow.fetch = fetchOverride; logTrace(context, "Fetch API hooked."); }
@@ -620,13 +662,11 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
             try { unsafeWindow.URL.createObjectURL = createObjectURLOverride_Sync; logTrace(context, "URL.createObjectURL hooked."); }
             catch (e) { logError(context, "Failed to hook URL.createObjectURL:", e); if (originalCreateObjectURL) unsafeWindow.URL.createObjectURL = originalCreateObjectURL; }
 
-            try { hookWorkerConstructor(); } // Contains own logging
+            try { hookWorkerConstructor(); }
             catch (e) { logError(context, "Failed to hook Worker constructor:", e); if (OriginalWorker) unsafeWindow.Worker = OriginalWorker; }
 
-            // Hook revokeObjectURL mainly for debugging worker lifecycle if needed
             try {
                 unsafeWindow.URL.revokeObjectURL = function(url) {
-                    // Only log if worker injection logging is enabled
                     if(LOG_WORKER_INJECTION) logTrace('WorkerInject:ObjectURLRevoke', `revokeObjectURL called: ${String(url).substring(0, 60)}...`);
                     return originalRevokeObjectURL.call(unsafeWindow.URL, url);
                 };
@@ -642,16 +682,27 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
 
 
     // --- ФУНКЦИИ МОНИТОРИНГА И ПЕРЕЗАГРУЗКИ ПЛЕЕРА ---
+
+    /**
+     * Ищет активный элемент <video> плеера на странице.
+     */
     function findVideoPlayer() {
         const context = 'PlayerMon:Finder';
-        if (videoElement && document.body.contains(videoElement)) return videoElement; // Use cache if valid
+        if (videoElement && document.body.contains(videoElement)) return videoElement;
 
         logTrace(context, 'Searching for video element...');
-        const selectors = [PLAYER_SELECTOR, 'div[data-a-target="video-player"] video', '.video-player__container video', 'div[data-a-target="video-player-layout"] video', '.persistent-player video', 'video'];
+        const selectors = [
+            PLAYER_SELECTOR,
+            'div[data-a-target="video-player"] video',
+            '.video-player__container video',
+            'div[data-a-target="video-player-layout"] video',
+            '.persistent-player video',
+            'video'
+        ];
         for (const selector of selectors) {
             try {
                 const element = document.querySelector(selector);
-                if (element && element.tagName === 'VIDEO' && (element.src || element.currentSrc || element.hasAttribute('src'))) { // Check src/currentSrc/hasAttribute
+                if (element && element.tagName === 'VIDEO' && (element.src || element.currentSrc || element.hasAttribute('src'))) {
                     logTrace(context, `Video element found via selector: ${selector}`);
                     videoElement = element;
                     return element;
@@ -663,6 +714,9 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         return null;
     }
 
+    /**
+     * Инициирует перезагрузку страницы.
+     */
     function triggerReload(reason) {
         const context = 'PlayerMon:Reload';
         const now = Date.now();
@@ -673,26 +727,34 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         logWarn(context, `!!! TRIGGERING PAGE RELOAD !!! Reason: ${reason}.`);
         lastReloadTimestamp = now;
         try { sessionStorage.setItem('ttv_adblock_last_reload', now.toString()); }
-        catch (e) { /* Ignore sessionStorage errors */ }
+        catch (e) { logWarn(context, 'Failed to set sessionStorage item for reload cooldown:', e); }
         unsafeWindow.location.reload();
     }
 
+    /**
+     * Сбрасывает состояние монитора плеера.
+     */
     function resetMonitorState(reason = '') {
         if (reloadTimeoutId) { clearTimeout(reloadTimeoutId); reloadTimeoutId = null; logTrace('PlayerMon:State', `Scheduled reload cancelled (${reason || 'reset'}).`); }
         const now = Date.now();
         lastVideoTimeUpdateTimestamp = now;
         lastKnownVideoTime = videoElement ? videoElement.currentTime : -1;
-        isWaitingForDataTimestamp = 0; // Reset buffering timer
-        logTrace('PlayerMon:State', `Monitor state reset (${reason || 'N/A'}). lastKnownTime: ${lastKnownVideoTime.toFixed(2)}`);
+        isWaitingForDataTimestamp = 0;
+        logTrace('PlayerMon:State', `Monitor state reset (${reason || 'N/A'}). lastKnownTime: ${lastKnownVideoTime > -1 ? lastKnownVideoTime.toFixed(2) : 'N/A'}`);
     }
 
+    /**
+     * Основная функция мониторинга состояния плеера, вызываемая по интервалу.
+     */
     function monitorPlayerState() {
         const context = 'PlayerMon:Monitor';
         if (!videoElement || !document.body.contains(videoElement)) {
             logWarn(context, 'Video element lost. Monitor will attempt restart.');
             if(playerMonitorIntervalId) clearInterval(playerMonitorIntervalId);
             playerMonitorIntervalId = null;
-            setTimeout(setupPlayerMonitor, 500); // Attempt restart shortly
+            if (videoElement) removePlayerEventListeners();
+            videoElement = null;
+            setTimeout(setupPlayerMonitor, 500);
             return;
         }
 
@@ -701,29 +763,27 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         const readyState = videoElement.readyState;
         let detectedProblemReason = null;
 
-        // 1. Check for stall (if supposed to be playing)
+        // 1. Проверка на зависание (Stall)
         if (!videoElement.paused && !videoElement.ended && RELOAD_STALL_THRESHOLD_MS > 0) {
             const timeSinceLastUpdate = now - lastVideoTimeUpdateTimestamp;
             if (currentTime === lastKnownVideoTime && timeSinceLastUpdate > RELOAD_STALL_THRESHOLD_MS) {
                 detectedProblemReason = `Stall: currentTime (${currentTime.toFixed(2)}) not changing > ${timeSinceLastUpdate.toFixed(0)}ms (State: ${readyState})`;
-            } else if (currentTime < lastKnownVideoTime && lastKnownVideoTime > 0) { // Time went backwards?
+            } else if (currentTime < lastKnownVideoTime && lastKnownVideoTime > 0) {
                 detectedProblemReason = `Stall: currentTime (${currentTime.toFixed(2)}) < lastKnown (${lastKnownVideoTime.toFixed(2)})`;
             }
 
-            if (currentTime > lastKnownVideoTime) { // Time is progressing
+            if (currentTime > lastKnownVideoTime) {
                 lastKnownVideoTime = currentTime;
                 lastVideoTimeUpdateTimestamp = now;
-                if (reloadTimeoutId && detectedProblemReason === null) { // If progressing now, cancel scheduled reload if any
+                if (reloadTimeoutId && detectedProblemReason === null) {
                     logDebug(context, "Playback resumed (timeupdate). Cancelling scheduled reload.");
                     clearTimeout(reloadTimeoutId); reloadTimeoutId = null;
                 }
-                if (isWaitingForDataTimestamp > 0) { // Reset buffering timer if we have data now
-                    // logTrace(context, `Data received (timeupdate). Reset buffering timer.`);
+                if (isWaitingForDataTimestamp > 0) {
                     isWaitingForDataTimestamp = 0;
                 }
             }
         } else if(videoElement.paused || videoElement.ended) {
-            // If paused or ended, ensure state reflects that for next check
             lastKnownVideoTime = currentTime;
             lastVideoTimeUpdateTimestamp = now;
             isWaitingForDataTimestamp = 0;
@@ -734,29 +794,27 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         }
 
 
-        // 2. Check for excessive buffering
+        // 2. Проверка на чрезмерную буферизацию
         if (isWaitingForDataTimestamp > 0 && RELOAD_BUFFERING_THRESHOLD_MS > 0) {
             const bufferingDuration = now - isWaitingForDataTimestamp;
             if (bufferingDuration > RELOAD_BUFFERING_THRESHOLD_MS) {
-                if (!detectedProblemReason) { // Don't overwrite stall reason
+                if (!detectedProblemReason) {
                     detectedProblemReason = `Excessive Buffering > ${(bufferingDuration / 1000).toFixed(1)}s (State: ${readyState})`;
                 }
             }
         }
 
-        // 3. Trigger reload if problem detected and not already scheduled
+        // 3. Инициирование перезагрузки
         if (detectedProblemReason && !reloadTimeoutId) {
             logWarn(context, `PLAYER PROBLEM DETECTED! Reason: ${detectedProblemReason}.`);
             logWarn(context, `Scheduling reload in 5 seconds...`);
-            reloadTimeoutId = setTimeout(() => triggerReload(detectedProblemReason), 5000); // Delay before reload
+            reloadTimeoutId = setTimeout(() => triggerReload(detectedProblemReason), 5000);
         }
 
-        // 4. Reset buffering timer if playing state is healthy
+        // 4. Сброс таймера буферизации
         const isPlayingHealthy = !videoElement.paused && !videoElement.ended && readyState >= videoElement.HAVE_FUTURE_DATA;
         if (isPlayingHealthy && isWaitingForDataTimestamp > 0) {
-            // logTrace(context, `Playback healthy (readyState=${readyState}). Reset buffering timer.`);
             isWaitingForDataTimestamp = 0;
-            // Cancel reload ONLY if it was due to buffering (not stall)
             if (reloadTimeoutId && !detectedProblemReason?.toLowerCase().includes('stall')) {
                 logDebug(context, "Buffering resolved. Cancelling scheduled reload.");
                 clearTimeout(reloadTimeoutId); reloadTimeoutId = null;
@@ -764,6 +822,9 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         }
     }
 
+    /**
+     * Настраивает и запускает мониторинг плеера.
+     */
     function setupPlayerMonitor() {
         const context = 'PlayerMon:Setup';
         if (!ENABLE_AUTO_RELOAD) {
@@ -786,48 +847,56 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         if (currentVideoElement !== videoElement || !playerMonitorIntervalId) {
             logDebug(context, 'New video element detected or monitor inactive. Re-initializing monitor...');
             if (playerMonitorIntervalId) { clearInterval(playerMonitorIntervalId); playerMonitorIntervalId = null; }
-            if (videoElement) { removePlayerEventListeners(); } // Cleanup old listeners
+            if (videoElement) { removePlayerEventListeners(); }
 
             videoElement = currentVideoElement;
             checkReloadCooldown(context);
             addPlayerEventListeners();
             resetMonitorState('Monitor setup/reset');
-            playerMonitorIntervalId = setInterval(monitorPlayerState, 2000); // Check every 2 seconds
+            playerMonitorIntervalId = setInterval(monitorPlayerState, 2000);
             logDebug(context, `Player monitor started (Interval: 2s, Stall: ${RELOAD_STALL_THRESHOLD_MS}ms, Buffer: ${RELOAD_BUFFERING_THRESHOLD_MS}ms).`);
         }
-        // else { logTrace(context, 'Monitor already active for current video element.'); } // Reduce noise
     }
 
+    /**
+     * Проверяет sessionStorage на наличие флага недавней перезагрузки.
+     */
     function checkReloadCooldown(context) {
         try {
             const sessionReloadTime = sessionStorage.getItem('ttv_adblock_last_reload');
             if (sessionReloadTime) {
                 const timeSinceLastReload = Date.now() - parseInt(sessionReloadTime, 10);
-                sessionStorage.removeItem('ttv_adblock_last_reload'); // Remove flag
+                sessionStorage.removeItem('ttv_adblock_last_reload');
                 if (timeSinceLastReload < RELOAD_COOLDOWN_MS) {
                     const cooldownRemaining = RELOAD_COOLDOWN_MS - timeSinceLastReload;
                     logWarn(context, `Recent reload detected (${(timeSinceLastReload / 1000).toFixed(1)}s ago). Cooldown active for ${(cooldownRemaining / 1000).toFixed(1)}s.`);
-                    lastReloadTimestamp = Date.now() - timeSinceLastReload; // Set timestamp to enforce cooldown
+                    lastReloadTimestamp = Date.now() - timeSinceLastReload;
                 }
             }
-        } catch (e) { /* Ignore sessionStorage errors */ }
+        } catch (e) { logWarn(context, "Failed to check sessionStorage for reload cooldown:", e); }
     }
 
-    // --- Event Listener Helpers ---
+    // --- Вспомогательные функции для слушателей событий ---
+    /**
+     * Добавляет слушатели событий к элементу video.
+     */
     function addPlayerEventListeners() {
         if (!videoElement || videoElement._adblockListenersAttached) return;
         const context = 'PlayerMon:Events';
         videoElement.addEventListener('error', handlePlayerError, { passive: true });
-        videoElement.addEventListener('waiting', handlePlayerWaiting, { passive: true }); // Start buffering timer
-        videoElement.addEventListener('playing', handlePlayerPlaying, { passive: true }); // Reset state/timers
-        videoElement.addEventListener('pause', handlePlayerPause, { passive: true });   // Reset state/timers
-        videoElement.addEventListener('emptied', handlePlayerEmptied, { passive: true }); // Source gone, reset & find new
-        videoElement.addEventListener('loadedmetadata', handlePlayerLoadedMeta, { passive: true }); // Reset state, check quality
-        videoElement.addEventListener('abort', handlePlayerAbort, { passive: true });   // Loading aborted, reset & find new
+        videoElement.addEventListener('waiting', handlePlayerWaiting, { passive: true });
+        videoElement.addEventListener('playing', handlePlayerPlaying, { passive: true });
+        videoElement.addEventListener('pause', handlePlayerPause, { passive: true });
+        videoElement.addEventListener('emptied', handlePlayerEmptied, { passive: true });
+        videoElement.addEventListener('loadedmetadata', handlePlayerLoadedMeta, { passive: true }); // Важный триггер для проверки качества
+        videoElement.addEventListener('abort', handlePlayerAbort, { passive: true });
         videoElement._adblockListenersAttached = true;
         logTrace(context, 'Player event listeners added.');
     }
 
+    /**
+     * Удаляет слушатели событий с элемента video.
+     */
     function removePlayerEventListeners() {
         if (!videoElement || !videoElement._adblockListenersAttached) return;
         const context = 'PlayerMon:Events';
@@ -842,7 +911,8 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         logTrace(context, 'Player event listeners removed.');
     }
 
-    // --- Player Event Handlers ---
+    // --- Обработчики событий плеера ---
+    /** Обработчик события 'error' */
     function handlePlayerError(event) {
         const context = 'PlayerMon:EventError';
         if (!videoElement?.error) { logWarn(context, 'Error event triggered without video.error details.'); return; }
@@ -855,70 +925,89 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         }
     }
 
+    /** Обработчик события 'waiting' (начало буферизации) */
     function handlePlayerWaiting() {
         const context = 'PlayerMon:EventWaiting';
-        // Start buffering timer only if not paused and data is actually needed
         if (videoElement && !videoElement.paused && videoElement.readyState < videoElement.HAVE_FUTURE_DATA && isWaitingForDataTimestamp === 0) {
             logTrace(context, `Buffering started (readyState: ${videoElement.readyState}). Starting timer.`);
             isWaitingForDataTimestamp = Date.now();
         }
     }
 
+    /** Обработчик события 'playing' (сброс состояния) */
     function handlePlayerPlaying() { resetMonitorState('Playing event'); }
+    /** Обработчик события 'pause' (сброс состояния) */
     function handlePlayerPause() { resetMonitorState('Pause event'); }
-    function handlePlayerEmptied() { logWarn('PlayerMon:EventEmptied', 'Video source emptied.'); resetMonitorState('Emptied event'); setTimeout(setupPlayerMonitor, 100); } // Re-find player quickly
-    function handlePlayerLoadedMeta() { logTrace('PlayerMon:EventLoadedMeta', 'Metadata loaded.'); resetMonitorState('LoadedMetadata event'); setQualitySettings(true); } // Re-check quality
-    function handlePlayerAbort() { logWarn('PlayerMon:EventAbort', 'Video load aborted.'); resetMonitorState('Abort event'); setTimeout(setupPlayerMonitor, 100); } // Re-find player quickly
+    /** Обработчик события 'emptied' (перезапуск поиска плеера) */
+    function handlePlayerEmptied() { logWarn('PlayerMon:EventEmptied', 'Video source emptied.'); resetMonitorState('Emptied event'); setTimeout(setupPlayerMonitor, 100); }
+    /** Обработчик события 'loadedmetadata' (сброс состояния и ПРОВЕРКА КАЧЕСТВА) */
+    function handlePlayerLoadedMeta() {
+        logTrace('PlayerMon:EventLoadedMeta', 'Metadata loaded.');
+        resetMonitorState('LoadedMetadata event');
+        setQualitySettings(true); // <-- Важно: Проверяем качество при загрузке метаданных
+    }
+    /** Обработчик события 'abort' (перезапуск поиска плеера) */
+    function handlePlayerAbort() { logWarn('PlayerMon:EventAbort', 'Video load aborted.'); resetMonitorState('Abort event'); setTimeout(setupPlayerMonitor, 100); }
 
 
     // --- ИНИЦИАЛИЗАЦИЯ СКРИПТА ---
+
+    /**
+     * Основная функция инициализации скрипта.
+     */
     function initializeScript() {
         const context = 'Init';
         logDebug(context, `--- Initializing Twitch Adblock (v${SCRIPT_VERSION}) ---`);
         installHooks();
-        setQualitySettings(true); // Force check on init
+        // Устанавливаем качество принудительно при запуске (первый триггер)
+        setQualitySettings(true);
+        // Настраиваем слушатели жизненного цикла страницы (видимость, навигация) - это триггеры
         setupPageLifecycleListeners(context);
-        setupPeriodicQualityCheck(context);
-        setupDomReadyHandler(context); // Setup player monitor after DOM ready
+        // Настраиваем запуск монитора плеера после загрузки DOM
+        setupDomReadyHandler(context);
         logDebug(context, `--- Twitch Adblock (v${SCRIPT_VERSION}) Initialization Complete ---`);
     }
 
+    /**
+     * Настраивает слушатели событий жизненного цикла страницы (видимость, навигация) - ТРИГГЕРЫ КАЧЕСТВА.
+     */
     function setupPageLifecycleListeners(parentContext) {
         const context = `${parentContext}:PageLifecycle`;
+        // Слушатель изменения видимости вкладки
         document.addEventListener('visibilitychange', () => {
             const visContext = `${context}:Visibility`;
-            if (!document.hidden) {
-                logDebug(visContext, "Tab became visible. Re-checking quality and player state.");
-                // Use rAF to ensure checks happen after potential layout changes
+            if (!document.hidden) { // Вкладка стала видимой - ТРИГГЕР
+                logDebug(visContext, "Tab became visible. Triggering quality check and player monitor restart.");
                 requestAnimationFrame(() => {
-                    setQualitySettings(true);
-                    if (ENABLE_AUTO_RELOAD) setupPlayerMonitor(); // Restart monitor if enabled
+                    setQualitySettings(true); // Принудительно проверяем качество
+                    if (ENABLE_AUTO_RELOAD) setupPlayerMonitor(); // Перезапускаем монитор плеера
                 });
-            } else {
+            } else { // Вкладка стала невидимой
                 logDebug(visContext, "Tab hidden.");
                 if (ENABLE_AUTO_RELOAD && playerMonitorIntervalId) {
                     logTrace(visContext, 'Stopping player monitor.');
                     clearInterval(playerMonitorIntervalId); playerMonitorIntervalId = null;
-                    removePlayerEventListeners(); // Detach listeners when hidden
+                    removePlayerEventListeners();
                 }
                 if (reloadTimeoutId) { logWarn(visContext, 'Cancelling scheduled reload due to tab hidden.'); clearTimeout(reloadTimeoutId); reloadTimeoutId = null; }
             }
         }, { passive: true });
         logTrace(context, "'visibilitychange' listener installed.");
 
+        // --- Обработка SPA навигации - ТРИГГЕР ---
         let navigationDebounceTimer = null;
         const handleNavigationChange = () => {
             clearTimeout(navigationDebounceTimer);
             navigationDebounceTimer = setTimeout(() => {
                 const navContext = `${context}:Navigation`;
-                logDebug(navContext, `Navigation detected (${window.location.pathname}). Re-checking state.`);
-                // Force checks after navigation
+                logDebug(navContext, `Navigation detected (${window.location.pathname}). Triggering quality check and player monitor restart.`);
+                // Принудительно проверяем качество и перезапускаем монитор плеера
                 setQualitySettings(true);
-                if (ENABLE_AUTO_RELOAD) setupPlayerMonitor(); // Resetup monitor for potentially new page/player
-            }, 300); // Debounce navigation events slightly
+                if (ENABLE_AUTO_RELOAD) setupPlayerMonitor();
+            }, 300);
         };
 
-        try { // Hook history API for SPA navigation
+        try {
             const originalPushState = history.pushState;
             history.pushState = function(...args) { originalPushState.apply(this, args); handleNavigationChange(); };
             const originalReplaceState = history.replaceState;
@@ -928,18 +1017,10 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         } catch (e) { logError(context, "Failed to install navigation listeners:", e); }
     }
 
-    function setupPeriodicQualityCheck(parentContext) {
-        const context = `${parentContext}:PeriodicQualityCheck`;
-        if (ENABLE_PERIODIC_QUALITY_CHECK && PERIODIC_QUALITY_CHECK_INTERVAL_MS > 0) {
-            if (qualitySetIntervalId) clearInterval(qualitySetIntervalId);
-            qualitySetIntervalId = setInterval(() => {
-                logTrace(context, `Periodic quality check running...`);
-                setQualitySettings(); // Use cache by default for periodic checks
-            }, PERIODIC_QUALITY_CHECK_INTERVAL_MS);
-            logDebug(context, `Periodic quality check started (interval ${PERIODIC_QUALITY_CHECK_INTERVAL_MS} ms).`);
-        } else { logDebug(context, `Periodic quality check disabled.`); }
-    }
 
+    /**
+     * Настраивает запуск монитора плеера после полной загрузки DOM.
+     */
     function setupDomReadyHandler(parentContext) {
         const context = `${parentContext}:DomReady`;
         const onDomReady = () => {
@@ -951,11 +1032,11 @@ workerLogDebug("--- Worker AdBlock Code Initialized ---");
         if (document.readyState === 'loading') {
             window.addEventListener('DOMContentLoaded', onDomReady, { once: true, passive: true });
         } else {
-            requestAnimationFrame(onDomReady); // Use rAF if DOM already loaded
+            requestAnimationFrame(onDomReady);
         }
     }
 
-    // --- Start Initialization ---
+    // --- Запуск инициализации скрипта ---
     initializeScript();
 
 })();
