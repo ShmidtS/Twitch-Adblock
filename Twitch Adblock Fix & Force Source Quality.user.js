@@ -222,7 +222,7 @@
             let reason = '';
 
             if (upperTrimmedLine.startsWith('#EXT-X-DATERANGE:')) {
-                 let isAdDateRange = false;
+                let isAdDateRange = false;
                 if (upperTrimmedLine.includes(AD_SIGNIFIER_DATERANGE_ATTR.toUpperCase()) || (AD_DATERANGE_REGEX && AD_DATERANGE_REGEX.test(trimmedLine))) {
                     isAdDateRange = true; reason = 'DATERANGE (attr/Regex)';
                 } else if (AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperTrimmedLine.includes(kw))) {
@@ -236,12 +236,12 @@
                 shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; reason = 'ASSET'; discontinuityPending = false;
                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Удаление ${reason}: ${trimmedLine.substring(0, 100)}`);
             } else if (upperTrimmedLine.startsWith('#EXT-X-CUE-OUT')) {
-                 shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; reason = 'CUE-OUT';
-                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Удаление ${reason}: ${trimmedLine.substring(0, 100)}`);
-                 discontinuityPending = true;
+                shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; reason = 'CUE-OUT';
+                logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Удаление ${reason}: ${trimmedLine.substring(0, 100)}`);
+                discontinuityPending = true;
             } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-SIGNAL')) {
-                 shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; reason = 'AD-SIGNAL'; discontinuityPending = false;
-                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Удаление ${reason}: ${trimmedLine.substring(0, 100)}`);
+                shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; reason = 'AD-SIGNAL'; discontinuityPending = false;
+                logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Удаление ${reason}: ${trimmedLine.substring(0, 100)}`);
             } else if (upperTrimmedLine.startsWith('#EXT-X-CUE-IN')) {
                 if (isAdSection) {
                     shouldRemoveLine = true; isAdMarkerLine = true; reason = 'CUE-IN'; isAdSection = false; discontinuityPending = false;
@@ -250,19 +250,19 @@
                     logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Пропуск одиночного CUE-IN`);
                 }
             } else if (upperTrimmedLine.startsWith('#EXT-X-SCTE35:')) {
-                 shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; reason = 'SCTE35'; discontinuityPending = false;
-                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Удаление ${reason}: ${trimmedLine.substring(0, 100)}`);
+                shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; reason = 'SCTE35'; discontinuityPending = false;
+                logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Удаление ${reason}: ${trimmedLine.substring(0, 100)}`);
             } else if (isAdSection && upperTrimmedLine.startsWith('#EXT-X-DISCONTINUITY')) {
-                 if (discontinuityPending) {
+                if (discontinuityPending) {
                     shouldRemoveLine = true; isAdMarkerLine = true; reason = 'DISCONTINUITY (after cue-out)'; discontinuityPending = false;
                     logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Удаление ${reason}`);
-                 } else {
+                } else {
                     logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlShort}) L${i+1}: Сохранение DISCONTINUITY в рекламной секции (не после cue-out)`);
-                 }
+                }
             } else if (isAdSection && !trimmedLine.startsWith('#') && trimmedLine !== '') {
                 shouldRemoveLine = true; reason = 'Segment in Ad Section'; linesRemoved++; discontinuityPending = false;
             } else {
-                 discontinuityPending = false;
+                discontinuityPending = false;
             }
 
             if (!shouldRemoveLine) {
@@ -347,7 +347,7 @@
                 } else {
                     workerLogError('[' + context + '] Failed to install fetch hook during attemptHookInstallationAndSignal!');
                     try {
-                       self.postMessage({ type: 'ADBLOCK_WORKER_HOOKS_READY', method: 'signal_failed_hook_install' });
+                        self.postMessage({ type: 'ADBLOCK_WORKER_HOOKS_READY', method: 'signal_failed_hook_install' });
                     } catch(e) { workerLogError('[' + context + '] Error sending signal_failed_hook_install:', e); }
                     return false;
                 }
@@ -359,7 +359,7 @@
                     workerLogCoreDebug("[WorkerInject:Msg] Received EVAL_ADBLOCK_CODE. Re-attempting hook installation/signal.");
                     attemptHookInstallationAndSignal(); // Always re-attempt on EVAL
                 } else if (e.data && e.data.type !== 'ADBLOCK_M3U8_RESPONSE') {
-                     workerLogCoreDebug("[WorkerInject:Msg] Received unhandled message:", e.data?.type || e.data);
+                    workerLogCoreDebug("[WorkerInject:Msg] Received unhandled message:", e.data?.type || e.data);
                 }
             });
 
@@ -388,7 +388,7 @@
                 let currentOpModified = false;
 
                 if (GQL_OPERATIONS_TO_SKIP_MODIFICATION.has(operationName)) {
-                     logModuleTrace(LOG_GQL_MODIFY_DEBUG, context, `Пропуск модификации ${operationName} (в списке пропуска).`);
+                    logModuleTrace(LOG_GQL_MODIFY_DEBUG, context, `Пропуск модификации ${operationName} (в списке пропуска).`);
                 }
                 else if (operationName === GQL_OPERATION_AD_FREE_QUERY) {
                     logModuleTrace(LOG_GQL_MODIFY_DEBUG, context, `Обработка ${operationName}...`);
@@ -434,7 +434,7 @@
         return responseText;
     }
 
-     async function fetchOverride(input, init) {
+    async function fetchOverride(input, init) {
         const context = 'NetBlock:Fetch';
         let requestUrl = (input instanceof Request) ? input.url : String(input);
         let method = ((input instanceof Request) ? input.method : (init?.method || 'GET')).toUpperCase();
@@ -507,8 +507,8 @@
                 elements.forEach(el => {
                     if (el && el.parentNode) {
                         if (el.querySelector('video') || el.closest(PLAYER_SELECTORS_IMPROVED.join(','))) {
-                           logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, 'DOMRemove', `Skipping removal of "${selector}" inside player.`);
-                           return;
+                            logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, 'DOMRemove', `Skipping removal of "${selector}" inside player.`);
+                            return;
                         }
                         logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, 'DOMRemove', `Removing element by selector: "${selector}"`);
                         try { el.parentNode.removeChild(el); removedCount++; }
@@ -558,7 +558,7 @@
     setTimeout(() => {
         if (!videoElement && (document.readyState === 'complete' || document.readyState === 'interactive')) { logWarn('Init', 'Fallback player check after 5s...'); setupPlayerMonitor(); }
         if (ATTEMPT_DOM_AD_REMOVAL && !adRemovalObserver) { logWarn('Init', 'Fallback AdRemovalObserver start after 5s...'); removeDOMAdElements(document); startAdRemovalObserver(); }
-         if (INJECT_INTO_WORKERS && !workerPingIntervalId) { logWarn('Init', 'Fallback Worker Pinger start after 5s...'); startWorkerPinger(); }
+        if (INJECT_INTO_WORKERS && !workerPingIntervalId) { logWarn('Init', 'Fallback Worker Pinger start after 5s...'); startWorkerPinger(); }
     }, 5000);
 
     logCoreDebug('Init', 'Script initialized.');
