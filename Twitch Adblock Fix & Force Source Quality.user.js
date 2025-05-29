@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      19.1.5
+// @version      19.1.8
 // @description  Блокировка рекламы Twitch через очистку M3U8 и модификацию GQL
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -28,28 +28,27 @@
 (function() {
     'use strict';
 
-    const SCRIPT_VERSION = '19.1.5'; // Версия обновлена
+    const SCRIPT_VERSION = '19.1.8'; // Изменена версия для отражения оптимизаций
 
-    const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', false);
+    const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true);
     const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
-    const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', false);
+    const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
     const BLOCK_NATIVE_ADS_SCRIPT = GM_getValue('TTV_AdBlock_BlockNatScript', true);
     const HIDE_AD_OVERLAY_ELEMENTS = GM_getValue('TTV_AdBlock_HideAdOverlay', true);
     const ATTEMPT_DOM_AD_REMOVAL = GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true);
     const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
 
-    const SHOW_ERRORS_CONSOLE = false;
-    const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', false);
-    const LOG_WORKER_INJECTION_DEBUG = GM_getValue('TTV_AdBlock_Debug_WorkerInject', false);
-    const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', false);
-    const LOG_M3U8_CLEANING_DEBUG = GM_getValue('TTV_AdBlock_Debug_M3U8', false);
-    const LOG_GQL_MODIFY_DEBUG = GM_getValue('TTV_AdBlock_Debug_GQL', false);
+    const SHOW_ERRORS_CONSOLE = true;
+    const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', true);
+    const LOG_WORKER_INJECTION_DEBUG = GM_getValue('TTV_AdBlock_Debug_WorkerInject', true);
+    const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', true);
+    const LOG_M3U8_CLEANING_DEBUG = GM_getValue('TTV_AdBlock_Debug_M3U8', true);
+    const LOG_GQL_MODIFY_DEBUG = GM_getValue('TTV_AdBlock_Debug_GQL', true);
 
     const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', '2, 3, 4, 9, 10, 1000, 2000, 3000, 4000, 5000, 6001');
-    // Изменения для уменьшения вероятности ненужных перезагрузок
-    const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 6000); // Было 3000
-    const RELOAD_BUFFERING_THRESHOLD_MS = GM_getValue('TTV_AdBlock_BufferingThresholdMs', 20000); // Было 15000
-    const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 45000); // Было 35000
+    const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 15000);
+    const RELOAD_BUFFERING_THRESHOLD_MS = GM_getValue('TTV_AdBlock_BufferingThresholdMs', 30000);
+    const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 25000);
 
     const VISIBILITY_RESUME_DELAY_MS = GM_getValue('TTV_AdBlock_VisResumeDelayMs', 1500);
     const WORKER_PING_INTERVAL_MS = GM_getValue('TTV_AdBlock_WorkerPingIntervalMs', 15000);
@@ -132,6 +131,12 @@
         '.video-player', '.persistent-player', 'div[data-a-target="video-player-layout"]', 'main',
         'div[class*="player-container"]'
     ];
+
+    // *** OPTIMIZATION START: Whitelisted Twitch content domains/patterns ***
+    const TWITCH_CONTENT_HOST_REGEX = /\.(ttvnw\.net|twitch\.tv|twitchcdn\.net)$/i;
+    const TWITCH_VIDEO_SEGMENT_PATH_REGEX = /(\.ts$|\/segment\/|videochunk|videoplayback)/i; // Added common video segment patterns
+    const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
+    // *** OPTIMIZATION END ***
 
     let hooksInstalledMain = false;
     let workerHookAttempted = false;
@@ -233,10 +238,17 @@
         const urlShort = url.includes('?') ? url.substring(0, url.indexOf('?')) : url;
         const urlFilename = urlShort.substring(urlShort.lastIndexOf('/') + 1) || urlShort;
 
-        logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `Начало парсинга для: ${urlFilename}`);
+        logCoreDebug(context, `(${urlFilename}): Вход в parseAndCleanM3U8. Длина текста: ${m3u8Text?.length || 0}`);
+        logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `Полный URL для M3U8: ${url}`);
+
         if (!m3u8Text || typeof m3u8Text !== 'string') {
             logWarn(context, `(${urlFilename}): Некорректный/пустой M3U8 текст.`);
             return { cleanedText: m3u8Text, adsFound: false, linesRemoved: 0 };
+        }
+
+        if (LOG_M3U8_CLEANING_DEBUG) {
+            const previewLines = m3u8Text.split('\n').slice(0, 25).join('\n');
+            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) M3U8 Preview (first 25 lines):\n${previewLines}`);
         }
 
         const upperM3U8Text = m3u8Text.toUpperCase();
@@ -249,17 +261,24 @@
             potentialAdContent = true;
         } else if (upperM3U8Text.includes("#EXT-X-TWITCH-AD-SIGNAL")) {
             potentialAdContent = true;
-        } else if (upperM3U8Text.includes("#EXT-X-TWITCH-PREFETCH:")) { // Добавлено для PREFETCH
+        } else if (upperM3U8Text.includes("#EXT-X-TWITCH-PREFETCH:")) {
             potentialAdContent = true;
         } else if (AD_DATERANGE_REGEX && AD_DATERANGE_REGEX.test(m3u8Text)) {
             potentialAdContent = true;
         }
+        logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}): potentialAdContent initial check = ${potentialAdContent}`);
 
 
         if (!potentialAdContent) {
-            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}): Рекламные маркеры не найдены, пропуск очистки.`);
-            return { cleanedText: m3u8Text, adsFound: false, linesRemoved: 0 };
+            if (upperM3U8Text.includes("#EXT-X-TWITCH-PREFETCH:")) { // Double check prefetch as it's a strong ad indicator
+                logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}): #EXT-X-TWITCH-PREFETCH найден, принудительный парсинг.`);
+                potentialAdContent = true;
+            } else {
+                logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}): Рекламные маркеры не найдены, пропуск глубокой очистки.`);
+                return { cleanedText: m3u8Text, adsFound: false, linesRemoved: 0 };
+            }
         }
+
 
         logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}): Найдены потенциальные маркеры. Парсинг...`);
         const lines = m3u8Text.split('\n');
@@ -274,10 +293,9 @@
             const trimmedLine = line.trim();
             const upperTrimmedLine = trimmedLine.toUpperCase();
             let shouldRemoveLine = false;
-            let isAdMarkerLine = false; // Флаг, что эта строка сама по себе является рекламным маркером (а не сегментом в рекламной секции)
+            let isAdMarkerLine = false; // Flag if this line itself is an ad marker to be removed
             let reason = '';
 
-            // Сначала проверяем маркеры начала рекламы или одиночные рекламные теги
             if (upperTrimmedLine.startsWith('#EXT-X-DATERANGE:')) {
                 let isAdDateRange = false;
                 if (upperTrimmedLine.includes(AD_SIGNIFIER_DATERANGE_ATTR.toUpperCase()) || (AD_DATERANGE_REGEX && AD_DATERANGE_REGEX.test(trimmedLine))) {
@@ -292,54 +310,50 @@
             } else if (upperTrimmedLine.startsWith('#EXT-X-ASSET:')) {
                 shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; discontinuityPending = false; reason = 'ASSET';
                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: ${reason} -> remove, isAdSection=true: ${trimmedLine.substring(0, 100)}`);
-            } else if (upperTrimmedLine.startsWith('#EXT-X-CUE-OUT')) {
+            } else if (upperTrimmedLine.startsWith('#EXT-X-CUE-OUT')) { // Marks start of ad break
                 shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; reason = 'CUE-OUT';
                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: ${reason} -> remove, isAdSection=true: ${trimmedLine.substring(0, 100)}`);
-                discontinuityPending = true;
-            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-SIGNAL')) {
+                discontinuityPending = true; // Expect a discontinuity for ads
+            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-SIGNAL')) { // Twitch specific ad signal
                 shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; discontinuityPending = false; reason = 'AD-SIGNAL';
                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: ${reason} -> remove, isAdSection=true: ${trimmedLine.substring(0, 100)}`);
-            } else if (upperTrimmedLine.startsWith('#EXT-X-SCTE35:')) {
+            } else if (upperTrimmedLine.startsWith('#EXT-X-SCTE35:')) { // Generic SCTE35 ad marker
                 shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; isAdSection = true; discontinuityPending = false; reason = 'SCTE35';
                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: ${reason} -> remove, isAdSection=true: ${trimmedLine.substring(0, 100)}`);
-            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-PREFETCH:')) { // Добавлено
+            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-PREFETCH:')) { // Ad prefetch segments
                 shouldRemoveLine = true; isAdMarkerLine = true; adsFound = true; reason = 'TWITCH-PREFETCH';
                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: ${reason} -> remove: ${trimmedLine.substring(0, 100)}`);
-                // isAdSection не устанавливается, так как PREFETCH может быть для одиночного сегмента
             }
-            // Затем обрабатываем строки, если мы УЖЕ в рекламной секции
+            // Logic for lines *within* an ad section (after a CUE-OUT, DATERANGE-AD, etc.)
             else if (isAdSection) {
-                if (upperTrimmedLine.startsWith('#EXT-X-CUE-IN')) {
+                if (upperTrimmedLine.startsWith('#EXT-X-CUE-IN')) { // Marks end of ad break
                     shouldRemoveLine = true; isAdMarkerLine = true; reason = 'CUE-IN'; isAdSection = false; discontinuityPending = false;
                     logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: ${reason} -> remove, isAdSection=false (end of ad section)`);
-                } else if (upperTrimmedLine.startsWith('#EXTINF:')) {
-                    // Если мы в рекламной секции и встречаем #EXTINF:, это значит, что реклама закончилась, и начался контент.
-                    isAdSection = false; discontinuityPending = false; // Сбрасываем флаг, так как это контент
+                } else if (upperTrimmedLine.startsWith('#EXTINF:')) { // If #EXTINF appears, assume content has started
+                    isAdSection = false; discontinuityPending = false;
                     logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: #EXTINF: found in ad section -> keep, isAdSection=false (assuming content starts)`);
-                    // shouldRemoveLine остается false, #EXTINF: и следующий за ним сегмент будут сохранены
+                    // This line (#EXTINF) itself should NOT be removed, so shouldRemoveLine remains false
                 } else if (upperTrimmedLine.startsWith('#EXT-X-DISCONTINUITY')) {
-                    if (discontinuityPending) {
-                        shouldRemoveLine = true; isAdMarkerLine = true; reason = 'DISCONTINUITY (after cue-out)'; discontinuityPending = false;
+                    if (discontinuityPending) { // If we expected a discontinuity for an ad, remove it.
+                        shouldRemoveLine = true; isAdMarkerLine = true; reason = 'DISCONTINUITY (after cue-out/ad marker)'; discontinuityPending = false;
                         logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: ${reason} -> remove`);
-                    } else {
-                        logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: DISCONTINUITY in ad section (not after cue-out) -> keep`);
-                        // shouldRemoveLine остается false, сам DISCONTINUITY сохраняется
+                    } else { // Otherwise, a discontinuity not related to ads, keep it.
+                        logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: DISCONTINUITY in ad section (not expected for ad) -> keep`);
                     }
-                } else if (!trimmedLine.startsWith('#') && trimmedLine !== '') { // Это URL сегмента
+                } else if (!trimmedLine.startsWith('#') && trimmedLine !== '') { // This is likely an ad segment URL
                     shouldRemoveLine = true; reason = 'Segment in Ad Section';
-                    // discontinuityPending не сбрасываем здесь, если он был true и это первый сегмент после CUE-OUT
                     logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) L${i+1}: ${reason} -> remove: ${trimmedLine.substring(0, 100)}`);
-                } else {
-                    // Другие теги (#EXT-X-PROGRAM-DATE-TIME и т.д.) внутри рекламной секции.
-                    // Если они не являются маркерами начала/конца или важными для структуры, их можно было бы удалить.
-                    // Но для безопасности, если это тег, и он не был помечен на удаление выше, он останется.
-                    // Если после CUE-OUT идет не DISCONTINUITY и не сегмент, сбрасываем discontinuityPending.
+                } else { // Other tags within an ad section (e.g., #EXT-X-PROGRAM-DATE-TIME) might be removed or kept depending on policy
+                    // For now, let's assume most other # tags are part of ad metadata and should be removed if isAdSection is true
+                    // and it's not an explicit content marker like #EXTINF or an unhandled #EXT-X-CUE-IN.
+                    // However, this could be too aggressive. For now, only removing segments and known ad markers.
                     if (discontinuityPending && !upperTrimmedLine.startsWith('#EXT-X-DISCONTINUITY')) {
+                         // If discontinuity was pending but we hit another tag, reset.
                         discontinuityPending = false;
                     }
                 }
-            } else { // Не в рекламной секции
-                discontinuityPending = false; // Если мы не в рекламной секции, сбрасываем ожидание
+            } else { // Not in an ad section
+                discontinuityPending = false; // Reset pending discontinuity if we are out of ad section
             }
 
 
@@ -350,13 +364,17 @@
             }
         }
 
-        if (isAdSection) {
+        if (isAdSection) { // If loop finished but still in ad section
             logWarn(context, `(${urlFilename}): M3U8 завершился, но скрипт все еще считает, что находится в рекламной секции. Возможно, отсутствует #EXT-X-CUE-IN или #EXTINF: контента.`);
         }
 
         const cleanedText = cleanLines.join('\n');
         if (adsFound) {
             logCoreDebug(context, `(${urlFilename}): Завершено. Удалено строк: ${linesRemoved}.`);
+            if (LOG_M3U8_CLEANING_DEBUG && linesRemoved > 0) {
+                 const cleanedPreviewLines = cleanedText.split('\n').slice(0, 25).join('\n');
+                 logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `(${urlFilename}) Cleaned M3U8 Preview (first 25 lines):\n${cleanedPreviewLines}`);
+            }
         }
         return { cleanedText: cleanedText, adsFound: adsFound, linesRemoved: linesRemoved };
     }
@@ -399,11 +417,14 @@
                     const urlShort = requestUrl.includes('?') ? requestUrl.substring(0, requestUrl.indexOf('?')) : requestUrl;
                     const urlFilename = urlShort.substring(urlShort.lastIndexOf('/') + 1) || urlShort.substring(0,70);
 
-                    const isM3U8Request = lowerCaseUrl.endsWith('.m3u8') || (init?.headers?.['Accept'] || '').toLowerCase().includes('mpegurl');
+                    // *** OPTIMIZATION START: More precise M3U8 check for workers ***
+                    const isM3U8Request = (lowerCaseUrl.endsWith('.m3u8') || (init?.headers?.['Accept'] || '').toLowerCase().includes('mpegurl')) &&
+                                          (lowerCaseUrl.includes('usher.ttvnw.net') || lowerCaseUrl.includes('.m3u8')); // Ensure it's likely a playlist
+                    // *** OPTIMIZATION END ***
 
-                    workerLogCoreDebug(`[${context}] Intercepted: ${method} ${urlFilename}`);
+                    workerLogCoreDebug(`[${context}] Intercepted: ${method} ${urlFilename.substring(0,100)} (M3U8: ${isM3U8Request})`);
 
-                    if (method === 'GET' && isM3U8Request) {
+                    if (method === 'GET' && isM3U8Request && requestUrl.includes('usher.ttvnw.net')) { // Keep specific usher check for relay
                         workerLogM3U8Trace('Relaying M3U8 request to main script: ' + urlFilename);
                         return new Promise((resolveWorkerPromise, rejectWorkerPromise) => {
                             const messageId = 'm3u8_req_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -415,7 +436,7 @@
                                         workerLogError('Error from main script processing M3U8 (' + urlFilename + '):', event.data.error);
                                         rejectWorkerPromise(new TypeError(event.data.error));
                                     } else {
-                                        workerLogM3U8Trace('Received processed M3U8 from main script for: ' + urlFilename);
+                                        workerLogM3U8Trace('Received processed M3U8 from main script for: ' + urlFilename + `. Length: ${event.data.cleanedText?.length}`);
                                         const responseHeaders = new Headers();
                                         if(event.data.headers) { for(const key in event.data.headers) { responseHeaders.append(key, event.data.headers[key]); } }
                                         if (!responseHeaders.has('Content-Type')) { responseHeaders.set('Content-Type', 'application/vnd.apple.mpegurl'); }
@@ -484,13 +505,13 @@
             }
 
             self.addEventListener('message', function(e) {
-                if (e.data?.type === 'PING') {
-                    self.postMessage({ type: 'PONG' });
+                if (e.data?.type === 'PING_WORKER_ADBLOCK') { // Changed PING to PING_WORKER_ADBLOCK to avoid conflict
+                    self.postMessage({ type: 'PONG_WORKER_ADBLOCK', workerLabel: self.name || 'unknown_worker_name' });
                 } else if (e.data?.type === 'EVAL_ADBLOCK_CODE') {
                     workerLogCoreDebug("[WorkerInject:Msg] Received EVAL_ADBLOCK_CODE. Re-attempting hook installation/signal.");
                     attemptHookInstallationAndSignal();
                 } else if (e.data && e.data.type !== 'ADBLOCK_M3U8_RESPONSE') {
-                    workerLogCoreDebug("[WorkerInject:Msg] Received unhandled message from main script:", e.data?.type || e.data);
+                    // workerLogCoreDebug("[WorkerInject:Msg] Received other message:", e.data?.type, e.data);
                 }
             });
 
@@ -510,7 +531,7 @@
         if (!MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || responseText.length === 0) return responseText;
 
         const urlShort = url.substring(0, Math.min(url.length, 60));
-        logModuleTrace(LOG_GQL_MODIFY_DEBUG, context, `Проверка GQL ответа от ${urlShort}...`);
+        logModuleTrace(LOG_GQL_MODIFY_DEBUG, context, `Проверка GQL ответа от ${urlShort}... Длина: ${responseText.length}`);
 
         try {
             let data = JSON.parse(responseText);
@@ -577,7 +598,7 @@
                     if (aggressivelyModified) currentOpModified = true;
                 }
                 else {
-                    logModuleTrace(LOG_GQL_MODIFY_DEBUG, context, `Пропуск GQL (неизвестная или нецелевая операция): ${operationName}. Для детального лога включите AGGRESSIVE_GQL_SCAN и LOG_GQL_MODIFY_DEBUG.`);
+                    logModuleTrace(LOG_GQL_MODIFY_DEBUG, context, `Пропуск GQL (неизвестная или нецелевая операция): ${operationName}.`);
                     if (CORE_DEBUG_LOGGING && LOG_GQL_MODIFY_DEBUG) {
                         const dataSample = JSON.stringify(opData?.data);
                         if (dataSample && !dataSample.includes('"isAdFree":true')) {
@@ -611,33 +632,54 @@
 
         logModuleTrace(CORE_DEBUG_LOGGING, context, `Fetch: ${method} ${urlShortForLog}`);
 
-        let isBlockedByKeyword = false;
+        // *** OPTIMIZATION START: Whitelist check for fetch ***
+        let isWhitelistedTwitchContent = false;
+        let requestHostnameForCheck = '';
         try {
-            const requestHostname = new URL(requestUrl).hostname.toLowerCase();
-            if (blockedUrlKeywordsSet.has(requestHostname) || AD_URL_KEYWORDS_BLOCK.some(k => lowerCaseUrl.includes(k.toLowerCase()))) {
-                if (lowerCaseUrl.includes('nat.min.js') && !BLOCK_NATIVE_ADS_SCRIPT) {
-                } else {
-                    logWarn(context, `БЛОКИРОВКА Fetch (${method}): ${requestUrl}`);
-                    isBlockedByKeyword = true;
+            requestHostnameForCheck = new URL(requestUrl).hostname;
+        } catch(e) { /*ignore, will be handled by existing logic */ }
+
+        if (requestHostnameForCheck && TWITCH_CONTENT_HOST_REGEX.test(requestHostnameForCheck)) {
+            if (TWITCH_VIDEO_SEGMENT_PATH_REGEX.test(lowerCaseUrl) || TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl)) {
+                isWhitelistedTwitchContent = true;
+            }
+        }
+        // *** OPTIMIZATION END ***
+
+        if (!isWhitelistedTwitchContent) { // Only apply general keyword blocking if not whitelisted Twitch content
+            let isBlockedByKeyword = false;
+            try {
+                // Use requestHostnameForCheck if available
+                const hostnameToCheck = requestHostnameForCheck ? requestHostnameForCheck.toLowerCase() : new URL(requestUrl).hostname.toLowerCase();
+                if (blockedUrlKeywordsSet.has(hostnameToCheck) || AD_URL_KEYWORDS_BLOCK.some(k => lowerCaseUrl.includes(k.toLowerCase()))) {
+                    if (lowerCaseUrl.includes('nat.min.js') && !BLOCK_NATIVE_ADS_SCRIPT) {
+                        // not blocked
+                    } else {
+                        logWarn(context, `БЛОКИРОВКА Fetch (${method}) по ключевому слову: ${requestUrl}`);
+                        isBlockedByKeyword = true;
+                    }
+                }
+            } catch (urlError) {
+                if (!(urlError.message.includes("Invalid URL") && requestUrl.startsWith("blob:"))) {
+                    logWarn(context, `URL Parsing Error for Fetch: "${requestUrl}": ${urlError.message}`);
+                }
+                // Fallback check on URL if parsing failed
+                if (AD_URL_KEYWORDS_BLOCK.some(k => lowerCaseUrl.includes(k.toLowerCase()))) {
+                    if (lowerCaseUrl.includes('nat.min.js') && !BLOCK_NATIVE_ADS_SCRIPT) { /* not blocked */ }
+                    else { logWarn(context, `БЛОКИРОВКА Fetch (${method}) (fallback on URL parse error): ${requestUrl}`); isBlockedByKeyword = true; }
                 }
             }
-        } catch (urlError) {
-            if (!(urlError.message.includes("Invalid URL") && requestUrl.startsWith("blob:"))) {
-                logWarn(context, `URL Parsing Error for Fetch: "${requestUrl}": ${urlError.message}`);
+
+            if (isBlockedByKeyword) {
+                return Promise.resolve(new Response(null, { status: 403, statusText: "Blocked by TTV AdBlock Ultimate" }));
             }
-            if (AD_URL_KEYWORDS_BLOCK.some(k => lowerCaseUrl.includes(k.toLowerCase()))) {
-                if (lowerCaseUrl.includes('nat.min.js') && !BLOCK_NATIVE_ADS_SCRIPT) { }
-                else { logWarn(context, `БЛОКИРОВКА Fetch (${method}) (fallback on URL parse error): ${requestUrl}`); isBlockedByKeyword = true; }
-            }
+        } else {
+             logModuleTrace(CORE_DEBUG_LOGGING, context, `Fetch: Пропуск общей блокировки для ${urlShortForLog} (белый список Twitch контента)`);
         }
 
-        if (isBlockedByKeyword) {
-            return Promise.resolve(new Response(null, { status: 403, statusText: "Blocked by TTV AdBlock Ultimate" }));
-        }
-
-        const isM3U8Request = lowerCaseUrl.includes('.m3u8') || (init?.headers?.['Accept'] || '').toLowerCase().includes('mpegurl');
-        if (method === 'GET' && isM3U8Request && requestUrl.includes('usher.ttvnw.net')) {
-            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, context, `Перехват Usher M3U8 для GM_xmlhttpRequest: ${urlShortForLog}`);
+        const isM3U8RequestToUsher = method === 'GET' && TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl) && lowerCaseUrl.includes('usher.ttvnw.net');
+        if (isM3U8RequestToUsher) {
+            logCoreDebug(context, `Fetch: Перехват Usher M3U8 для GM_xmlhttpRequest: ${urlShortForLog}`);
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
                     method: "GET",
@@ -645,9 +687,9 @@
                     headers: init?.headers ? Object.fromEntries(new Headers(init.headers).entries()) : undefined,
                     responseType: "text",
                     onload: function(response) {
+                        logCoreDebug(context, `Fetch: GM_xmlhttpRequest для M3U8 ${urlShortForLog} onload. Status: ${response.status}, Length: ${response.responseText?.length}`);
                         if (response.status >= 200 && response.status < 300) {
                             const { cleanedText, adsFound, linesRemoved } = parseAndCleanM3U8(response.responseText, requestUrl);
-                            if (adsFound) { logCoreDebug(context, `GM_xmlhttpRequest: ${urlShortForLog} ОЧИЩЕН. ${linesRemoved} строк удалено.`); }
 
                             const newHeaders = new Headers();
                             if (response.responseHeaders) {
@@ -662,12 +704,12 @@
 
                             resolve(new Response(cleanedText, { status: response.status, statusText: response.statusText, headers: newHeaders }));
                         } else {
-                            logError(context, `GM_xmlhttpRequest для ${urlShortForLog} не удался: ${response.status} ${response.statusText}`);
+                            logError(context, `Fetch: GM_xmlhttpRequest для ${urlShortForLog} не удался: ${response.status} ${response.statusText}`);
                             reject(new TypeError(`GM_xmlhttpRequest failed: ${response.statusText || response.status}`));
                         }
                     },
-                    onerror: function(error) { logError(context, `GM_xmlhttpRequest для ${urlShortForLog} ошибка сети:`, error); reject(new TypeError('Network error')); },
-                    ontimeout: function() { logError(context, `GM_xmlhttpRequest для ${urlShortForLog} таймаут.`); reject(new TypeError('Timeout')); }
+                    onerror: function(error) { logError(context, `Fetch: GM_xmlhttpRequest для ${urlShortForLog} ошибка сети:`, error); reject(new TypeError('Network error')); },
+                    ontimeout: function() { logError(context, `Fetch: GM_xmlhttpRequest для ${urlShortForLog} таймаут.`); reject(new TypeError('Timeout')); }
                 });
             });
         }
@@ -704,13 +746,18 @@
         } catch (error) {
             if (error instanceof TypeError && (error.message.includes('fetch') || error.message.includes('Network') || error.message.includes('aborted') || error.message.includes('ERR_BLOCKED_BY_CLIENT') || error.message.includes('ERR_CONNECTION_CLOSED'))) {
                 logWarn(context, `Fetch failed for ${urlShortForLog}: ${error.message}`);
-                return Promise.resolve(new Response(null, { status: 0, statusText: `Simulated Network Error or Blocked by Client` }));
+                // Avoid returning a Response with status 0, as it might cause issues. Let it rethrow or simulate a more specific error.
+                // Consider re-throwing if it's a genuine network issue not caused by our blocking.
+                 if (error.message.includes('ERR_BLOCKED_BY_CLIENT')) {
+                    return Promise.resolve(new Response(null, { status: 403, statusText: `Simulated Blocked by Client` }));
+                 }
+                 // For other network errors, let them propagate or return a specific error if appropriate.
             } else if (error instanceof DOMException && error.name === 'AbortError') {
                 logModuleTrace(CORE_DEBUG_LOGGING, context, `Fetch aborted: ${urlShortForLog}`);
-                return Promise.resolve(new Response(null, { status: 0, statusText: "Fetch aborted" }));
+                // An aborted fetch should probably just propagate, not return a new Response(null, {status:0})
             }
             else { logError(context, `Unexpected fetch error for ${urlShortForLog}:`, error); }
-            throw error;
+            throw error; // Re-throw the error if not handled specifically
         }
     }
 
@@ -726,34 +773,76 @@
         logModuleTrace(CORE_DEBUG_LOGGING, context, `XHR Open: ${method} ${urlShortForLog}`);
 
         let blocked = false;
+        // *** OPTIMIZATION START: Whitelist check for XHR ***
+        let isWhitelistedTwitchContent = false;
+        let requestHostnameForCheck = '';
         try {
-            const requestHostname = new URL(urlString).hostname.toLowerCase();
-            if (blockedUrlKeywordsSet.has(requestHostname) || AD_URL_KEYWORDS_BLOCK.some(k => lowerCaseUrl.includes(k.toLowerCase()))) {
-                if (lowerCaseUrl.includes('nat.min.js') && !BLOCK_NATIVE_ADS_SCRIPT) { }
-                else { logWarn(context, `ПОМЕТКА XHR для блокировки: ${urlString}`); blocked = true; }
-            }
-        } catch (urlError) {
-            if (!(urlError.message.includes("Invalid URL") && urlString.startsWith("blob:"))) {
-                logWarn(context, `URL Parsing Error for XHR Open: "${urlString}": ${urlError.message}`);
-            }
-            if (AD_URL_KEYWORDS_BLOCK.some(k => lowerCaseUrl.includes(k.toLowerCase()))) {
-                if (lowerCaseUrl.includes('nat.min.js') && !BLOCK_NATIVE_ADS_SCRIPT) { }
-                else { logWarn(context, `ПОМЕТКА XHR для блокировки (fallback on URL parse error): ${urlString}`); blocked = true; }
+            requestHostnameForCheck = new URL(urlString).hostname;
+        } catch(e) { /*ignore*/ }
+
+        if (requestHostnameForCheck && TWITCH_CONTENT_HOST_REGEX.test(requestHostnameForCheck)) {
+            if (TWITCH_VIDEO_SEGMENT_PATH_REGEX.test(lowerCaseUrl) || TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl)) {
+                isWhitelistedTwitchContent = true;
             }
         }
+        // *** OPTIMIZATION END ***
 
-        xhrRequestData.set(this, { method: method.toUpperCase(), url: urlString, urlShort: urlShortForLog, blocked: blocked, isGql: isGqlRequest });
+        if (!isWhitelistedTwitchContent) {
+            try {
+                const hostnameToCheck = requestHostnameForCheck ? requestHostnameForCheck.toLowerCase() : new URL(urlString).hostname.toLowerCase();
+                if (blockedUrlKeywordsSet.has(hostnameToCheck) || AD_URL_KEYWORDS_BLOCK.some(k => lowerCaseUrl.includes(k.toLowerCase()))) {
+                    if (lowerCaseUrl.includes('nat.min.js') && !BLOCK_NATIVE_ADS_SCRIPT) { /* not blocked */ }
+                    else { logWarn(context, `ПОМЕТКА XHR для блокировки (ключевое слово): ${urlString}`); blocked = true; }
+                }
+            } catch (urlError) {
+                if (!(urlError.message.includes("Invalid URL") && urlString.startsWith("blob:"))) {
+                    logWarn(context, `URL Parsing Error for XHR Open: "${urlString}": ${urlError.message}`);
+                }
+                if (AD_URL_KEYWORDS_BLOCK.some(k => lowerCaseUrl.includes(k.toLowerCase()))) {
+                    if (lowerCaseUrl.includes('nat.min.js') && !BLOCK_NATIVE_ADS_SCRIPT) { /* not blocked */ }
+                    else { logWarn(context, `ПОМЕТКА XHR для блокировки (fallback on URL parse error): ${urlString}`); blocked = true; }
+                }
+            }
+        } else {
+             logModuleTrace(CORE_DEBUG_LOGGING, context, `XHR Open: Пропуск общей блокировки для ${urlShortForLog} (белый список Twitch контента)`);
+        }
 
-        if (isGqlRequest && MODIFY_GQL_RESPONSE) {
+
+        const isM3U8RequestToUsher = method.toUpperCase() === 'GET' && TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl) && urlString.includes('usher.ttvnw.net');
+        xhrRequestData.set(this, { method: method.toUpperCase(), url: urlString, urlShort: urlShortForLog, blocked: blocked, isGql: isGqlRequest, isM3U8: isM3U8RequestToUsher });
+
+        if ((isGqlRequest && MODIFY_GQL_RESPONSE) || isM3U8RequestToUsher) {
             this.addEventListener('load', function() {
                 if (this.readyState === 4 && this.status >= 200 && this.status < 300) {
                     const reqData = xhrRequestData.get(this);
-                    if (reqData?.isGql) {
+                    if (reqData) {
                         const originalResponseText = this.responseText;
                         if (typeof originalResponseText !== 'string' || originalResponseText.length === 0) return;
 
-                        const modifiedText = modifyGqlResponse(originalResponseText, reqData.url);
-                        xhrRequestData.set(this, { ...reqData, modifiedResponse: modifiedText !== originalResponseText ? modifiedText : null });
+                        let modifiedText = originalResponseText;
+                        let modificationPerformed = false;
+                        const currentContext = reqData.isGql ? 'GQL:XhrResp' : (reqData.isM3U8 ? 'M3U8:XhrResp' : 'XHR:Resp');
+
+                        if (reqData.isGql && MODIFY_GQL_RESPONSE) {
+                            logModuleTrace(LOG_GQL_MODIFY_DEBUG, currentContext, `Обработка GQL ответа для ${reqData.urlShort}`);
+                            const gqlModified = modifyGqlResponse(originalResponseText, reqData.url);
+                            if (gqlModified !== originalResponseText) {
+                                modifiedText = gqlModified;
+                                modificationPerformed = true;
+                            }
+                        } else if (reqData.isM3U8) { // This specifically refers to isM3U8RequestToUsher
+                            logCoreDebug(currentContext, `Обработка M3U8 ответа для ${reqData.urlShort}. Длина: ${originalResponseText.length}`);
+                            const { cleanedText, adsFound, linesRemoved } = parseAndCleanM3U8(originalResponseText, reqData.url);
+                            if (adsFound) { // Only modify if ads were actually found and removed
+                                modifiedText = cleanedText;
+                                modificationPerformed = true;
+                            }
+                        }
+
+                        if (modificationPerformed) {
+                            logCoreDebug(currentContext, `Ответ ИЗМЕНЕН для ${reqData.urlShort}. Новая длина: ${modifiedText.length}`);
+                            xhrRequestData.set(this, { ...reqData, modifiedResponse: modifiedText });
+                        }
                     }
                 }
             }, { once: true, passive: true });
@@ -763,9 +852,13 @@
             try { return originalXhrOpen.apply(this, arguments); }
             catch (error) { logError(context, `originalXhrOpen error for ${urlShortForLog}:`, error); throw error; }
         } else {
-            try { originalXhrOpen.apply(this, arguments); } catch(e) { }
+            // If blocked, we should not proceed with originalXhrOpen.
+            // The blocking action will be in xhrSendOverride.
+            // However, we need to ensure 'this' is properly initialized if an error occurs during apply.
+            try { originalXhrOpen.call(this, method, "about:blank", ...Array.from(arguments).slice(2)); } catch(e) { /* This is a dummy call to satisfy XHR state if original fails */ }
         }
     }
+
 
     function xhrSendOverride(data) {
         const context = 'NetBlock:XHR';
@@ -780,13 +873,29 @@
 
         if (blocked) {
             logWarn(context, `БЛОКИРОВКА XHR send: ${urlShort} (URL: ${requestInfo.url})`);
+            // Simulate an aborted request or network error
+            this.dispatchEvent(new ProgressEvent('error')); // More indicative of a block
             this.dispatchEvent(new ProgressEvent('abort'));
-            this.dispatchEvent(new ProgressEvent('error'));
             try {
-                Object.defineProperty(this, 'readyState', { value: 4, writable: false, configurable: true });
-                Object.defineProperty(this, 'status', { value: 0, writable: false, configurable: true });
-            } catch (e) { }
-            return;
+                // These might not be directly settable or effective on all browsers once send is called.
+                Object.defineProperty(this, 'readyState', { value: 4, writable: true, configurable: true }); // Make writable true for a moment
+                this.readyState = 4;
+                Object.defineProperty(this, 'status', { value: 0, writable: true, configurable: true });
+                this.status = 0; // 0 is often used for client-side blocks
+                Object.defineProperty(this, 'statusText', { value: "Blocked by TTV AdBlock Ultimate", writable: true, configurable: true });
+                this.statusText = "Blocked by TTV AdBlock Ultimate";
+
+                // Ensure readyState and status are not writable after setting if XHR spec requires
+                Object.defineProperty(this, 'readyState', { writable: false });
+                Object.defineProperty(this, 'status', { writable: false });
+                Object.defineProperty(this, 'statusText', { writable: false });
+
+            } catch (e) { logWarn(context, `Не удалось установить статус для заблокированного XHR ${urlShort}: ${e.message}`); }
+            // Call onloadend if it exists, as the request effectively "ended"
+            if (typeof this.onloadend === 'function') {
+                try { this.onloadend(); } catch (e) {}
+            }
+            return; // Do not call originalXhrSend
         }
 
         try {
@@ -804,18 +913,24 @@
     }
 
     function hookXhrGetters() {
-        const context = 'GQL:XhrGetter';
-        if (MODIFY_GQL_RESPONSE) {
+        const contextGQL = 'GQL:XhrGetter';
+        const contextM3U8 = 'M3U8:XhrGetter';
+
+        if (MODIFY_GQL_RESPONSE || true) { // True ensures M3U8 can also use this
             if (originalXhrResponseGetter?.get) {
                 Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'response', {
                     get: function() {
                         const reqData = xhrRequestData.get(this);
-                        if (reqData?.isGql && reqData.modifiedResponse !== undefined && reqData.modifiedResponse !== null && (this.responseType === '' || this.responseType === 'text')) {
-                            logModuleTrace(LOG_GQL_MODIFY_DEBUG, context, `Возврат модифицированного 'response' для ${reqData.urlShort}`);
+                        if (reqData?.modifiedResponse !== null && reqData?.modifiedResponse !== undefined &&
+                            ( (reqData.isGql && MODIFY_GQL_RESPONSE) || reqData.isM3U8 ) && // isM3U8 for M3U8 responses
+                            (this.responseType === '' || this.responseType === 'text')) {
+                            const type = reqData.isGql ? 'GQL' : 'M3U8';
+                            const logContext = reqData.isGql ? contextGQL : contextM3U8;
+                            logModuleTrace(reqData.isGql ? LOG_GQL_MODIFY_DEBUG : LOG_M3U8_CLEANING_DEBUG, logContext, `Возврат модифицированного 'response' (${type}) для ${reqData.urlShort}`);
                             return reqData.modifiedResponse;
                         }
                         try { return originalXhrResponseGetter.get.call(this); }
-                        catch (getterError) { logWarn(context, `XHR 'response' getter error for ${reqData?.urlShort || 'unknown XHR'}: ${getterError.message}`); return null;}
+                        catch (getterError) { logWarn(reqData?.isGql ? contextGQL : (reqData?.isM3U8 ? contextM3U8 : 'XHR:Getter'), `XHR 'response' getter error for ${reqData?.urlShort || 'unknown XHR'}: ${getterError.message}`); return null;}
                     },
                     configurable: true
                 });
@@ -824,17 +939,20 @@
                 Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'responseText', {
                     get: function() {
                         const reqData = xhrRequestData.get(this);
-                        if (reqData?.isGql && reqData.modifiedResponse !== undefined && reqData.modifiedResponse !== null) {
-                            logModuleTrace(LOG_GQL_MODIFY_DEBUG, context, `Возврат модифицированного 'responseText' для ${reqData.urlShort}`);
+                        if (reqData?.modifiedResponse !== null && reqData?.modifiedResponse !== undefined &&
+                            ( (reqData.isGql && MODIFY_GQL_RESPONSE) || reqData.isM3U8 ) ) { // isM3U8 for M3U8 responses
+                            const type = reqData.isGql ? 'GQL' : 'M3U8';
+                            const logContext = reqData.isGql ? contextGQL : contextM3U8;
+                            logModuleTrace(reqData.isGql ? LOG_GQL_MODIFY_DEBUG : LOG_M3U8_CLEANING_DEBUG, logContext, `Возврат модифицированного 'responseText' (${type}) для ${reqData.urlShort}`);
                             return reqData.modifiedResponse;
                         }
                         try { return originalXhrResponseTextGetter.get.call(this); }
-                        catch (getterError) { logWarn(context, `XHR 'responseText' getter error for ${reqData?.urlShort || 'unknown XHR'}: ${getterError.message}`); return "";}
+                        catch (getterError) { logWarn(reqData?.isGql ? contextGQL : (reqData?.isM3U8 ? contextM3U8 : 'XHR:Getter'), `XHR 'responseText' getter error for ${reqData?.urlShort || 'unknown XHR'}: ${getterError.message}`); return "";}
                     },
                     configurable: true
                 });
             }
-            logCoreDebug(context, `XHR геттеры 'response' и 'responseText' перехвачены для GQL.`);
+            logCoreDebug('XHR:Getters', `XHR геттеры 'response' и 'responseText' перехвачены для GQL и M3U8.`);
         }
     }
 
@@ -842,21 +960,59 @@
     function handleMessageFromWorkerGlobal(event) {
         const msgData = event.data;
         if (msgData && typeof msgData.type === 'string') {
-            const workerInstance = event.source;
-            const workerLabel = Array.from(hookedWorkers.entries()).find(([key, value]) => value.instance === workerInstance)?.[0] || 'UnknownWorker';
+            const workerInstance = event.source; // This is the correct way to get the source worker
+            let workerLabel = 'UnknownWorker';
+
+            // Try to find workerLabel based on event.source
+            if (workerInstance) {
+                for (const [label, state] of hookedWorkers.entries()) {
+                    if (state.instance === workerInstance) {
+                        workerLabel = label;
+                        break;
+                    }
+                }
+            } else if (msgData.workerLabel) { // Fallback to label in message if source not available (less reliable)
+                workerLabel = msgData.workerLabel;
+            }
+
 
             if (msgData.type === 'ADBLOCK_WORKER_HOOKS_READY') {
                 logCoreDebug('WorkerInject:Confirm', `Получен сигнал ADBLOCK_WORKER_HOOKS_READY от Worker (${workerLabel}, Method: ${msgData.method || 'N/A'})`);
-                const workerState = hookedWorkers.get(workerLabel);
-                if (workerState) workerState.hooksReady = true;
-                else logWarn('WorkerInject:Confirm', `HOOKS_READY от неизвестного Worker: ${workerLabel}`);
-            } else if (msgData.type === 'PONG') {
-                const workerState = hookedWorkers.get(workerLabel);
-                if (workerState) workerState.lastPong = Date.now();
-                logModuleTrace(LOG_WORKER_INJECTION_DEBUG, 'WorkerInject:Pinger', `PONG received from ${workerLabel}`);
+                const workerState = hookedWorkers.get(workerLabel); // Try direct lookup first
+                if (workerState) {
+                    workerState.hooksReady = true;
+                } else { // If not found by label (e.g. label was from message), iterate to find by instance
+                    let found = false;
+                    for(const state of hookedWorkers.values()){
+                        if(state.instance === workerInstance) {
+                            state.hooksReady = true;
+                            found = true;
+                            break;
+                        }
+                    }
+                    if(!found) {
+                        logWarn('WorkerInject:Confirm', `HOOKS_READY от Worker (${workerLabel}), но не найден в hookedWorkers. Возможно, был удален или label/instance не совпал.`);
+                    }
+                }
+            } else if (msgData.type === 'PONG_WORKER_ADBLOCK') { // Changed to PONG_WORKER_ADBLOCK
+                const pongWorkerLabel = msgData.workerLabel || workerLabel; // Prefer label from pong message if available
+                const workerState = hookedWorkers.get(pongWorkerLabel);
+                if (workerState) {
+                    workerState.lastPong = Date.now();
+                    logModuleTrace(LOG_WORKER_INJECTION_DEBUG, 'WorkerInject:Pinger', `PONG_WORKER_ADBLOCK received from ${pongWorkerLabel}`);
+                } else {
+                    logModuleTrace(LOG_WORKER_INJECTION_DEBUG, 'WorkerInject:Pinger', `PONG_WORKER_ADBLOCK received from unknown/deleted worker ${pongWorkerLabel}`);
+                }
             } else if (msgData.type === 'ADBLOCK_FETCH_M3U8_REQUEST') {
-                logCoreDebug('MainWorkerComm', `Получен M3U8 запрос от Worker (${workerLabel}): ${msgData.url}`);
+                logCoreDebug('MainWorkerComm', `Получен M3U8 запрос от Worker (${workerLabel}): ${msgData.url.substring(0,100)}`);
                 const { url, initDetails, id } = msgData;
+
+                if (!workerInstance) {
+                    logError('MainWorkerComm', `Не удалось получить workerInstance для ответа Worker'у (${workerLabel}) по M3U8 запросу. Запрос ${id} не будет обработан.`);
+                    return;
+                }
+
+
                 GM_xmlhttpRequest({
                     method: "GET", url: url,
                     headers: initDetails?.headers ? Object.fromEntries(initDetails.headers) : undefined,
@@ -879,25 +1035,25 @@
                                 });
                             }
                             postData.headers = responseHeadersObj;
-                            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'MainWorkerComm', `Отправка успешного ответа для M3U8 ${id} (AdsFound: ${adsFound})`);
+                            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'MainWorkerComm', `Отправка успешного ответа для M3U8 ${id} (AdsFound: ${adsFound}, Worker: ${workerLabel}). Длина: ${cleanedText?.length}`);
                         } else {
                             postData.error = `Failed GM_xmlhttpRequest: ${response.status} ${response.statusText}`;
                             postData.status = response.status;
                             postData.statusText = response.statusText;
-                            logError('MainWorkerComm', `GM_xmlhttpRequest ошибка для M3U8 ${id}: ${postData.error}`);
+                            logError('MainWorkerComm', `GM_xmlhttpRequest ошибка для M3U8 ${id} от Worker (${workerLabel}): ${postData.error}`);
                         }
                         try { workerInstance.postMessage(postData); }
-                        catch (e) { logError('MainWorkerComm', `Ошибка postMessage обратно в Worker (${workerLabel}): ${e}`);}
+                        catch (e) { logError('MainWorkerComm', `Ошибка postMessage обратно в Worker (${workerLabel}) для M3U8 ${id}: ${e.message}`);}
                     },
                     onerror: function(error) {
-                        logError('MainWorkerComm', `Сетевая ошибка GM_xmlhttpRequest для M3U8 ${id}:`, error);
+                        logError('MainWorkerComm', `Сетевая ошибка GM_xmlhttpRequest для M3U8 ${id} от Worker (${workerLabel}):`, error);
                         try { workerInstance.postMessage({ type: 'ADBLOCK_M3U8_RESPONSE', id: id, error: 'Network error', status: 0, statusText: 'Network Error' }); }
-                        catch (e) { logError('MainWorkerComm', `Ошибка postMessage обратно в Worker (${workerLabel}): ${e}`);}
+                        catch (e) { logError('MainWorkerComm', `Ошибка postMessage обратно в Worker (${workerLabel}) для M3U8 ${id}: ${e.message}`);}
                     },
                     ontimeout: function() {
-                        logError('MainWorkerComm', `Таймаут GM_xmlhttpRequest для M3U8 ${id}.`);
+                        logError('MainWorkerComm', `Таймаут GM_xmlhttpRequest для M3U8 ${id} от Worker (${workerLabel}).`);
                         try { workerInstance.postMessage({ type: 'ADBLOCK_M3U8_RESPONSE', id: id, error: 'Timeout', status: 0, statusText: 'Timeout' }); }
-                        catch (e) { logError('MainWorkerComm', `Ошибка postMessage обратно в Worker (${workerLabel}): ${e}`);}
+                        catch (e) { logError('MainWorkerComm', `Ошибка postMessage обратно в Worker (${workerLabel}) для M3U8 ${id}: ${e.message}`);}
                     }
                 });
             }
@@ -906,13 +1062,17 @@
 
     function addWorkerMessageListeners(workerInstance, label) {
         if (!workerInstance || typeof workerInstance.addEventListener !== 'function' || workerInstance._listenersAddedByAdblock) return;
-        workerInstance._listenersAddedByAdblock = true;
-        workerInstance.addEventListener('message', handleMessageFromWorkerGlobal, { passive: true });
+
+        // Add main message listener if not already added globally for this worker (handleMessageFromWorkerGlobal does this)
+        // workerInstance.addEventListener('message', handleMessageFromWorkerGlobal, { passive: true }); // Already handled by global listener
+
         workerInstance.addEventListener('error', (e) => {
             logError('WorkerInject:Error', `Ошибка внутри Worker (${label}):`, e.message, `(${e.filename}:${e.lineno}:${e.colno})`);
-            hookedWorkers.delete(label);
+            // Do not delete hooked worker here, pinger will handle unresponsive ones if needed
+            // hookedWorkers.delete(label);
         }, { passive: true });
-        logCoreDebug('WorkerInject:MsgListenerSetup', `Слушатели сообщений добавлены для Worker (${label})`);
+        workerInstance._listenersAddedByAdblock = true; // Mark that we've attached listeners to this specific instance.
+        logCoreDebug('WorkerInject:MsgListenerSetup', `Слушатели ошибок (и глобальный message) активны для Worker (${label})`);
     }
 
 
@@ -929,39 +1089,62 @@
             constructor(scriptURL, options) {
                 let urlString = (scriptURL instanceof URL) ? scriptURL.href : String(scriptURL);
                 let isBlobURL = urlString.startsWith('blob:');
-                let workerLabel = isBlobURL ? `blob:${urlString.substring(5, 35)}...` : (urlString.split(/[?#]/)[0].split('/').pop() || urlString.substring(0, 60));
-                let isIVSWorker = workerLabel.includes('amazon-ivs-wasmworker') || workerLabel.includes('ivs-wasmworker');
+                const randomId = Math.random().toString(36).substr(2, 5);
+                let workerLabel = isBlobURL ? `blob-${randomId}:${urlString.substring(5, 35)}...` : `${(urlString.split(/[?#]/)[0].split('/').pop() || urlString.substring(0, 40))}-${randomId}`;
+                let isIVSWorker = workerLabel.includes('amazon-ivs-wasmworker') || workerLabel.includes('ivs-wasmworker'); // IVS often uses wasm/blob
                 if(isIVSWorker) workerLabel += " (IVS)";
 
-                logModuleTrace(LOG_WORKER_INJECTION_DEBUG, context, `Создание нового Worker: ${workerLabel} (Тип: ${isBlobURL ? 'Blob' : 'Script'}${isIVSWorker ? ', IVS Worker' : ''})`);
+                logModuleTrace(LOG_WORKER_INJECTION_DEBUG, context, `Создание нового Worker: ${workerLabel} (Тип: ${isBlobURL ? 'Blob' : 'Script'}${isIVSWorker ? ', IVS Worker' : ''}), URL: ${urlString.substring(0,150)}`);
 
                 let newWorkerInstance;
                 try {
+                    // For blob URLs, code injection via postMessage + eval is often not possible or desirable.
+                    // The expectation is that if a blob worker needs our code, it's created with it.
+                    // For script URLs, we can attempt postMessage injection.
                     newWorkerInstance = super(scriptURL, options);
-                    newWorkerInstance._workerLabel = workerLabel;
-                    hookedWorkers.set(workerLabel, { instance: newWorkerInstance, lastPing: 0, lastPong: Date.now(), hooksReady: false });
-                    addWorkerMessageListeners(newWorkerInstance, workerLabel);
+                    newWorkerInstance._workerLabel = workerLabel; // Store label for easier identification
+                    newWorkerInstance._createdAt = Date.now(); // Store creation time
 
-                    if (!isIVSWorker) {
+                    hookedWorkers.set(workerLabel, {
+                        instance: newWorkerInstance,
+                        lastPing: 0,
+                        lastPong: Date.now(), // Initialize lastPong to now to avoid immediate ping timeout
+                        hooksReady: false,
+                        url: urlString,
+                        isBlob: isBlobURL,
+                        isIVS: isIVSWorker
+                    });
+                    addWorkerMessageListeners(newWorkerInstance, workerLabel); // Attaches error listeners
+
+                    // Only attempt postMessage injection for non-blob, non-IVS workers known not to self-inject.
+                    // IVS workers are special and usually shouldn't be tampered with this way.
+                    if (!isBlobURL && !isIVSWorker) {
                         setTimeout(() => {
                             const workerState = hookedWorkers.get(workerLabel);
-                            if (workerState && !workerState.hooksReady && !isBlobURL) {
-                                logWarn(context, `Worker (${workerLabel}) не прислал сигнал HOOKS_READY. Попытка инъекции кода через postMessage...`);
+                            if (workerState && !workerState.hooksReady) {
+                                logWarn(context, `Worker (${workerLabel}) не прислал сигнал HOOKS_READY в течение 300ms. Попытка инъекции кода через postMessage...`);
                                 try {
                                     const codeToInject = getWorkerInjectionCode();
                                     logCoreDebug(context, `Отправка EVAL_ADBLOCK_CODE в Worker (${workerLabel})...`);
                                     newWorkerInstance.postMessage({ type: 'EVAL_ADBLOCK_CODE', code: codeToInject });
                                 } catch(e) {
                                     logError(context, `Ошибка postMessage (EVAL_ADBLOCK_CODE) для Worker (${workerLabel}):`, e);
-                                    hookedWorkers.delete(workerLabel);
+                                    // hookedWorkers.delete(workerLabel); // Avoid aggressive deletion
                                 }
+                            } else if (workerState && workerState.hooksReady) {
+                                logModuleTrace(LOG_WORKER_INJECTION_DEBUG, context, `Worker (${workerLabel}) уже прислал HOOKS_READY. Инъекция EVAL_ADBLOCK_CODE не требуется.`);
+                            } else if (!workerState) {
+                                // logWarn(context, `Worker (${workerLabel}) не найден в hookedWorkers перед отложенной инъекцией.`);
                             }
                         }, 300);
+                    } else {
+                        logModuleTrace(LOG_WORKER_INJECTION_DEBUG, context, `Пропуск инъекции EVAL_ADBLOCK_CODE для ${isBlobURL ? 'Blob' : ''}${isIVSWorker ? 'IVS ' : ''}Worker (${workerLabel}).`);
+                         // For blob/IVS, assume they are either not our target or handle themselves.
+                         // We still track them in hookedWorkers for potential debugging/identification.
                     }
 
                 } catch (constructorError) {
-                    logError(context, `Ошибка конструктора HookedWorker для ${workerLabel}:`, constructorError);
-                    hookedWorkers.delete(workerLabel);
+                    logError(context, `Ошибка конструктора HookedWorker для ${workerLabel} (URL: ${urlString.substring(0,100)}):`, constructorError);
                     throw constructorError;
                 }
                 return newWorkerInstance;
@@ -971,11 +1154,15 @@
         try {
             Object.keys(OriginalWorker).forEach(key => { if (!unsafeWindow.Worker.hasOwnProperty(key)) { try { unsafeWindow.Worker[key] = OriginalWorker[key]; } catch(e){} } });
             Object.setPrototypeOf(unsafeWindow.Worker, OriginalWorker);
-            Object.setPrototypeOf(unsafeWindow.Worker.prototype, OriginalWorker.prototype);
-        } catch (e) { logError(context, "Не удалось восстановить прототип Worker:", e); }
+            // Setting prototype of Worker.prototype is tricky and might not be needed if statics are enough
+            // Object.setPrototypeOf(unsafeWindow.Worker.prototype, OriginalWorker.prototype);
+        } catch (e) { logError(context, "Не удалось восстановить прототип/статику Worker:", e); }
 
         unsafeWindow.Worker.hooked_by_adblock_ult = true;
         logCoreDebug(context, "Worker конструктор успешно перехвачен.");
+
+        unsafeWindow.addEventListener('message', handleMessageFromWorkerGlobal, { passive: true });
+        logCoreDebug(context, "Глобальный слушатель 'message' от worker'ов добавлен.");
     }
 
     function startWorkerPinger() {
@@ -985,33 +1172,56 @@
         logModuleTrace(LOG_WORKER_INJECTION_DEBUG, context, `Запуск Worker Pinger (интервал: ${WORKER_PING_INTERVAL_MS}ms).`);
         workerPingIntervalId = setInterval(() => {
             const now = Date.now();
-            if (hookedWorkers.size === 0) return;
+            if (hookedWorkers.size === 0 && !LOG_WORKER_INJECTION_DEBUG) { // Less verbose if no workers and debug off
+                return;
+            }
 
             hookedWorkers.forEach((state, label) => {
                 try {
                     if (state.instance && typeof state.instance.postMessage === 'function') {
-                        if (!state.hooksReady && !label.includes('(IVS)')) {
-                            return;
+                        // *** OPTIMIZATION START: Modified Pinger Logic ***
+                        let shouldPing = false;
+                        if (state.hooksReady) { // Always ping if hooks are reported ready
+                            shouldPing = true;
+                        } else if (!state.isBlob && !state.isIVS) { // For non-blob/non-IVS workers, ping if they haven't reported ready for a while
+                             const timeSinceCreation = now - (state.instance._createdAt || state.lastPing || now);
+                             if (timeSinceCreation > WORKER_PING_INTERVAL_MS * 1.5) { // Give them some time to report
+                                 shouldPing = true;
+                             }
                         }
+                        // Do NOT ping blob or IVS workers unless they explicitly signaled hooksReady,
+                        // as they might not have our ping handler and are critical.
 
-                        const timeSinceLastPong = now - (state.lastPong || state.lastPing || 0);
-                        if (state.lastPong !== 0 && timeSinceLastPong > WORKER_PING_INTERVAL_MS * 3.5) {
-                            logWarn(context, `Worker (${label}) не отвечает на пинги (${Math.round(timeSinceLastPong/1000)}s). Удаление из списка.`);
-                            hookedWorkers.delete(label);
-                            return;
+                        if (shouldPing) {
+                            // Check for timeout only if we expected a pong (i.e., we pinged before)
+                            if (state.lastPing > 0 && state.lastPong < state.lastPing && (now - state.lastPing > WORKER_PING_INTERVAL_MS * 2.5) ) {
+                                // More lenient timeout check (e.g., 2.5 * interval)
+                                // For critical workers (IVS/Blob that *did* signal ready), be cautious with termination.
+                                if (state.isIVS || state.isBlob) {
+                                    logWarn(context, `Worker (${label}) (IVS/Blob, HooksReady=${state.hooksReady}) не отвечает на пинги (${Math.round((now - state.lastPing)/1000)}s). НЕ УДАЛЯЕТСЯ.`);
+                                    // Reset lastPing to avoid continuous warnings for the same unresponsive worker if it's critical
+                                    state.lastPing = now + WORKER_PING_INTERVAL_MS; // Effectively skips next few ping cycles for this log
+                                } else {
+                                    logWarn(context, `Worker (${label}) не отвечает на пинги (${Math.round((now - state.lastPing)/1000)}s). Удаление из списка.`);
+                                    try { state.instance.terminate(); } catch(e){ /* ignore termination error */ }
+                                    hookedWorkers.delete(label);
+                                }
+                                return; // Move to next worker
+                            }
+                            logModuleTrace(LOG_WORKER_INJECTION_DEBUG, context, `PING_WORKER_ADBLOCK -> ${label}`);
+                            state.instance.postMessage({ type: 'PING_WORKER_ADBLOCK' });
+                            state.lastPing = now; // Record time of this ping
                         }
-                        if(!(label.includes('(IVS)') && !state.hooksReady)) {
-                            logModuleTrace(LOG_WORKER_INJECTION_DEBUG, context, `PING -> ${label}`);
-                            state.instance.postMessage({ type: 'PING' });
-                        }
-                        state.lastPing = now;
+                        // *** OPTIMIZATION END ***
                     } else {
                         logWarn(context, `Worker (${label}) не имеет postMessage или отсутствует. Удаление.`);
                         hookedWorkers.delete(label);
                     }
                 } catch (e) {
-                    logError(context, `Ошибка при отправке PING в Worker (${label}):`, e);
-                    hookedWorkers.delete(label);
+                    logError(context, `Ошибка при отправке PING_WORKER_ADBLOCK в Worker (${label}):`, e.message);
+                    if (e.message.includes("terminated")) { // If worker was already terminated
+                        hookedWorkers.delete(label);
+                    }
                 }
             });
         }, WORKER_PING_INTERVAL_MS);
@@ -1036,16 +1246,14 @@
         try {
             unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride;
             unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride;
-            if (MODIFY_GQL_RESPONSE) hookXhrGetters();
+            hookXhrGetters();
             logCoreDebug(context, "XMLHttpRequest перехвачен.");
         } catch (e) {
             logError(context, "Не удалось перехватить XMLHttpRequest:", e);
             if (originalXhrOpen) unsafeWindow.XMLHttpRequest.prototype.open = originalXhrOpen;
             if (originalXhrSend) unsafeWindow.XMLHttpRequest.prototype.send = originalXhrSend;
-            if (MODIFY_GQL_RESPONSE) {
-                if (originalXhrResponseGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'response', originalXhrResponseGetter); } catch(revertErr) {}
-                if (originalXhrResponseTextGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'responseText', originalXhrResponseTextGetter); } catch (revertErr) {}
-            }
+            if (originalXhrResponseGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'response', originalXhrResponseGetter); } catch(revertErr) {}
+            if (originalXhrResponseTextGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'responseText', originalXhrResponseTextGetter); } catch (revertErr) {}
         }
 
         if (INJECT_INTO_WORKERS) {
@@ -1068,14 +1276,15 @@
                 const elements = contextNode.querySelectorAll(selector);
                 elements.forEach(el => {
                     if (el && el.parentNode) {
-                        if (el.querySelector('video') || el.closest(PLAYER_SELECTORS_IMPROVED.join(','))) {
-                            logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, 'DOMRemove', `Пропуск удаления элемента ("${selector}") внутри плеера.`);
+                        // More robust check to avoid removing player itself or its core components
+                        if (el.querySelector('video') || el.closest(PLAYER_SELECTORS_IMPROVED.join(',')) || el.hasAttribute('data-a-target="video-player') || el.classList.contains('video-player')) {
+                            logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, 'DOMRemove', `Пропуск удаления элемента ("${selector}") внутри или являющегося плеером.`);
                             return;
                         }
                         logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, 'DOMRemove', `Удаление элемента по селектору: "${selector}"`);
                         try { el.parentNode.removeChild(el); removedCount++; }
                         catch (removeError) {
-                            if (!(removeError instanceof DOMException && removeError.name === 'NotFoundError')) {
+                            if (!(removeError instanceof DOMException && removeError.name === 'NotFoundError')) { // Ignore if already removed
                                 logWarn('DOMRemove', `Ошибка при удалении элемента с селектором "${selector}":`, removeError.message);
                             }
                         }
@@ -1093,13 +1302,20 @@
         const context = 'DOMRemove:Observer';
 
         let observedNode = document.body;
+        // Attempt to find a more specific parent if possible, but default to body
         for (const selector of AD_DOM_PARENT_INDICATOR_SELECTORS) {
             const parentNode = document.querySelector(selector);
             if (parentNode) { observedNode = parentNode; break; }
         }
-        if (!observedNode) observedNode = document.body || document.documentElement;
+        if (!observedNode) observedNode = document.body || document.documentElement; // Fallback
+        if(!observedNode) {
+            logWarn(context, `Не удалось найти узел для наблюдения DOM. Повторная попытка через 200мс.`);
+            setTimeout(startAdRemovalObserver, 200); // Retry if body not ready
+            return;
+        }
 
-        logCoreDebug(context, `Наблюдение за DOM изменениями в:`, observedNode.tagName + (observedNode.id ? '#' + observedNode.id : '') + (observedNode.className ? '.' + observedNode.className.split(' ').join('.') : ''));
+
+        logCoreDebug(context, `Наблюдение за DOM изменениями в:`, observedNode.tagName + (observedNode.id ? '#' + observedNode.id : '') + (observedNode.className ? '.' + String(observedNode.className).split(' ').filter(Boolean).map(c => '.'+c).join('') : ''));
 
         const observerConfig = { childList: true, subtree: true };
         const callback = function(mutationsList) {
@@ -1108,22 +1324,25 @@
                 if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                     for (const node of mutation.addedNodes) {
                         if (node.nodeType === Node.ELEMENT_NODE) {
+                            // Check if the added node itself matches any ad selectors
                             for (const adSelector of AD_DOM_ELEMENT_SELECTORS_TO_REMOVE) {
                                 if (adSelector === COOKIE_BANNER_SELECTOR && !HIDE_COOKIE_BANNER) continue;
-                                if (node.matches && node.matches(adSelector)) { potentialAdNodeAdded = true; break; }
+                                try { if (node.matches && node.matches(adSelector)) { potentialAdNodeAdded = true; break; } } catch(e){ /* ignore match errors on some nodes */ }
                             }
                             if (potentialAdNodeAdded) break;
 
+                            // Check if the added node contains any ad selectors
                             if (!potentialAdNodeAdded) {
                                 for (const adSelector of AD_DOM_ELEMENT_SELECTORS_TO_REMOVE) {
                                     if (adSelector === COOKIE_BANNER_SELECTOR && !HIDE_COOKIE_BANNER) continue;
                                     try { if (node.querySelector && node.querySelector(adSelector)) { potentialAdNodeAdded = true; break; } }
-                                    catch(e){ }
+                                    catch(e){ /* ignore query errors on some nodes */ }
                                 }
                             }
                             if (potentialAdNodeAdded) break;
 
-                            if (node.tagName === 'IFRAME' && AD_URL_KEYWORDS_BLOCK.some(keyword => node.src?.toLowerCase().includes(keyword))) {
+                            // Check for ad iframes by src
+                            if (node.tagName === 'IFRAME' && node.src && AD_URL_KEYWORDS_BLOCK.some(keyword => node.src.toLowerCase().includes(keyword))) {
                                 potentialAdNodeAdded = true; break;
                             }
                         }
@@ -1131,12 +1350,16 @@
                 }
                 if (potentialAdNodeAdded) break;
             }
-            if (potentialAdNodeAdded) { removeDOMAdElements(observedNode); }
+            if (potentialAdNodeAdded) {
+                logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, context, 'Обнаружены потенциальные рекламные узлы, запускается removeDOMAdElements.');
+                removeDOMAdElements(observedNode);
+            }
         };
         adRemovalObserver = new MutationObserver(callback);
         try {
             adRemovalObserver.observe(observedNode, observerConfig);
-            removeDOMAdElements(observedNode);
+            // Initial removal pass
+            requestAnimationFrame(() => removeDOMAdElements(observedNode));
             logCoreDebug(context, 'DOM Observer для удаления рекламы запущен.');
         } catch (e) {
             logError(context, 'Не удалось запустить DOM Observer:', e);
@@ -1152,8 +1375,12 @@
     }
 
     function findVideoPlayer() {
-        if (videoElement && videoElement.isConnected && videoElement.closest('body')) {
-            if (videoElement.offsetWidth > 0 && videoElement.offsetHeight > 0 && (videoElement.paused === false || videoElement.seeking === true || videoElement.readyState >= 3) ) return videoElement;
+        // More robust check for existing video element
+        if (videoElement && videoElement.isConnected && document.body.contains(videoElement)) { // Check if still in DOM
+            if (videoElement.offsetWidth > 0 && videoElement.offsetHeight > 0 &&
+                (videoElement.paused === false || videoElement.seeking === true || videoElement.readyState >= videoElement.HAVE_CURRENT_DATA) ) { // Looser readyState check
+                 if (window.getComputedStyle(videoElement).display !== 'none' && videoElement.offsetParent !== null) return videoElement;
+            }
         }
 
         let foundElement = null;
@@ -1161,26 +1388,33 @@
             try {
                 const elements = document.querySelectorAll(selector);
                 for (const el of elements) {
-                    if (el && el.tagName === 'VIDEO' && el.isConnected && el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetParent !== null && el.hasAttribute('src') && el.src.startsWith('blob:')) {
-                        foundElement = el;
-                        break;
+                    // Prioritize video elements with blob src, visible, and with dimensions
+                    if (el && el.tagName === 'VIDEO' && el.isConnected &&
+                        el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetParent !== null &&
+                        el.hasAttribute('src') && el.src.startsWith('blob:') &&
+                        window.getComputedStyle(el).display !== 'none') {
+                            foundElement = el;
+                            break;
                     }
                 }
                 if (foundElement) break;
+                // Fallback for other connected video elements if blob src not found
                 if (!foundElement && elements.length > 0) {
                     for (const el of elements) {
-                        if (el && el.tagName === 'VIDEO' && el.isConnected && el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetParent !== null) {
-                            foundElement = el;
-                            break;
+                        if (el && el.tagName === 'VIDEO' && el.isConnected &&
+                            el.offsetWidth > 0 && el.offsetHeight > 0 && el.offsetParent !== null &&
+                            window.getComputedStyle(el).display !== 'none') {
+                                foundElement = el;
+                                break;
                         }
                     }
                 }
                 if (foundElement) break;
-            } catch (e) { }
+            } catch (e) { /* querySelectorAll can fail on pseudo-elements or invalid selectors */ }
         }
 
         if (foundElement && foundElement !== videoElement) { logCoreDebug('PlayerFind', 'Видео элемент найден/изменился.'); }
-        else if (!foundElement && videoElement) { logWarn('PlayerFind', 'Видео элемент потерян.'); }
+        else if (!foundElement && videoElement) { logWarn('PlayerFind', 'Видео элемент потерян (был ранее).'); }
         else if (!foundElement) { logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerFind', 'Видео элемент не найден в данный момент.'); }
 
         videoElement = foundElement;
@@ -1188,44 +1422,36 @@
     }
 
     function observePlayerContainer() {
-        if (playerFinderObserver) return;
+        if (playerFinderObserver) return; // Already observing
         const targetNode = document.body || document.documentElement;
-        if (!targetNode) { setTimeout(observePlayerContainer, 500); return; }
+        if (!targetNode) {
+            logWarn('PlayerFind:Observer', 'Тело документа не найдено для MutationObserver. Повторная попытка...');
+            setTimeout(observePlayerContainer, 500); return;
+        }
 
         const config = { childList: true, subtree: true };
         const callback = function(mutationsList, observer) {
-            if (videoElement && videoElement.isConnected) return;
+            if (videoElement && videoElement.isConnected && document.body.contains(videoElement)) return; // Player already found and valid
 
-            const videoTags = targetNode.getElementsByTagName('video');
-            let potentialPlayer = null;
-            for (const video of videoTags) {
-                if (video.src && video.src.startsWith('blob:') && video.isConnected && video.offsetWidth > 0 && video.offsetHeight > 0) {
-                    potentialPlayer = video;
-                    break;
-                }
-            }
-            if (!potentialPlayer && videoTags.length > 0) {
-                for (const video of videoTags) {
-                    if (video.isConnected && video.offsetWidth > 0 && video.offsetHeight > 0) {
-                        potentialPlayer = video;
-                        break;
-                    }
+            // Efficiently check for video tags first if mutations are extensive
+            if (targetNode.getElementsByTagName('video').length > 0) {
+                const potentialPlayer = findVideoPlayer(); // Use the main finder logic
+                if (potentialPlayer) {
+                    logCoreDebug('PlayerFind:Observer', 'Обнаружен видеоплеер (возможно, через getElementsByTagName), запуск/перезапуск монитора плеера.');
+                    setupPlayerMonitor(); // This will also stop this observer if player found
+                    return; // Exit if player found
                 }
             }
 
-            if (potentialPlayer) {
-                logCoreDebug('PlayerFind:Observer', 'Обнаружен потенциальный видеоплеер через getElementsByTagName, запуск/перезапуск монитора плеера.');
-                setupPlayerMonitor();
-            } else {
-                for (const mutation of mutationsList) {
-                    if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                        for (const node of mutation.addedNodes) {
-                            if (node.nodeType === Node.ELEMENT_NODE) {
-                                if (node.tagName === 'VIDEO' || (node.querySelector && node.querySelector('video'))) {
-                                    logCoreDebug('PlayerFind:Observer', 'Обнаружено добавление VIDEO элемента или его родителя, запуск/перезапуск монитора плеера.');
-                                    setupPlayerMonitor();
-                                    return;
-                                }
+            // Fallback to checking mutations if getElementsByTagName didn't yield a quick find
+            for (const mutation of mutationsList) {
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                    for (const node of mutation.addedNodes) {
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            if (node.tagName === 'VIDEO' || (node.querySelector && node.querySelector('video'))) {
+                                logCoreDebug('PlayerFind:Observer', 'Обнаружено добавление VIDEO элемента или его родителя, запуск/перезапуск монитора плеера.');
+                                setupPlayerMonitor(); // This will also stop this observer if player found
+                                return; // Exit if player found or attempt to find it starts
                             }
                         }
                     }
@@ -1257,44 +1483,44 @@
             playerMonitorIntervalId = null;
             if (videoElement) removePlayerEventListeners();
             videoElement = null;
-            stopObservingPlayerContainer();
-            stopAdRemovalObserver();
-            stopWorkerPinger();
+            stopObservingPlayerContainer(); // Stop observing if auto-reload is off
+            stopAdRemovalObserver(); // Also stop ad removal if player monitor is off
             logCoreDebug(context, 'Авто-перезагрузка отключена, монитор плеера деактивирован.');
             return;
         }
 
         const currentVideoElement = findVideoPlayer();
         if (!currentVideoElement) {
-            if (playerMonitorIntervalId) clearInterval(playerMonitorIntervalId);
+            if (playerMonitorIntervalId) clearInterval(playerMonitorIntervalId); // Stop old interval if player lost
             playerMonitorIntervalId = null;
-            if (videoElement) removePlayerEventListeners();
+            if (videoElement) removePlayerEventListeners(); // Clean up old listeners
             videoElement = null;
-            stopAdRemovalObserver();
-            if (!playerFinderObserver) observePlayerContainer();
+            stopAdRemovalObserver(); // Stop ad removal if no player
+            if (!playerFinderObserver && document.body) observePlayerContainer(); // Start observing if not already
             logCoreDebug(context, 'Видео элемент не найден. Запущен/продолжает работать MutationObserver для его поиска.');
             return;
         }
+        // If player is found, stop the MutationObserver for player search
         stopObservingPlayerContainer();
 
 
         if (currentVideoElement !== videoElement || !playerMonitorIntervalId) {
             logCoreDebug(context, `Видео элемент найден/изменился. Инициализация монитора...`);
             if (playerMonitorIntervalId) clearInterval(playerMonitorIntervalId);
-            if (videoElement) removePlayerEventListeners();
+            if (videoElement) removePlayerEventListeners(); // Clean up listeners from a previous element
 
             videoElement = currentVideoElement;
-            checkReloadCooldown(context);
+            checkReloadCooldown(context); // Check cooldown from previous session/reload
             addPlayerEventListeners();
             resetMonitorState('Monitor setup/reset');
 
-            if (ATTEMPT_DOM_AD_REMOVAL) startAdRemovalObserver();
+            if (ATTEMPT_DOM_AD_REMOVAL && !adRemovalObserver && document.body) startAdRemovalObserver();
 
             if (!document.hidden) {
-                playerMonitorIntervalId = setInterval(monitorPlayerState, 2000);
+                playerMonitorIntervalId = setInterval(monitorPlayerState, 2000); // Standard interval 2s
                 logCoreDebug(context, 'Интервал мониторинга состояния плеера запущен.');
             } else {
-                logCoreDebug(context, 'Вкладка неактивна, интервал мониторинга не запущен.');
+                logCoreDebug(context, 'Вкладка неактивна, интервал мониторинга не запущен (будет запущен при visibilitychange).');
             }
         }
     }
@@ -1304,15 +1530,15 @@
         const now = Date.now();
         if (!ENABLE_AUTO_RELOAD) return;
 
-        if (reloadTimeoutId) {
-            logWarn(context, `Перезагрузка (${reason}) запрошена, но другая перезагрузка уже запланирована (${reloadTimeoutId._reason || '?'}). Игнорирование.`);
+        if (reloadTimeoutId) { // A reload is already scheduled
+            logWarn(context, `Перезагрузка (${reason}) запрошена, но другая перезагрузка уже запланирована (${reloadTimeoutId._reason || '?'}). Игнорирование нового запроса.`);
             return;
         }
         if (now - lastReloadTimestamp < RELOAD_COOLDOWN_MS) {
             logWarn(context, `Перезагрузка (${reason}) отменена: активен кулдаун перезагрузки (${((RELOAD_COOLDOWN_MS - (now - lastReloadTimestamp))/1000).toFixed(1)}с осталось).`);
             return;
         }
-        if (document.hidden) {
+        if (document.hidden) { // Don't reload if tab is hidden
             logWarn(context, `Перезагрузка (${reason}) отменена: вкладка неактивна.`);
             return;
         }
@@ -1327,16 +1553,19 @@
 
         logError(context, `!!!!!! ЗАПУСК ПЕРЕЗАГРУЗКИ СТРАНИЦЫ !!!!!! Причина: ${reason}. Состояние плеера: ${playerStateLog}`);
         lastReloadTimestamp = now;
-        try { sessionStorage.setItem('ttv_adblock_last_reload', now.toString()); } catch (e) {}
+        try { sessionStorage.setItem('ttv_adblock_last_reload', now.toString()); } catch (e) { /* session storage might be unavailable */ }
 
+        // Cleanup before reload
         if (playerMonitorIntervalId) clearInterval(playerMonitorIntervalId);
         playerMonitorIntervalId = null;
         removePlayerEventListeners();
         stopObservingPlayerContainer();
         stopAdRemovalObserver();
-        stopWorkerPinger();
+        stopWorkerPinger(); // Stop pinger too
 
+        // Perform reload
         unsafeWindow.location.reload();
+        // Fallback reload if the first one somehow fails (e.g. blocked by onbeforeunload)
         setTimeout(() => { if(unsafeWindow?.location?.reload) unsafeWindow.location.reload(true); }, 2500);
     }
 
@@ -1349,16 +1578,17 @@
         }
         logWarn(context, `Планирование перезагрузки через ${(delayMs / 1000).toFixed(1)}с. Причина: ${reason}`);
         reloadTimeoutId = setTimeout(() => {
-            const internalReason = reloadTimeoutId?._reason || reason;
-            reloadTimeoutId = null;
+            const internalReason = reloadTimeoutId?._reason || reason; // Get reason stored at schedule time
+            reloadTimeoutId = null; // Clear ID before triggering
             triggerReload(internalReason);
         }, delayMs);
-        try { if (reloadTimeoutId) reloadTimeoutId._reason = reason; } catch(e){}
+        try { if (reloadTimeoutId) reloadTimeoutId._reason = reason; } catch(e){} // Store reason with timeoutId
     }
 
     function resetMonitorState(reason = '') {
         if (reloadTimeoutId) {
             const currentReloadReason = reloadTimeoutId._reason || '';
+            // Only cancel reload if it's not for a critical error
             if (!currentReloadReason.toLowerCase().includes('error') && !currentReloadReason.toLowerCase().includes('ошибка')) {
                 logCoreDebug('PlayerMon:State', `Отмена запланированной перезагрузки (Причина: ${currentReloadReason}) из-за сброса состояния (Причина сброса: ${reason}).`);
                 clearTimeout(reloadTimeoutId);
@@ -1369,7 +1599,7 @@
         }
         lastVideoTimeUpdateTimestamp = Date.now();
         lastKnownVideoTime = videoElement ? videoElement.currentTime : -1;
-        isWaitingForDataTimestamp = 0;
+        isWaitingForDataTimestamp = 0; // Reset waiting flag
         logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMon:State', `Состояние монитора сброшено (Причина: ${reason}). Текущее время видео: ${lastKnownVideoTime > -1 ? lastKnownVideoTime.toFixed(2) : 'N/A'}`);
     }
 
@@ -1384,22 +1614,23 @@
             return;
         }
 
-        if (!videoElement || !videoElement.isConnected || !videoElement.closest('body')) {
+        if (!videoElement || !videoElement.isConnected || !document.body.contains(videoElement)) { // Re-check validity
             logWarn(context, 'Видео элемент потерян во время мониторинга. Перезапуск процедуры настройки монитора.');
-            if(playerMonitorIntervalId) clearInterval(playerMonitorIntervalId);
+            if(playerMonitorIntervalId) clearInterval(playerMonitorIntervalId); // Stop this interval
             playerMonitorIntervalId = null;
-            if (videoElement) removePlayerEventListeners();
+            if (videoElement) removePlayerEventListeners(); // Clean up old element
             videoElement = null;
-            stopAdRemovalObserver();
-            setupPlayerMonitor();
+            stopAdRemovalObserver(); // Stop ad observer if player lost
+            setupPlayerMonitor(); // Attempt to find/re-setup
             return;
         }
 
-        if (videoElement && videoElement.src) {
+        // Ensure quality setting is maintained
+        if (videoElement && videoElement.src) { // Check src to ensure it's an active player
             const currentQualityInStorage = originalLocalStorageGetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY);
             if (currentQualityInStorage !== TARGET_QUALITY_VALUE) {
                 logWarn(context, `Качество видео в localStorage ('${currentQualityInStorage}') отклонилось от целевого ('${TARGET_QUALITY_VALUE}'). Принудительная установка.`);
-                setQualitySettings(true);
+                setQualitySettings(true); // Force check and set
             }
         }
 
@@ -1421,29 +1652,50 @@
         if (!videoElement.paused && !videoElement.ended && !isSeeking && RELOAD_STALL_THRESHOLD_MS > 0) {
             const timeSinceLastUpdate = now - lastVideoTimeUpdateTimestamp;
             if (currentTime === lastKnownVideoTime && timeSinceLastUpdate > RELOAD_STALL_THRESHOLD_MS) {
-                const nearBufferEnd = bufferEnd - currentTime < 1.5;
-                if (readyState < videoElement.HAVE_FUTURE_DATA || networkState === videoElement.NETWORK_IDLE || networkState === videoElement.NETWORK_EMPTY || (nearBufferEnd && readyState <= videoElement.HAVE_CURRENT_DATA)) {
+                const nearBufferEnd = bufferEnd - currentTime < 1.5; // Is current time close to the end of buffer?
+                let isLikelyStalled = false;
+                // More specific stall conditions
+                if (readyState < videoElement.HAVE_FUTURE_DATA || // Not enough data for future playback
+                    networkState === videoElement.NETWORK_IDLE || // Network is idle, not loading
+                    networkState === videoElement.NETWORK_EMPTY) { // Network connection lost or no source
+                    isLikelyStalled = true;
+                } else if (nearBufferEnd && readyState <= videoElement.HAVE_CURRENT_DATA) { // At buffer end and only current data available
+                    isLikelyStalled = true;
+                }
+
+                // If stalled, but there's actually buffer ahead, maybe it's a micro-stall or player is about to resume.
+                // This can prevent reloads if player is just slightly behind but has data.
+                if (isLikelyStalled && bufferedLength > 0 && bufferEnd > currentTime + 0.5) { // Check if buffer end is actually ahead
+                     logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, context, `Stall detected, but buffer exists ahead: CT ${currentTime.toFixed(2)}, BufEnd ${bufferEnd.toFixed(2)}. Delaying reload decision.`);
+                     isLikelyStalled = false; // Don't consider it a hard stall yet
+                }
+
+                if (isLikelyStalled) {
                     detectedProblemReason = `Stall: CT не изменилось за ${timeSinceLastUpdate.toFixed(0)}ms ${stallDebugInfo}`;
                 }
-            } else if (lastKnownVideoTime > 0 && currentTime < (lastKnownVideoTime - 1.5) && Math.abs(currentTime - lastKnownVideoTime) > 0.5) {
+            } else if (lastKnownVideoTime > 0 && currentTime < (lastKnownVideoTime - 1.5) && Math.abs(currentTime - lastKnownVideoTime) > 0.5) { // Significant jump backwards
+                // This could be a stream reset or a major issue.
                 detectedProblemReason = `Playback regression: CT откатилось назад с ${lastKnownVideoTime.toFixed(2)} на ${currentTime.toFixed(2)} ${stallDebugInfo}`;
             }
 
+            // If time progressed, reset stall detection variables
             if (currentTime > lastKnownVideoTime) {
-                lastVideoTimeUpdateTimestamp = now;
+                lastVideoTimeUpdateTimestamp = now; // Update timestamp of last progress
                 lastKnownVideoTime = currentTime;
-                if (isWaitingForDataTimestamp > 0) isWaitingForDataTimestamp = 0;
+                if (isWaitingForDataTimestamp > 0) isWaitingForDataTimestamp = 0; // Clear waiting if time updated
 
+                // If a stall-related reload was scheduled, cancel it as video is progressing
                 if (reloadTimeoutId && reloadTimeoutId._reason?.toLowerCase().includes('stall') && !detectedProblemReason) {
                     logCoreDebug(context, `Отмена запланированной перезагрузки по причине 'stall', т.к. currentTime обновился.`);
                     clearTimeout(reloadTimeoutId);
                     reloadTimeoutId = null;
                 }
             }
-        } else {
-            lastKnownVideoTime = currentTime;
-            if (isWaitingForDataTimestamp > 0) isWaitingForDataTimestamp = 0;
+        } else { // Player is paused, ended, or seeking
+            lastKnownVideoTime = currentTime; // Keep track of time even if paused
+            if (isWaitingForDataTimestamp > 0) isWaitingForDataTimestamp = 0; // Clear waiting if paused/seeking
 
+            // If a non-error reload was scheduled, cancel it
             if (reloadTimeoutId && !reloadTimeoutId._reason?.toLowerCase().includes('error')) {
                 logCoreDebug(context, `Отмена запланированной перезагрузки (Причина: ${reloadTimeoutId._reason || '?'}), т.к. плеер на паузе/завершен/перематывается.`);
                 clearTimeout(reloadTimeoutId);
@@ -1451,13 +1703,15 @@
             }
         }
 
+        // Check for prolonged buffering state
         if (isWaitingForDataTimestamp > 0 && RELOAD_BUFFERING_THRESHOLD_MS > 0) {
             const bufferingDuration = now - isWaitingForDataTimestamp;
-            if (bufferingDuration > RELOAD_BUFFERING_THRESHOLD_MS && !detectedProblemReason) {
+            if (bufferingDuration > RELOAD_BUFFERING_THRESHOLD_MS && !detectedProblemReason) { // Only if no other problem detected
                 detectedProblemReason = `Buffering: длительная буферизация > ${(bufferingDuration / 1000).toFixed(1)}s ${stallDebugInfo}`;
             }
         }
 
+        // If player is playing and has enough data, clear waiting state and any buffering-related reload
         const isPlayingAndReady = !videoElement.paused && !videoElement.ended && readyState >= videoElement.HAVE_FUTURE_DATA;
         if (isPlayingAndReady && isWaitingForDataTimestamp > 0) {
             logCoreDebug(context, `Выход из состояния буферизации (плеер играет и готов). ${stallDebugInfo}`);
@@ -1470,7 +1724,7 @@
         }
 
 
-        if (detectedProblemReason && !reloadTimeoutId) {
+        if (detectedProblemReason && !reloadTimeoutId) { // If a problem is detected and no reload is scheduled
             scheduleReload(detectedProblemReason);
         }
     }
@@ -1481,16 +1735,17 @@
             const sessionReloadTime = sessionStorage.getItem('ttv_adblock_last_reload');
             if (sessionReloadTime) {
                 const parsedTime = parseInt(sessionReloadTime, 10);
-                sessionStorage.removeItem('ttv_adblock_last_reload');
+                sessionStorage.removeItem('ttv_adblock_last_reload'); // Consume it
                 if (!isNaN(parsedTime)) {
                     const timeSinceLastReload = Date.now() - parsedTime;
                     if (timeSinceLastReload < RELOAD_COOLDOWN_MS && timeSinceLastReload >= 0) {
+                        // Restore lastReloadTimestamp to enforce cooldown
                         lastReloadTimestamp = Date.now() - timeSinceLastReload;
                         logWarn(context, `Восстановлен кулдаун перезагрузки. Осталось ${((RELOAD_COOLDOWN_MS - timeSinceLastReload)/1000).toFixed(1)}с.`);
                     }
                 }
             }
-        } catch (e) { }
+        } catch (e) { /* sessionStorage might not be available or fail */ }
     }
 
     function addPlayerEventListeners() {
@@ -1520,11 +1775,16 @@
         videoElement.removeEventListener('abort', handlePlayerAbort);
         videoElement.removeEventListener('timeupdate', handlePlayerTimeUpdate);
         videoElement.removeEventListener('progress', handlePlayerProgress);
-        delete videoElement._adblockListenersAttached;
+        delete videoElement._adblockListenersAttached; // Use delete for custom properties
     }
 
     function handlePlayerError(event) {
-        const error = event?.target?.error;
+        // Ensure videoElement is still the one that fired the event, or is valid
+        if (!videoElement || (event.target !== videoElement && !(event.target instanceof HTMLVideoElement)) ) {
+             logWarn('PlayerMon:EventError', 'Событие ошибки от неожиданного/устаревшего элемента.');
+             return;
+        }
+        const error = event?.target?.error; // event.target should be the video element
         if (!error) { logWarn('PlayerMon:EventError', 'Событие ошибки плеера без деталей (event.target.error is null).'); return; }
 
         const errorCode = error.code;
@@ -1535,18 +1795,20 @@
 
         if (ENABLE_AUTO_RELOAD) {
             let shouldScheduleReload = false;
-            let delay = 3500;
+            let delay = 3500; // Default delay for error reload
 
             if (RELOAD_ON_ERROR_CODES.includes(errorCode)) {
                 shouldScheduleReload = true;
-                if (errorCode === 2000) delay = 3000;
-            } else if (errorMessage.includes('MasterPlaylist:10') && RELOAD_ON_ERROR_CODES.includes(10)) {
-                reason += ` (MasterPlaylist:10)`;
-                shouldScheduleReload = true;
-            } else if (errorMessage.includes('code 5000') && RELOAD_ON_ERROR_CODES.includes(5000)) {
-                reason += ` (Code 5000)`;
-                shouldScheduleReload = true;
+                if (errorCode === 2000) delay = 3000; // Specific delay for error 2000
+                // Add other specific delays if needed
             }
+            // Check for specific error messages if codes are generic
+            else if (errorMessage.toLowerCase().includes('masterplaylist:10') && RELOAD_ON_ERROR_CODES.includes(10)) { // Example
+                reason += ` (MasterPlaylist:10)`; shouldScheduleReload = true;
+            } else if (errorMessage.toLowerCase().includes('code 5000') && RELOAD_ON_ERROR_CODES.includes(5000)) { // Example
+                reason += ` (Code 5000)`; shouldScheduleReload = true;
+            }
+            // Add more specific error message checks if Twitch API provides them
 
 
             if (shouldScheduleReload) {
@@ -1554,7 +1816,7 @@
                 scheduleReload(reason, delay);
             }
         }
-        resetMonitorState(`Ошибка плеера ${errorCode}`);
+        resetMonitorState(`Ошибка плеера ${errorCode}`); // Reset monitor state on any error
     }
 
     function handlePlayerWaiting() {
@@ -1568,46 +1830,49 @@
     }
     function handlePlayerPlaying() {
         logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMon:EventPlaying', `Воспроизведение начато/возобновлено.`);
-        if (isWaitingForDataTimestamp > 0) isWaitingForDataTimestamp = 0;
-        resetMonitorState('Playing');
-        setQualitySettings(true);
+        if (isWaitingForDataTimestamp > 0) isWaitingForDataTimestamp = 0; // Clear waiting flag
+        resetMonitorState('Playing event'); // Reset general state, cancel non-error reloads
+        setQualitySettings(true); // Ensure quality is correct on playback start
     }
     function handlePlayerPause() {
         logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMon:EventPause', `Воспроизведение приостановлено (pause).`);
-        resetMonitorState('Paused');
+        resetMonitorState('Paused event');
     }
     function handlePlayerEmptied() {
         logWarn('PlayerMon:EventEmptied', 'Источник плеера очищен (событие emptied). Сброс монитора и попытка переинициализации.');
-        resetMonitorState('Emptied');
+        resetMonitorState('Emptied event');
         if(playerMonitorIntervalId) clearInterval(playerMonitorIntervalId);
         playerMonitorIntervalId = null;
-        stopAdRemovalObserver();
+        stopAdRemovalObserver(); // Stop related observers
+        // Delay setup to allow player to potentially reinitialize itself first
         setTimeout(setupPlayerMonitor, 750);
     }
     function handlePlayerLoadedMeta() {
         logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMon:EventLoadedMeta', `Метаданные видео загружены.`);
-        resetMonitorState('Loaded Metadata');
-        setQualitySettings(true);
+        resetMonitorState('Loaded Metadata event');
+        setQualitySettings(true); // Good time to check quality
     }
     function handlePlayerAbort() {
-        logWarn('PlayerMon:EventAbort', 'Загрузка видео прервана (событие abort).');
-        resetMonitorState('Aborted');
+        logWarn('PlayerMon:EventAbort', 'Загрузка видео прервана (событие abort). Это может быть вызвано пользователем или ошибкой.');
+        resetMonitorState('Aborted event');
     }
     function handlePlayerTimeUpdate() {
-        if (videoElement && !videoElement.seeking) {
+        if (videoElement && !videoElement.seeking) { // Only if not actively seeking
             const currentTime = videoElement.currentTime;
-            if (Math.abs(currentTime - lastKnownVideoTime) > 0.01) {
-                if (currentTime > lastKnownVideoTime) {
-                    lastVideoTimeUpdateTimestamp = Date.now();
+            // Check for actual progress, not just tiny floating point differences
+            if (Math.abs(currentTime - lastKnownVideoTime) > 0.01) { // Threshold for "actual" time update
+                if (currentTime > lastKnownVideoTime) { // Progressing forward
+                    lastVideoTimeUpdateTimestamp = Date.now(); // Update progress timestamp
                     lastKnownVideoTime = currentTime;
-                    if (isWaitingForDataTimestamp > 0) {
+                    if (isWaitingForDataTimestamp > 0) { // If was waiting, now progressing
                         logCoreDebug('PlayerMon:EventTimeUpdate', 'Выход из состояния буферизации (время видео обновилось).');
                         isWaitingForDataTimestamp = 0;
                     }
                 }
+                // Log time updates less frequently to avoid console spam
                 if (LOG_PLAYER_MONITOR_DEBUG) {
                     const now = Date.now();
-                    if (!videoElement._lastTimeUpdateLog || now - videoElement._lastTimeUpdateLog > 10000) {
+                    if (!videoElement._lastTimeUpdateLog || now - videoElement._lastTimeUpdateLog > 10000) { // Log every 10s
                         logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMon:EventTimeUpdate', `TimeUpdate: CT=${currentTime.toFixed(2)}`);
                         videoElement._lastTimeUpdateLog = now;
                     }
@@ -1616,12 +1881,14 @@
         }
     }
     function handlePlayerProgress() {
+        // This event fires as data is downloaded. Can be useful for debugging buffer issues.
         if (LOG_PLAYER_MONITOR_DEBUG && videoElement) {
             let bufferedLog = "N/A";
             try { if (videoElement.buffered && videoElement.buffered.length > 0) { bufferedLog = `[${videoElement.buffered.start(0).toFixed(2)}-${videoElement.buffered.end(videoElement.buffered.length - 1).toFixed(2)}] (${videoElement.buffered.length} parts)`; }
                 } catch(e){}
             const now = Date.now();
-            if (!videoElement._lastProgressLog || now - videoElement._lastProgressLog > 5000) { // Лог раз в 5 секунд
+            // Log progress less frequently
+            if (!videoElement._lastProgressLog || now - videoElement._lastProgressLog > 5000) { // Log every 5s
                 logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMon:EventProgress', `Progress: Buffered: ${bufferedLog}, CT: ${videoElement.currentTime.toFixed(2)}, RS: ${videoElement.readyState}, NS: ${videoElement.networkState}`);
                 videoElement._lastProgressLog = now;
             }
@@ -1633,38 +1900,39 @@
         const context = 'Visibility';
         if (document.hidden) {
             logCoreDebug(context, 'Вкладка стала неактивной (скрыта).');
-            if (playerMonitorIntervalId) {
+            if (playerMonitorIntervalId) { // Stop player monitor interval
                 clearInterval(playerMonitorIntervalId);
                 playerMonitorIntervalId = null;
             }
-            if (reloadTimeoutId) {
+            if (reloadTimeoutId) { // Cancel any scheduled reloads
                 logCoreDebug(context, `Отмена запланированной перезагрузки (Причина: ${reloadTimeoutId._reason || '?'}) из-за скрытия вкладки.`);
                 clearTimeout(reloadTimeoutId);
                 reloadTimeoutId = null;
             }
-            if (visibilityResumeTimer) {
+            if (visibilityResumeTimer) { // Clear any pending resume timer
                 clearTimeout(visibilityResumeTimer);
                 visibilityResumeTimer = null;
             }
-            if (isWaitingForDataTimestamp > 0) isWaitingForDataTimestamp = 0;
-            stopAdRemovalObserver();
-            stopWorkerPinger();
+            if (isWaitingForDataTimestamp > 0) isWaitingForDataTimestamp = 0; // Reset waiting state
+            stopAdRemovalObserver(); // Stop DOM observer
+            stopWorkerPinger(); // Stop worker pinger
         } else {
             logCoreDebug(context, 'Вкладка стала активной. Возобновление операций с задержкой ' + VISIBILITY_RESUME_DELAY_MS + 'ms.');
-            if (visibilityResumeTimer) clearTimeout(visibilityResumeTimer);
+            if (visibilityResumeTimer) clearTimeout(visibilityResumeTimer); // Clear previous timer if any
             visibilityResumeTimer = setTimeout(() => {
                 visibilityResumeTimer = null;
                 logCoreDebug(context, 'Задержка после возобновления видимости прошла. Переинициализация...');
-                setQualitySettings(true);
+                setQualitySettings(true); // Re-check quality
 
                 if (ENABLE_AUTO_RELOAD) {
-                    resetMonitorState('Visibility resume');
-                    checkReloadCooldown(context);
-                    setupPlayerMonitor();
+                    resetMonitorState('Visibility resume'); // Reset monitor state variables
+                    checkReloadCooldown(context); // Check if we are in a post-reload cooldown
+                    setupPlayerMonitor(); // Re-initialize player monitor
                 }
-                if (ATTEMPT_DOM_AD_REMOVAL) startAdRemovalObserver();
-                if (INJECT_INTO_WORKERS) startWorkerPinger();
+                if (ATTEMPT_DOM_AD_REMOVAL && document.body) startAdRemovalObserver(); // Restart DOM observer
+                if (INJECT_INTO_WORKERS) startWorkerPinger(); // Restart worker pinger
 
+                // Attempt to autoplay if player was paused and seems ready
                 if (videoElement && videoElement.paused && !videoElement.ended && videoElement.readyState >= videoElement.HAVE_FUTURE_DATA) {
                     logCoreDebug(context, 'Плеер на паузе после возобновления видимости. Попытка авто-воспроизведения...');
                     videoElement.play().catch(e => logWarn(context, 'Ошибка авто-воспроизведения после возобновления видимости:', e.message));
@@ -1675,20 +1943,28 @@
     document.addEventListener('visibilitychange', handleVisibilityChange, { passive: true });
 
     installHooks();
-    setQualitySettings(true);
+    setQualitySettings(true); // Initial quality check
 
     function initialStart() {
         logCoreDebug('Init', 'Начало первоначального запуска скрипта...');
-        setupPlayerMonitor();
+        setupPlayerMonitor(); // Setup player monitoring and related observers
         if (ATTEMPT_DOM_AD_REMOVAL) {
-            removeDOMAdElements(document);
-            startAdRemovalObserver();
+            if (document.body) { // If body is ready, run immediately
+                removeDOMAdElements(document); // Initial pass
+                startAdRemovalObserver();
+            } else { // Otherwise, wait for DOMContentLoaded
+                window.addEventListener('DOMContentLoaded', () => {
+                    removeDOMAdElements(document);
+                    startAdRemovalObserver();
+                }, { once: true, passive: true });
+            }
         }
         if (INJECT_INTO_WORKERS) {
             startWorkerPinger();
         }
     }
 
+    // Defer initial start slightly to ensure page scripts have a chance to load
     function deferredInitialStart() {
         if (document.readyState === 'complete' || document.readyState === 'interactive') {
             requestAnimationFrame(initialStart);
@@ -1699,21 +1975,18 @@
     deferredInitialStart();
 
 
+    // Fallback initialization for critical components if they somehow didn't start
     setTimeout(() => {
-        if (!videoElement && (document.readyState === 'complete' || document.readyState === 'interactive')) {
-            logWarn('Init', 'Фоллбэк: проверка наличия плеера через 5 секунд...');
+        if (ENABLE_AUTO_RELOAD && !videoElement && !playerFinderObserver && (document.readyState === 'complete' || document.readyState === 'interactive')) {
+            logWarn('Init', 'Фоллбэк: проверка наличия плеера и запуск монитора через 5 секунд...');
             setupPlayerMonitor();
         }
-        if (ATTEMPT_DOM_AD_REMOVAL && !adRemovalObserver) {
+        if (ATTEMPT_DOM_AD_REMOVAL && !adRemovalObserver && document.body) { // Check if body exists now
             logWarn('Init', 'Фоллбэк: запуск AdRemovalObserver через 5 секунд...');
-            if (document.body) {
-                removeDOMAdElements(document);
-                startAdRemovalObserver();
-            } else {
-                logWarn('Init', 'Фоллбэк AdRemovalObserver: document.body еще не доступен.');
-            }
+            removeDOMAdElements(document); // One more pass
+            startAdRemovalObserver();
         }
-        if (INJECT_INTO_WORKERS && !workerPingIntervalId) {
+        if (INJECT_INTO_WORKERS && !workerPingIntervalId) { // Check pinger ID
             logWarn('Init', 'Фоллбэк: запуск Worker Pinger через 5 секунд...');
             startWorkerPinger();
         }
