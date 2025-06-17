@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      19.2.3
+// @version      19.2.4
 // @description  Блокировка рекламы Twitch через очистку M3U8 и модификацию GQL.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -28,15 +28,15 @@
 (function() {
     'use strict';
 
-    const SCRIPT_VERSION = '19.2.3';
-    const INJECT_INTO_WORKERS = GM_getValue('TT sprechen Sie Deutsch? V_AdBlock_InjectWorkers', true);
+    const SCRIPT_VERSION = '19.2.4';
+    const INJECT_INTO_WORKERS = GM_getValue('TT sprechen Sie Deutsch? V_AdBlock_InjectWorkers', false);
     const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
     const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
     const BLOCK_NATIVE_ADS_SCRIPT = GM_getValue('TTV_AdBlock_BlockNatScript', true);
     const HIDE_AD_OVERLAY_ELEMENTS = GM_getValue('TTV_AdBlock_HideAdOverlay', true);
     const ATTEMPT_DOM_AD_REMOVAL = GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true);
     const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
-    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true);
+    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', false);
     const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', false);
     const LOG_WORKER_INJECTION_DEBUG = GM_getValue('TTV_AdBlock_Debug_WorkerInject', false);
     const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', false);
@@ -62,9 +62,9 @@
     let AD_URL_KEYWORDS_BLOCK = ['amazon-adsystem.com', 'doubleclick.net', 'googleadservices.com', 'googletagservices.com', 'imasdk.googleapis.com', 'pubmatic.com', 'rubiconproject.com', 'adsrvr.org', 'adnxs.com', 'taboola.com', 'outbrain.com', 'ads.yieldmo.com', 'ads.adaptv.advertising.com', 'scorecardresearch.com', 'yandex.ru/clck/', 'omnitagjs', 'omnitag', 'innovid.com', 'eyewonder.com', 'serverbid.com', 'spotxchange.com', 'spotx.tv', 'springserve.com', 'flashtalking.com', 'contextual.media.net', 'advertising.com', 'adform.net', 'freewheel.tv', 'stickyadstv.com', 'tremorhub.com', 'aniview.com', 'criteo.com', 'adition.com', 'teads.tv', 'undertone.com', 'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads'];
     if (BLOCK_NATIVE_ADS_SCRIPT) AD_URL_KEYWORDS_BLOCK.push('nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com');
     const PLAYER_SELECTORS_IMPROVED = ['div[data-a-target="video-player"] video[playsinline]', '.video-player video[playsinline]', 'div[data-a-player-state] video', 'main video[playsinline][src]', 'video.persistent-player', 'video[class*="video-player"]', 'video[class*="player-video"]', 'video[src]', 'video'];
-    const AD_OVERLAY_SELECTORS_CSS = ['.video-player__ad-info-container', 'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]', 'button[aria-label*="feedback for this Ad"]', '.player-ad-notice', '.ad-interrupt-screen', 'div[data-test-selector="ad-banner-default-text-area"]', 'div[data-test-selector="ad-display-root"]', '.persistent-player__ad-container', '[data-a-target="advertisement-notice"]', 'div[data-a-target="ax-overlay"]', '[data-test-selector="sad-overlay"]', 'div[class*="video-ad-label"]', '.player-ad-overlay', 'div[class*="advertisement"]', 'div[class*="-ad-"]'];
+    const AD_OVERLAY_SELECTORS_CSS = ['.video-player__ad-info-container', 'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]', 'button[aria-label*="feedback for this Ad"]', '.player-ad-notice', '.ad-interrupt-screen', 'div[data-test-selector="ad-banner-default-text-area"]', 'div[data-test-selector="ad-display-root"]', '.persistent-player__ad-container', '[data-a-target="advertisement-notice"]', 'div[data-a-target="ax-overlay"]', '[data-test-selector="sad-overlay"]', 'div[class*="video-ad-label"]', '.player-ad-overlay', 'div[class*="advertisement"]', 'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'];
     const COOKIE_BANNER_SELECTOR = '.consent-banner';
-    const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE = ['div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]', 'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]', 'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay', '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]', '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]'];
+    const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE = ['div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]', 'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]', 'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay', '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]', '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'];
     if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE.push(COOKIE_BANNER_SELECTOR);
     const AD_DOM_PARENT_INDICATOR_SELECTORS = ['.video-player', '.persistent-player', 'div[data-a-target="video-player-layout"]', 'main', 'div[class*="player-container"]'];
     const TWITCH_HOST_REGEX = /^(?:[^.]+\.)?(twitch\.tv|ttvnw\.net|twitchcdn\.net)$/i;
@@ -716,11 +716,11 @@
     function installHooks() {
         if (hooksInstalledMain) return;
         try { unsafeWindow.fetch = fetchOverride; } catch (e) { if (originalFetch) unsafeWindow.fetch = originalFetch; logError('HookInstall', 'Failed to hook fetch:', e); }
-        try { unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride; unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride; hookXhrGetters(); } catch (e) { 
-            if (originalXhrOpen) unsafeWindow.XMLHttpRequest.prototype.open = originalXhrOpen; 
-            if (originalXhrSend) unsafeWindow.XMLHttpRequest.prototype.send = originalXhrSend; 
-            if (originalXhrResponseGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'response', originalXhrResponseGetter); } catch(revertErr) {} 
-            if (originalXhrResponseTextGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'responseText', originalXhrResponseTextGetter); } catch (revertErr) {} 
+        try { unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride; unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride; hookXhrGetters(); } catch (e) {
+            if (originalXhrOpen) unsafeWindow.XMLHttpRequest.prototype.open = originalXhrOpen;
+            if (originalXhrSend) unsafeWindow.XMLHttpRequest.prototype.send = originalXhrSend;
+            if (originalXhrResponseGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'response', originalXhrResponseGetter); } catch(revertErr) {}
+            if (originalXhrResponseTextGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'responseText', originalXhrResponseTextGetter); } catch (revertErr) {}
             logError('HookInstall', 'Failed to hook XHR:', e);
         }
         if (INJECT_INTO_WORKERS) try { hookWorkerConstructor(); } catch (e) { if (OriginalWorker) unsafeWindow.Worker = OriginalWorker; logError('HookInstall', 'Failed to hook Worker:', e); }
