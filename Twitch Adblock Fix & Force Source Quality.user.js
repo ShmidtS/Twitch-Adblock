@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      19.2.8
-// @description  Блокировка рекламы. Улучшена работа с VPN. Добавлен наблюдатель за ошибками плеера для авто-восстановления.
+// @version      20.1.0
+// @description  Блокировка рекламы Twitch, с автовоспроизведением.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -16,10 +16,6 @@
 // @connect      *.ttvnw.net
 // @connect      *.twitch.tv
 // @connect      gql.twitch.tv
-// @connect      github.com
-// @connect      raw.githubusercontent.com
-// @updateURL    https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
-// @downloadURL  https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
 // @run-at       document-start
 // @license      MIT
 // ==/UserScript==
@@ -27,7 +23,8 @@
 (function() {
     'use strict';
 
-    const SCRIPT_VERSION = '19.2.8';
+    // --- START OF CONFIGURATION ---
+    const SCRIPT_VERSION = '20.1.0'; // Новый номер версии
     const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true);
     const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
     const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
@@ -35,7 +32,7 @@
     const HIDE_AD_OVERLAY_ELEMENTS = GM_getValue('TTV_AdBlock_HideAdOverlay', true);
     const ATTEMPT_DOM_AD_REMOVAL = GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true);
     const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
-    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', false);
+    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true);
     const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', false);
     const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', false);
     const LOG_M3U8_CLEANING_DEBUG = GM_getValue('TTV_AdBlock_Debug_M3U8', false);
@@ -49,6 +46,8 @@
     const WORKER_PING_INTERVAL_MS = GM_getValue('TTV_AdBlock_WorkerPingIntervalMs', 20000);
     const USE_REGEX_M3U8_CLEANING = GM_getValue('TTV_AdBlock_UseRegexM3U8', true);
     const AGGRESSIVE_GQL_SCAN = GM_getValue('TTV_AdBlock_AggressiveGQLScan', false);
+    // --- END OF CONFIGURATION ---
+
     const LOG_PREFIX = `[TTV ADBLOCK ULT v${SCRIPT_VERSION}]`;
     const LS_KEY_QUALITY = 'video-quality';
     const TARGET_QUALITY_VALUE = '{"default":"chunked"}';
@@ -62,8 +61,32 @@
     const PLAYER_CONTAINER_SELECTORS = ['div[data-a-target="video-player"]', '.video-player', 'div[data-a-player-state]', 'main', '.persistent-player'];
     const AD_OVERLAY_SELECTORS_CSS = ['.video-player__ad-info-container', 'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]', 'button[aria-label*="feedback for this Ad"]', '.player-ad-notice', '.ad-interrupt-screen', 'div[data-test-selector="ad-banner-default-text-area"]', 'div[data-test-selector="ad-display-root"]', '.persistent-player__ad-container', '[data-a-target="advertisement-notice"]', 'div[data-a-target="ax-overlay"]', '[data-test-selector="sad-overlay"]', 'div[class*="video-ad-label"]', '.player-ad-overlay', 'div[class*="advertisement"]', 'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'];
     const COOKIE_BANNER_SELECTOR = '.consent-banner';
-    const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE = ['div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]', 'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]', 'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay', '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]', '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'];
-    if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE.push(COOKIE_BANNER_SELECTOR);
+
+    // Define AD_DOM_ELEMENT_SELECTORS_TO_REMOVE here in the main scope
+    const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST = [
+        'div[data-a-target="player-ad-overlay"]',
+        'div[data-test-selector="ad-interrupt-overlay__player-container"]',
+        'div[aria-label="Advertisement"]',
+        'iframe[src*="amazon-adsystem.com"]',
+        'iframe[src*="doubleclick.net"]',
+        'iframe[src*="imasdk.googleapis.com"]',
+        '.player-overlay-ad',
+        '.tw-player-ad-overlay',
+        '.video-ad-display',
+        'div[data-ad-placeholder="true"]',
+        '[data-a-target="video-ad-countdown-container"]',
+        '.promoted-content-card',
+        'div[class*="--ad-banner"]',
+        'div[data-ad-unit]',
+        'div[class*="player-ads"]',
+        'div[data-ad-boundary]',
+        'div[data-a-target="sad-overlay-container"]',
+        'div[data-test-selector="sad-overlay-v-one-container"]',
+        'div[data-test-selector*="sad-overlay"]'
+    ];
+    if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push(COOKIE_BANNER_SELECTOR);
+
+
     const AD_DOM_PARENT_INDICATOR_SELECTORS = ['.video-player', '.persistent-player', 'div[data-a-target="video-player-layout"]', 'main', 'div[class*="player-container"]'];
     const TWITCH_HOST_REGEX = /^(?:[^.]+\.)?(twitch\.tv|ttvnw\.net|twitchcdn\.net)$/i;
     const TWITCH_VIDEO_SEGMENT_PATH_REGEX = /(\.ts$|\/segment\/|videochunk|videoplayback|stream[0-9]*\.ts)/i;
@@ -232,95 +255,135 @@
     }
 
     function getWorkerInjectionCode() {
-        return (function() {
-            const SCRIPT_VERSION_WORKER = '${SCRIPT_VERSION_WORKER_REPLACE}';
-            const CORE_DEBUG_LOGGING_WORKER = '${CORE_LOGGING_LOGGINGWORKER_REPLACE}';
-            const LOG_M3U8_CLEANING_WORKER = '${worker_LOG_M3U8_CLEANING_WORKER_REPLACE}';
+        // Stringify the self-contained M3U8 parser and its constants
+        const _universalParseAndCleanM3U8String = _universalParseAndCleanM3U8.toString();
+        const _AD_SIGNIFIER_DATERANGE_ATTR_STRING = JSON.stringify(AD_SIGNIFIER_DATERANGE_ATTR);
+        const _AD_DATERANGE_ATTRIBUTE_KEYWORDS_STRING = JSON.stringify(AD_DATERANGE_ATTRIBUTE_KEYWORDS);
+        const _AD_DATERANGE_REGEX_STRING = AD_DATERANGE_REGEX.toString();
+
+        return `
+            const SCRIPT_VERSION_WORKER = '${SCRIPT_VERSION}';
+            const CORE_DEBUG_LOGGING_WORKER = ${CORE_DEBUG_LOGGING};
+            const LOG_M3U8_CLEANING_WORKER = ${LOG_M3U8_CLEANING_DEBUG};
             const LOG_PREFIX_WORKER_BASE = '[TTV ADBLOCK ULT v' + SCRIPT_VERSION_WORKER + '] [WORKER]';
-            let hooksSuccessfullySignaled = false;
-            function workerLogError(message, ...args) { if (CORE_DEBUG_LOGGING_WORKER) console.error(LOG_PREFIX_WORKER_BASE + ' ERROR:', message, ...args); }
-            function workerLogWarn(message, ...args) { if (CORE_DEBUG_LOGGING_WORKER) console.warn(LOG_PREFIX_WORKER_BASE + ' WARN:', message, ...args); }
-            function workerLogCoreDebug(message, ...args) { if (CORE_DEBUG_LOGGING_WORKER) console.debug(LOG_PREFIX_WORKER_BASE + ' DEBUG:', message, ...args); }
-            function workerLogM3U8Trace(message, ...args) { if (LOG_M3U8_CLEANING_WORKER) console.debug(LOG_PREFIX_WORKER_BASE + ' [M3U8 Relay] TRACE:', message, ...args); }
-            function installWorkerFetchHook() {
-                if (typeof self.fetch !== 'function') return false;
-                if (self.fetch.hooked_by_adblock_ult) return true;
-                const workerRealFetch = self.fetch;
-                self.fetch = async function(input, init) {
-                    let requestUrl = (input instanceof Request) ? input.url : String(input);
-                    let method = ((input instanceof Request) ? input.method : (init?.method || 'GET')).toUpperCase();
-                    const lowerCaseUrl = requestUrl.toLowerCase();
-                    const urlShort = requestUrl.includes('?') ? requestUrl.substring(0, requestUrl.indexOf('?')) : requestUrl;
-                    const urlFilename = urlShort.substring(urlShort.lastIndexOf('/') + 1) || urlShort.substring(0,70);
-                    const isM3U8Request = (lowerCaseUrl.endsWith('.m3u8') || (init?.headers?.['Accept'] || '').toLowerCase().includes('mpegurl')) && (lowerCaseUrl.includes('usher.ttvnw.net') || lowerCaseUrl.includes('.m3u8'));
-                    if (method === 'GET' && isM3U8Request && requestUrl.includes('usher.ttvnw.net')) {
-                        return new Promise((resolveWorkerPromise, rejectWorkerPromise) => {
-                            const messageId = 'm3u8_req_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-                            const onMessageFromMain = (event) => {
-                                if (event.data && event.data.type === 'ADBLOCK_M3U8_RESPONSE' && event.data.id === messageId) {
-                                    self.removeEventListener('message', onMessageFromMain);
-                                    if (event.data.error) {
-                                        rejectWorkerPromise(new TypeError(event.data.error));
-                                    } else {
-                                        const responseHeaders = new Headers();
-                                        if(event.data.headers) { for(const key in event.data.headers) { responseHeaders.append(key, event.data.headers[key]); } }
-                                        if (!responseHeaders.has('Content-Type')) responseHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
-                                        if (event.data.cleanedText === undefined) {
-                                            rejectWorkerPromise(new TypeError('Undefined M3U8 content'));
-                                            return;
+
+            const AD_SIGNIFIER_DATERANGE_ATTR = ${_AD_SIGNIFIER_DATERANGE_ATTR_STRING};
+            const AD_DATERANGE_ATTRIBUTE_KEYWORDS = ${_AD_DATERANGE_ATTRIBUTE_KEYWORDS_STRING};
+            const AD_DATERANGE_REGEX = new RegExp(${_AD_DATERANGE_REGEX_STRING}.slice(1,-1)); // Reconstruct regex
+
+            ${_universalParseAndCleanM3U8String} // Renamed to _universalParseAndCleanM3U8 for injection
+
+            (function() {
+                let hooksSuccessfullySignaled = false;
+                function workerLogError(message, ...args) { if (CORE_DEBUG_LOGGING_WORKER) console.error(LOG_PREFIX_WORKER_BASE + ' ERROR:', message, ...args); }
+                function workerLogWarn(message, ...args) { if (CORE_DEBUG_LOGGING_WORKER) console.warn(LOG_PREFIX_WORKER_BASE + ' WARN:', message, ...args); }
+                function workerLogCoreDebug(message, ...args) { if (CORE_DEBUG_LOGGING_WORKER) console.debug(LOG_PREFIX_WORKER_BASE + ' DEBUG:', message, ...args); }
+                function workerLogM3U8Trace(message, ...args) { if (LOG_M3U8_CLEANING_WORKER) console.debug(LOG_PREFIX_WORKER_BASE + ' [M3U8 Relay] TRACE:', message, ...args); }
+
+                const originalFetch = self.fetch;
+                const originalXhrOpen = self.XMLHttpRequest.prototype.open;
+                const originalXhrSend = self.XMLHttpRequest.prototype.send;
+                const xhrRequestData = new WeakMap(); // For XHR in worker
+
+                function installWorkerHooks() {
+                    if (typeof self.fetch === 'function' && !self.fetch.hooked_by_adblock_ult_worker) {
+                        self.fetch = async function(input, init) {
+                            let requestUrl = (input instanceof Request) ? input.url : String(input);
+                            const lowerCaseUrl = requestUrl.toLowerCase();
+                            const isM3U8Request = lowerCaseUrl.endsWith('.m3u8') && lowerCaseUrl.includes('usher.ttvnw.net');
+
+                            if (isM3U8Request) {
+                                workerLogM3U8Trace('Worker Fetch: Intercepted M3U8 request', requestUrl);
+                                try {
+                                    const response = await originalFetch.apply(this, arguments);
+                                    if (response.ok) {
+                                        const text = await response.clone().text();
+                                        // Use the injected _universalParseAndCleanM3U8
+                                        const { cleanedText, adsFound } = _universalParseAndCleanM3U8(text, requestUrl, LOG_M3U8_CLEANING_WORKER);
+                                        if (adsFound) {
+                                            const newHeaders = new Headers(response.headers);
+                                            newHeaders.delete('Content-Length');
+                                            return new Response(cleanedText, { status: response.status, statusText: response.statusText, headers: newHeaders });
                                         }
-                                        resolveWorkerPromise(new Response(event.data.cleanedText, { status: event.data.status, statusText: event.data.statusText, headers: responseHeaders }));
                                     }
+                                    return response;
+                                } catch (e) {
+                                    workerLogError('Worker Fetch M3U8 Error, falling back to main:', e, requestUrl);
+                                    // Fallback to main thread via postMessage
+                                    return new Promise((resolve, reject) => {
+                                        const messageId = 'FETCH_M3U8_WORKER_FALLBACK_' + Date.now() + Math.random();
+                                        const onMessage = (event) => {
+                                            if (event.data && event.data.adblock_message_response && event.data.id === messageId) {
+                                                self.removeEventListener('message', onMessage);
+                                                if (event.data.error) reject(new TypeError(event.data.error));
+                                                else resolve(new Response(event.data.body, { status: event.data.status, statusText: event.data.statusText, headers: new Headers(event.data.headers) }));
+                                            }
+                                        };
+                                        self.addEventListener('message', onMessage);
+                                        self.postMessage({ adblock_message_request: true, type: 'WORKER_FETCH_M3U8_FALLBACK', url: requestUrl, id: messageId });
+                                    });
                                 }
-                            };
-                            self.addEventListener('message', onMessageFromMain);
-                            try {
-                                let headersArray = [];
-                                if (init && init.headers) {
-                                    if (init.headers instanceof Headers) headersArray = Array.from(init.headers.entries());
-                                    else if (typeof init.headers === 'object') headersArray = Object.entries(init.headers);
-                                }
-                                self.postMessage({ type: 'ADBLOCK_FETCH_M3U8_REQUEST', url: requestUrl, initDetails: { headers: headersArray }, id: messageId });
-                            } catch (e) {
-                                self.removeEventListener('message', onMessageFromMain);
-                                rejectWorkerPromise(e);
                             }
-                        });
+                            return originalFetch.apply(this, arguments);
+                        };
+                        self.fetch.hooked_by_adblock_ult_worker = true;
                     }
-                    return workerRealFetch(input, init);
-                };
-                self.fetch.hooked_by_adblock_ult = true;
-                return true;
-            }
-            function attemptHookInstallationAndSignal() {
-                if (installWorkerFetchHook()) {
-                    try {
-                        self.postMessage({ type: 'ADBLOCK_WORKER_HOOKS_READY', method: hooksSuccessfullySignaled ? 'resignal_after_eval' : 'initial_signal' });
-                        hooksSuccessfullySignaled = true;
-                        return true;
-                    } catch(e) { return false; }
+
+                    if (typeof self.XMLHttpRequest === 'function' && !self.XMLHttpRequest.prototype.open.hooked_by_adblock_ult_worker) {
+                        self.XMLHttpRequest.prototype.open = function(method, url) {
+                            const lowerCaseUrl = String(url).toLowerCase();
+                            if (lowerCaseUrl.endsWith('.m3u8') && lowerCaseUrl.includes('usher.ttvnw.net')) {
+                                xhrRequestData.set(this, { url: String(url), method: method.toUpperCase() });
+                            }
+                            originalXhrOpen.apply(this, arguments);
+                        };
+                        self.XMLHttpRequest.prototype.open.hooked_by_adblock_ult_worker = true;
+
+                        self.XMLHttpRequest.prototype.send = function() {
+                            const requestInfo = xhrRequestData.get(this);
+                            if (requestInfo && requestInfo.url.endsWith('.m3u8') && requestInfo.url.includes('usher.ttvnw.net')) {
+                                workerLogM3U8Trace('Worker XHR: Intercepted M3U8 request', requestInfo.url);
+                                const xhr = this;
+                                const originalOnLoad = xhr.onload;
+                                xhr.onload = function() {
+                                    if (xhr.readyState === 4 && xhr.status >= 200 && xhr.status < 300) {
+                                        const { cleanedText, adsFound } = _universalParseAndCleanM3U8(xhr.responseText, requestInfo.url, LOG_M3U8_CLEANING_WORKER);
+                                        if (adsFound) {
+                                            Object.defineProperty(xhr, 'responseText', { value: cleanedText, configurable: true });
+                                            Object.defineProperty(xhr, 'response', { value: cleanedText, configurable: true });
+                                        }
+                                    }
+                                    if (originalOnLoad) originalOnLoad.apply(this, arguments);
+                                };
+                                originalXhrSend.apply(this, arguments);
+                                return;
+                            }
+                            originalXhrSend.apply(this, arguments);
+                        };
+                        self.XMLHttpRequest.prototype.send.hooked_by_adblock_ult_worker = true;
+                    }
+                    return self.fetch.hooked_by_adblock_ult_worker && self.XMLHttpRequest.prototype.open.hooked_by_adblock_ult_worker;
+                }
+
+                if (installWorkerHooks()) {
+                    self.postMessage({ type: 'ADBLOCK_WORKER_HOOKS_READY', workerLabel: self.name || 'unknown_worker_name' });
+                    hooksSuccessfullySignaled = true;
                 } else {
-                    try { self.postMessage({ type: 'ADBLOCK_WORKER_HOOKS_READY', method: 'signal_failed_hook_install' }); } catch(e) {}
-                    return false;
+                     self.postMessage({ type: 'ADBLOCK_WORKER_HOOKS_FAILED', workerLabel: self.name || 'unknown_worker_name' });
                 }
-            }
-            self.addEventListener('message', function(e) {
-                if (e.data?.type === 'PING_WORKER_ADBLOCK') {
-                    self.postMessage({ type: 'PONG_WORKER_ADBLOCK', workerLabel: self.name || 'unknown_worker_name' });
-                } else if (e.data?.type === 'EVAL_ADBLOCK_CODE') {
-                    attemptHookInstallationAndSignal();
-                }
-            });
-            attemptHookInstallationAndSignal();
-        }).toString()
-            .replace(/\${SCRIPT_VERSION_WORKER_REPLACE}/g, SCRIPT_VERSION)
-            .replace(/\${CORE_DEBUG_LOGGING_WORKER_REPLACE}/g, String(CORE_DEBUG_LOGGING))
-            .replace(/\${LOG_M3U8_CLEANING_WORKER_REPLACE}/g, String(LOG_M3U8_CLEANING_DEBUG))
-            .slice(14, -2);
+
+                self.addEventListener('message', function(e) {
+                    if (e.data?.type === 'PING_WORKER_ADBLOCK') {
+                        self.postMessage({ type: 'PONG_WORKER_ADBLOCK', workerLabel: self.name || 'unknown_worker_name' });
+                    }
+                });
+            })();
+        `;
     }
 
+
     function modifyGqlResponse(responseText, url) {
-        if (!MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || responseText.length === 0) return responseText;
+        if (!CONFIG.MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || responseText.length === 0) return responseText;
         try {
             let data = JSON.parse(responseText);
             let modifiedOverall = false;
@@ -364,32 +427,15 @@
                             currentOpModified = true;
                         }
                     } catch (e) {}
-                } else if (AGGRESSIVE_GQL_SCAN && opData.data && typeof opData.data === 'object') {
-                    let aggressivelyModified = false;
-                    function scanAndNullify(obj, path = '') {
-                        for (const key in obj) {
-                            const currentPath = path ? `${path}.${key}` : key;
-                            if (typeof key === 'string' && (key.toLowerCase().includes('ad') || key.toLowerCase().includes('advertisement') || key.toLowerCase().includes('promo'))) {
-                                if (obj[key] !== null && !(Array.isArray(obj[key]) && obj[key].length === 0)) {
-                                    obj[key] = null;
-                                    aggressivelyModified = true;
-                                }
-                            } else if (typeof obj[key] === 'object' && obj[key] !== null) {
-                                scanAndNullify(obj[key], currentPath);
-                            }
-                        }
-                    }
-                    scanAndNullify(opData.data);
-                    if (aggressivelyModified) currentOpModified = true;
                 }
                 if (currentOpModified) modifiedOverall = true;
             }
             if (modifiedOverall) {
-                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Modified GQL response for ${url}`);
+                _logModuleTrace(CONFIG.LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Modified GQL response for ${url}`);
                 return JSON.stringify(Array.isArray(data) ? opDataArray : opDataArray[0]);
             }
         } catch (e) {
-            logError('GQLModify', `Error modifying GQL response for ${url}:`, e);
+            _logError('GQLModify', `Error modifying GQL response for ${url}:`, e);
         }
         return responseText;
     }
@@ -400,31 +446,14 @@
         const lowerCaseUrl = requestUrl.toLowerCase();
         const isGqlRequest = lowerCaseUrl.startsWith(GQL_URL);
         const urlShortForLog = (requestUrl.includes('?') ? requestUrl.substring(0, requestUrl.indexOf('?')) : requestUrl).substring(0, 120);
-        let isKnownTwitchDomain = false;
-        let requestHostname = '';
-        try {
-            requestHostname = new URL(requestUrl).hostname;
-            if (TWITCH_HOST_REGEX.test(requestHostname)) isKnownTwitchDomain = true;
-        } catch(e) {}
-        let isWhitelistedTwitchContentStream = isKnownTwitchDomain && (TWITCH_VIDEO_SEGMENT_PATH_REGEX.test(lowerCaseUrl) || TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl));
-        if (!isGqlRequest) {
-            let isBlockedByKeyword = false;
-            let blockingKeyword = null;
-            if (!isKnownTwitchDomain || (isKnownTwitchDomain && !isWhitelistedTwitchContentStream)) {
-                for (const keyword of AD_URL_KEYWORDS_BLOCK) {
-                    if (lowerCaseUrl.includes(keyword.toLowerCase())) {
-                        if (keyword === 'nat.min.js' && !BLOCK_NATIVE_ADS_SCRIPT) continue;
-                        isBlockedByKeyword = true;
-                        blockingKeyword = keyword;
-                        break;
-                    }
-                }
-            }
-            if (isBlockedByKeyword && !lowerCaseUrl.includes('.ts')) {
-                logModuleTrace(LOG_NETWORK_BLOCKING_DEBUG, 'FetchBlock', `Blocked fetch request to ${urlShortForLog} (Keyword: ${blockingKeyword})`);
-                return Promise.resolve(new Response(null, { status: 403, statusText: `Blocked by TTV AdBlock Ultimate (Keyword: ${blockingKeyword})` }));
+
+        for (const keyword of AD_URL_KEYWORDS_BLOCK) {
+            if (lowerCaseUrl.includes(keyword.toLowerCase())) {
+                _logModuleTrace(CONFIG.LOG_NETWORK_BLOCKING_DEBUG, 'FetchBlock', `Blocked fetch request to ${urlShortForLog} (Keyword: ${keyword})`);
+                return new Response(null, { status: 403, statusText: `Blocked by TTV AdBlock Ultimate (Keyword: ${keyword})` });
             }
         }
+
         const isM3U8RequestToUsher = method === 'GET' && TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl) && lowerCaseUrl.includes('usher.ttvnw.net');
         if (isM3U8RequestToUsher) {
             return new Promise((resolve, reject) => {
@@ -432,435 +461,206 @@
                     method: "GET", url: requestUrl, headers: init?.headers ? Object.fromEntries(new Headers(init.headers).entries()) : undefined, responseType: "text",
                     onload: function(response) {
                         if (response.status >= 200 && response.status < 300) {
-                            const { cleanedText, adsFound, linesRemoved, errorDuringClean } = parseAndCleanM3U8(response.responseText, requestUrl);
+                            const { cleanedText } = parseAndCleanM3U8Content(response.responseText, requestUrl);
                             const newHeaders = new Headers();
                             if (response.responseHeaders) response.responseHeaders.trim().split(/[\r\n]+/).forEach(line => { const parts = line.split(': ', 2); if (parts.length === 2 && parts[0].toLowerCase() !== 'content-length') newHeaders.append(parts[0], parts[1]); });
                             if (!newHeaders.has('Content-Type')) newHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
-                            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'FetchM3U8', `Processed M3U8 for ${urlShortForLog}: adsFound=${adsFound}, linesRemoved=${linesRemoved}`);
+                            _logModuleTrace(CONFIG.LOG_M3U8_CLEANING_DEBUG, 'MainFetchM3U8', `Processed M3U8 for ${urlShortForLog}`);
                             resolve(new Response(cleanedText, { status: response.status, statusText: response.statusText, headers: newHeaders }));
                         } else {
-                            logError('FetchM3U8', `GM_xmlhttpRequest failed for ${urlShortForLog}: ${response.statusText || response.status}`);
+                            _logError('MainFetchM3U8', `GM_xmlhttpRequest failed for ${urlShortForLog}: ${response.statusText || response.status}`);
                             reject(new TypeError(`GM_xmlhttpRequest failed: ${response.statusText || response.status}`));
                         }
                     },
                     onerror: function(error) {
-                        logError('FetchM3U8', `Network error for ${urlShortForLog}`);
+                        _logError('MainFetchM3U8', `Network error for ${urlShortForLog}:`, error);
                         reject(new TypeError('Network error'));
-                    },
-                    ontimeout: function() {
-                        logError('FetchM3U8', `Timeout for ${urlShortForLog}`);
-                        reject(new TypeError('Timeout'));
                     }
                 });
             });
         }
-        try {
-            const originalResponse = await originalFetch(input, init);
-            if (isGqlRequest && method === 'POST' && originalResponse.ok && MODIFY_GQL_RESPONSE) {
-                let responseText;
-                try { responseText = await originalResponse.clone().text(); if (!responseText) return originalResponse; } catch (e) { return originalResponse; }
-                const modifiedText = modifyGqlResponse(responseText, requestUrl);
-                if (modifiedText !== responseText) {
-                    const newHeaders = new Headers(originalResponse.headers);
-                    newHeaders.delete('Content-Length');
-                    return new Response(modifiedText, { status: originalResponse.status, statusText: originalResponse.statusText, headers: newHeaders });
-                }
+
+        const originalResponse = await originalFetch(input, init);
+        if (isGqlRequest && method === 'POST' && originalResponse.ok && CONFIG.MODIFY_GQL_RESPONSE) {
+            let responseText;
+            try { responseText = await originalResponse.clone().text(); if (!responseText) return originalResponse; } catch (e) { return originalResponse; }
+            const modifiedText = modifyGqlResponse(responseText, requestUrl);
+            if (modifiedText !== responseText) {
+                const newHeaders = new Headers(originalResponse.headers);
+                newHeaders.delete('Content-Length');
+                return new Response(modifiedText, { status: originalResponse.status, statusText: originalResponse.statusText, headers: newHeaders });
             }
-            return originalResponse;
-        } catch (error) {
-            logError('FetchOverride', `Error fetching ${urlShortForLog}:`, error);
-            throw error;
         }
+        return originalResponse;
     }
 
     const xhrRequestData = new WeakMap();
     function xhrOpenOverride(method, url) {
-        const urlString = String(url);
-        const lowerCaseUrl = urlString.toLowerCase();
-        const isGqlRequest = lowerCaseUrl.startsWith(GQL_URL);
-        const urlShortForLog = (urlString.includes('?') ? urlString.substring(0, urlString.indexOf('?')) : urlString).substring(0,120);
-        let blocked = false;
-        let blockingKeyword = null;
-        let isKnownTwitchDomain = false;
-        let requestHostname = '';
-        try { requestHostname = new URL(urlString).hostname; if (TWITCH_HOST_REGEX.test(requestHostname)) isKnownTwitchDomain = true; } catch(e) {}
-        let isWhitelistedTwitchContentStream = isKnownTwitchDomain && (TWITCH_VIDEO_SEGMENT_PATH_REGEX.test(lowerCaseUrl) || TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl));
-        if (!isGqlRequest) {
-            if (!isKnownTwitchDomain || (isKnownTwitchDomain && !isWhitelistedTwitchContentStream)) {
-                for (const keyword of AD_URL_KEYWORDS_BLOCK) {
-                    if (lowerCaseUrl.includes(keyword.toLowerCase())) {
-                        if (keyword === 'nat.min.js' && !BLOCK_NATIVE_ADS_SCRIPT) continue;
-                        if (lowerCaseUrl.includes('.ts')) continue;
-                        blocked = true;
-                        blockingKeyword = keyword;
-                        break;
-                    }
-                }
-            }
-        }
-        const isM3U8RequestToUsher = method.toUpperCase() === 'GET' && TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl) && urlString.includes('usher.ttvnw.net');
-        xhrRequestData.set(this, { method: method.toUpperCase(), url: urlString, urlShort: urlShortForLog, blocked, isGql: isGqlRequest, isM3U8: isM3U8RequestToUsher, blockingKeyword });
-        if ((isGqlRequest && MODIFY_GQL_RESPONSE) || isM3U8RequestToUsher) {
-            this.addEventListener('load', function() {
-                if (this.readyState === 4 && this.status >= 200 && this.status < 300) {
-                    const reqData = xhrRequestData.get(this);
-                    if (reqData) {
-                        const originalResponseText = this.responseText;
-                        if (typeof originalResponseText !== 'string' || originalResponseText.length === 0) return;
-                        let modifiedText = originalResponseText;
-                        let modificationPerformed = false;
-                        if (reqData.isGql && MODIFY_GQL_RESPONSE) {
-                            const gqlModified = modifyGqlResponse(originalResponseText, reqData.url);
-                            if (gqlModified !== originalResponseText) { modifiedText = gqlModified; modificationPerformed = true; }
-                        } else if (reqData.isM3U8) {
-                            const { cleanedText, adsFound, linesRemoved, errorDuringClean } = parseAndCleanM3U8(originalResponseText, reqData.url);
-                            if (!errorDuringClean && adsFound) { modifiedText = cleanedText; modificationPerformed = true; }
-                        }
-                        if (modificationPerformed) xhrRequestData.set(this, { ...reqData, modifiedResponse: modifiedText });
-                    }
-                }
-            }, { once: true, passive: true });
-        }
-        if (!blocked) {
-            try { return originalXhrOpen.apply(this, arguments); } catch (error) { throw error; }
-        } else {
-            logModuleTrace(LOG_NETWORK_BLOCKING_DEBUG, 'XHROpenBlock', `Blocked XHR to ${urlShortForLog} (Keyword: ${blockingKeyword})`);
-            try { originalXhrOpen.call(this, method, "about:blank?blocked=true", ...Array.from(arguments).slice(2)); } catch(e) {}
-        }
+        this._hooked_url = String(url); // Store for send
+        this._hooked_method = method.toUpperCase();
+        originalXhrOpen.apply(this, arguments);
     }
 
     function xhrSendOverride(data) {
-        const requestInfo = xhrRequestData.get(this);
-        if (!requestInfo) {
-            try { return originalXhrSend.apply(this, arguments); } catch(e){ throw e; }
+        const urlString = this._hooked_url;
+        const method = this._hooked_method;
+        const lowerCaseUrl = urlString.toLowerCase();
+        const isGqlRequest = lowerCaseUrl.startsWith(GQL_URL);
+        const isM3U8RequestToUsher = method === 'GET' && TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl) && urlString.includes('usher.ttvnw.net');
+
+        for (const keyword of AD_URL_KEYWORDS_BLOCK) {
+            if (lowerCaseUrl.includes(keyword.toLowerCase())) {
+                _logModuleTrace(CONFIG.LOG_NETWORK_BLOCKING_DEBUG, 'XHRBlock', `Blocked XHR to ${urlString.substring(0,100)}`);
+                this.dispatchEvent(new Event('error')); // Simulate network error
+                return;
+            }
         }
-        const { method, urlShort, blocked, blockingKeyword } = requestInfo;
-        if (blocked) {
-            try {
-                Object.defineProperty(this, 'readyState', { value: 4, writable: true, configurable: true }); this.readyState = 4;
-                Object.defineProperty(this, 'status', { value: 0, writable: true, configurable: true }); this.status = 0;
-                Object.defineProperty(this, 'statusText', { value: `Blocked by TTV AdBlock Ultimate (Keyword: ${blockingKeyword})`, writable: true, configurable: true }); this.statusText = `Blocked by TTV AdBlock Ultimate (Keyword: ${blockingKeyword})`;
-                Object.defineProperty(this, 'readyState', { writable: false }); Object.defineProperty(this, 'status', { writable: false }); Object.defineProperty(this, 'statusText', { writable: false });
-            } catch (e) {}
-            if (typeof this.onerror === 'function') { try { this.onerror(new ProgressEvent('error')); } catch(e) {} }
-            if (typeof this.onloadend === 'function') { try { this.onloadend(new ProgressEvent('loadend')); } catch (e) {} }
+
+        if (isM3U8RequestToUsher) {
+            const xhr = this;
+            GM_xmlhttpRequest({
+                method: method, url: urlString, responseType: "text",
+                onload: function(response) {
+                    const { cleanedText } = parseAndCleanM3U8Content(response.responseText, urlString);
+                    Object.defineProperties(xhr, {
+                        'responseText': { value: cleanedText, configurable: true },
+                        'response': { value: cleanedText, configurable: true },
+                        'status': { value: response.status, configurable: true },
+                        'statusText': { value: response.statusText, configurable: true },
+                        'readyState': { value: 4, configurable: true }
+                    });
+                    _logModuleTrace(CONFIG.LOG_M3U8_CLEANING_DEBUG, 'MainXHR_M3U8', `Processed M3U8 for ${urlString.substring(0,100)}`);
+                    xhr.dispatchEvent(new Event('load'));
+                    xhr.dispatchEvent(new Event('loadend'));
+                },
+                onerror: function(error) {
+                    _logError('MainXHR_M3U8', `GM_xmlhttpRequest error for ${urlString.substring(0,100)}:`, error);
+                    xhr.dispatchEvent(new Event('error'));
+                }
+            });
             return;
         }
-        try { return originalXhrSend.apply(this, arguments); } catch (error) { throw error; }
+
+        if (isGqlRequest && method === 'POST' && CONFIG.MODIFY_GQL_RESPONSE) {
+            this.addEventListener('load', function() {
+                if (this.readyState === 4 && this.status >= 200 && this.status < 300) {
+                    const originalResponseText = this.responseText;
+                    const modifiedText = modifyGqlResponse(originalResponseText, urlString);
+                    if (modifiedText !== originalResponseText) {
+                        Object.defineProperty(this, 'responseText', { value: modifiedText, configurable: true });
+                        Object.defineProperty(this, 'response', { value: modifiedText, configurable: true });
+                        _logModuleTrace(CONFIG.LOG_GQL_MODIFY_DEBUG, 'MainXHR_GQL', `Modified GQL for ${urlString.substring(0,100)}`);
+                    }
+                }
+            }, { once: true });
+        }
+        originalXhrSend.apply(this, arguments);
     }
 
-    function hookXhrGetters() {
-        if (MODIFY_GQL_RESPONSE || true) {
-            if (originalXhrResponseGetter?.get) {
-                Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'response', {
-                    get: function() {
-                        const reqData = xhrRequestData.get(this);
-                        if (reqData?.modifiedResponse !== null && reqData?.modifiedResponse !== undefined && ((reqData.isGql && MODIFY_GQL_RESPONSE) || reqData.isM3U8) && (this.responseType === '' || this.responseType === 'text')) {
-                            return reqData.modifiedResponse;
-                        }
-                        try { return originalXhrResponseGetter.get.call(this); } catch (getterError) { return null; }
-                    }, configurable: true
-                });
-            }
-            if (originalXhrResponseTextGetter?.get) {
-                Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'responseText', {
-                    get: function() {
-                        const reqData = xhrRequestData.get(this);
-                        if (reqData?.modifiedResponse !== null && reqData?.modifiedResponse !== undefined &&
-                            ((reqData.isGql && MODIFY_GQL_RESPONSE) || reqData.isM3U8)) {
-                            return reqData.modifiedResponse;
-                        }
-                        try {
-                            return originalXhrResponseTextGetter.get.call(this);
-                        } catch (getterError) {
-                            return "";
-                        }
-                    }, configurable: true
-                });
-            }
-        }
-    }
 
     function handleMessageFromWorkerGlobal(event) {
-        const msgData = event.data;
-        if (msgData && typeof msgData.type === 'string') {
-            const workerInstance = event.source;
-            let workerLabel = msgData.workerLabel || 'UnknownWorker';
-            if (workerInstance) { for (const [label, state] of hookedWorkers.entries()) { if (state.instance === workerInstance) { workerLabel = label; break; } } }
-
-            if (msgData.type === 'ADBLOCK_WORKER_HOOKS_READY') {
-                const workerState = hookedWorkers.get(workerLabel) || Array.from(hookedWorkers.values()).find(s => s.instance === workerInstance);
-                if (workerState) workerState.hooksReady = true;
-            } else if (msgData.type === 'PONG_WORKER_ADBLOCK') {
-                const workerState = hookedWorkers.get(workerLabel);
-                if (workerState) workerState.lastPong = Date.now();
-            } else if (msgData.type === 'ADBLOCK_FETCH_M3U8_REQUEST') {
-                const { url, initDetails, id } = msgData;
-                if (!workerInstance) return;
-                GM_xmlhttpRequest({
-                    method: "GET", url: url, headers: initDetails?.headers ? Object.fromEntries(initDetails.headers) : undefined, responseType: "text",
-                    onload: function(response) {
-                        let postData = { type: 'ADBLOCK_M3U8_RESPONSE', id: id };
-                        if (response.status >= 200 && response.status < 300) {
-                            const { cleanedText, adsFound, errorDuringClean } = parseAndCleanM3U8(response.responseText, url);
-                            postData.cleanedText = cleanedText; postData.status = response.status; postData.statusText = response.statusText;
-                            const responseHeadersObj = {};
-                            if (response.responseHeaders) response.responseHeaders.trim().split(/[\r\n]+/).forEach(line => { const parts = line.split(': ', 2); if (parts.length === 2 && parts[0].toLowerCase() !== 'content-length') responseHeadersObj[parts[0]] = parts[1]; });
-                            postData.headers = responseHeadersObj;
-                        } else {
-                            postData.error = `Failed: ${response.status} ${response.statusText}`; postData.status = response.status; postData.statusText = response.statusText;
-                        }
-                        try { workerInstance.postMessage(postData); } catch (e) {}
-                    },
-                    onerror: function(error) {
-                        try { workerInstance.postMessage({ type: 'ADBLOCK_M3U8_RESPONSE', id: id, error: 'Network error', status: 0, statusText: 'Network Error' }); } catch (e) {}
-                    },
-                    ontimeout: function() {
-                        try { workerInstance.postMessage({ type: 'ADBLOCK_M3U8_RESPONSE', id: id, error: 'Timeout', status: 0, statusText: 'Timeout' }); } catch (e) {}
-                    }
-                });
-            }
+        const msg = event.data;
+        if (msg?.adblock_message_request && msg.type === 'WORKER_FETCH_M3U8_FALLBACK') {
+            const workerPort = event.source;
+            _logModuleTrace(CONFIG.LOG_M3U8_CLEANING_DEBUG, 'WorkerFallback', `Worker M3U8 fetch failed, main handling: ${msg.url.substring(0,100)}`);
+            GM_xmlhttpRequest({
+                method: "GET", url: msg.url, responseType: "text",
+                onload: (response) => {
+                    const { cleanedText } = parseAndCleanM3U8Content(response.responseText, msg.url);
+                    const headers = {};
+                    if (response.responseHeaders) response.responseHeaders.trim().split(/[\r\n]+/).forEach(line => {
+                        const parts = line.split(': ', 2); if (parts.length === 2) headers[parts[0].toLowerCase()] = parts[1];
+                    });
+                    workerPort.postMessage({ adblock_message_response: true, id: msg.id, body: cleanedText, status: response.status, statusText: response.statusText, headers });
+                },
+                onerror: () => workerPort.postMessage({ adblock_message_response: true, id: msg.id, error: 'GM_XHR Network Error', status: 0 })
+            });
         }
-    }
-
-    function addWorkerMessageListeners(workerInstance, label) {
-        if (!workerInstance || typeof workerInstance.addEventListener !== 'function' || workerInstance._listenersAddedByAdblock) return;
-        workerInstance.addEventListener('error', (e) => {
-            logError('WorkerError', `Worker ${label} error: ${e.message}`);
-        }, { passive: true });
-        workerInstance._listenersAddedByAdblock = true;
     }
 
     function hookWorkerConstructor() {
-        if (!INJECT_INTO_WORKERS || unsafeWindow.Worker?.hooked_by_adblock_ult || typeof OriginalWorker === 'undefined') return;
-        workerHookAttempted = true;
+        if (!CONFIG.INJECT_INTO_WORKERS || unsafeWindow.Worker.hooked_by_adblock_ult) return;
         unsafeWindow.Worker = class HookedWorker extends OriginalWorker {
             constructor(scriptURL, options) {
-                let urlString = (scriptURL instanceof URL) ? scriptURL.href : String(scriptURL);
-                let isBlobURL = urlString.startsWith('blob:');
-                const randomId = Math.random().toString(36).substr(2, 5);
-                let workerLabel = isBlobURL ? `blob-${randomId}:${urlString.substring(5, 35)}...` : `${(urlString.split(/[0-9]/)[0].split('/').pop() || urlString.substring(0, 40))}-${randomId}`;
-                let isIVSWorker = workerLabel.includes('amazon-ivs-wasmworker') || workerLabel.includes('ivs-wasmworker');
-                if(isIVSWorker) workerLabel += " (IVS)";
-                let newWorkerInstance;
-                try {
-                    newWorkerInstance = super(scriptURL, options);
-                    newWorkerInstance._workerLabel = workerLabel; newWorkerInstance._createdAt = Date.now();
-                    hookedWorkers.set(workerLabel, { instance: newWorkerInstance, lastPing: 0, lastPong: Date.now(), hooksReady: false, url: urlString, isBlob: isBlobURL, isIVS: isIVSWorker });
-                    addWorkerMessageListeners(newWorkerInstance, workerLabel);
-                    if (!isBlobURL) {
-                        setTimeout(() => {
-                            const workerState = hookedWorkers.get(workerLabel);
-                            if (workerState && !workerState.hooksReady) {
-                                try {
-                                    const codeToInject = getWorkerInjectionCode();
-                                    newWorkerInstance.postMessage({ type: 'EVAL_ADBLOCK_CODE', code: codeToInject });
-                                } catch(e) {
-                                    logError('WorkerHook', `Failed to post injection message to worker ${workerLabel}: ${e.message}`);
-                                }
-                            }
-                        }, 300);
-                    }
-                } catch (constructorError) {
-                    logError('WorkerHook', `Worker constructor error for ${workerLabel}: ${constructorError.message}`);
-                    throw constructorError;
-                }
-                return newWorkerInstance;
+                const urlString = (scriptURL instanceof URL) ? scriptURL.href : String(scriptURL);
+                const workerCode = getWorkerInjectionCode(); // Get the fully prepared code string
+                const blob = new Blob([workerCode, `\nimportScripts("${urlString}");`], { type: 'application/javascript' });
+                const newScriptURL = URL.createObjectURL(blob);
+                const workerInstance = super(newScriptURL, options);
+                URL.revokeObjectURL(newScriptURL); // Clean up
+                _logCoreDebug('WorkerHook', `Intercepted Worker creation for: ${urlString.substring(0, 100)}`);
+                return workerInstance;
             }
         };
-        try { Object.keys(OriginalWorker).forEach(key => { if (!unsafeWindow.Worker.hasOwnProperty(key)) try { unsafeWindow.Worker[key] = OriginalWorker[key]; } catch(e){} }); Object.setPrototypeOf(unsafeWindow.Worker, OriginalWorker); } catch (e) {}
         unsafeWindow.Worker.hooked_by_adblock_ult = true;
         unsafeWindow.addEventListener('message', handleMessageFromWorkerGlobal, { passive: true });
-        logCoreDebug('WorkerHook', 'Worker constructor hooked');
-    }
-
-    function startWorkerPinger() {
-        if (workerPingIntervalId || !INJECT_INTO_WORKERS || WORKER_PING_INTERVAL_MS <= 0) return;
-        workerPingIntervalId = setInterval(() => {
-            const now = Date.now();
-            if (hookedWorkers.size === 0 && !LOG_WORKER_INJECTION_DEBUG) return;
-            hookedWorkers.forEach((state, label) => {
-                try {
-                    if (state.instance && typeof state.instance.postMessage === 'function') {
-                        let shouldPing = false;
-                        if (state.hooksReady) shouldPing = true;
-                        else if (!state.isBlob) {
-                            const timeSinceCreation = now - (state.instance._createdAt || state.lastPing || now);
-                            if (timeSinceCreation > WORKER_PING_INTERVAL_MS * 1.5) shouldPing = true;
-                        }
-                        if (shouldPing) {
-                            if (state.lastPing > 0 && state.lastPong < state.lastPing && (now - state.lastPing > WORKER_PING_INTERVAL_MS * 2.5)) {
-                                if (!state.isBlob) { try { state.instance.terminate(); } catch(e){} hookedWorkers.delete(label); }
-                                return;
-                            }
-                            state.instance.postMessage({ type: 'PING_WORKER_ADBLOCK' }); state.lastPing = now;
-                        }
-                    } else { hookedWorkers.delete(label); }
-                } catch (e) { if (e.message.includes("terminated") || e.message.includes("detached")) hookedWorkers.delete(label); }
-            });
-        }, WORKER_PING_INTERVAL_MS);
-    }
-
-    function stopWorkerPinger() {
-        if (workerPingIntervalId) { clearInterval(workerPingIntervalId); workerPingIntervalId = null; }
     }
 
     function installHooks() {
         if (hooksInstalledMain) return;
-        try { unsafeWindow.fetch = fetchOverride; } catch (e) { if (originalFetch) unsafeWindow.fetch = originalFetch; logError('HookInstall', 'Failed to hook fetch:', e); }
-        try { unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride; unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride; hookXhrGetters(); } catch (e) {
-            if (originalXhrOpen) unsafeWindow.XMLHttpRequest.prototype.open = originalXhrOpen;
-            if (originalXhrSend) unsafeWindow.XMLHttpRequest.prototype.send = originalXhrSend;
-            if (originalXhrResponseGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'response', originalXhrResponseGetter); } catch(revertErr) {}
-            if (originalXhrResponseTextGetter) try { Object.defineProperty(unsafeWindow.XMLHttpRequest.prototype, 'responseText', originalXhrResponseTextGetter); } catch (revertErr) {}
-            logError('HookInstall', 'Failed to hook XHR:', e);
-        }
-        if (INJECT_INTO_WORKERS) try { hookWorkerConstructor(); } catch (e) { if (OriginalWorker) unsafeWindow.Worker = OriginalWorker; logError('HookInstall', 'Failed to hook Worker:', e); }
-        else workerHookAttempted = false;
+        try { unsafeWindow.fetch = fetchOverride; } catch (e) { _logError('HookInstall', 'Failed to hook fetch:', e); }
+        try {
+            unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride;
+            unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride;
+        } catch (e) { _logError('HookInstall', 'Failed to hook XHR:', e); }
+        try { hookWorkerConstructor(); } catch (e) { _logError('HookInstall', 'Failed to hook Worker:', e); }
         hooksInstalledMain = true;
-        logCoreDebug('HookInstall', 'Main hooks installed');
+        _logCoreDebug('HookInstall', 'Main hooks installed.');
     }
 
-    function removeDOMAdElements(contextNode = document) {
-        if (!ATTEMPT_DOM_AD_REMOVAL || !contextNode || typeof contextNode.querySelectorAll !== 'function') return;
-        let removedCount = 0;
-        AD_DOM_ELEMENT_SELECTORS_TO_REMOVE.forEach(selector => {
-            if (selector === COOKIE_BANNER_SELECTOR && !HIDE_COOKIE_BANNER) return;
-            try {
-                const elements = contextNode.querySelectorAll(selector);
-                elements.forEach(el => {
-                    if (el && el.parentNode && !el.querySelector('video') && !el.closest(PLAYER_CONTAINER_SELECTORS.join(','))) {
-                        try { el.parentNode.removeChild(el); removedCount++; } catch (removeError) {}
-                    }
-                });
-            } catch (queryError) {}
-        });
-        if (removedCount > 0) logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'DOMAdRemoval', `Removed ${removedCount} ad elements`);
-    }
-
-    function startAdRemovalObserver() {
-        if (!ATTEMPT_DOM_AD_REMOVAL || adRemovalObserver) return;
-        let observedNode = document.body;
-        for (const selector of AD_DOM_PARENT_INDICATOR_SELECTORS) { const parentNode = document.querySelector(selector); if (parentNode) { observedNode = parentNode; break; } }
-        if (!observedNode) observedNode = document.body || document.documentElement;
-        if (!observedNode) { setTimeout(startAdRemovalObserver, 1000); return; }
-        adRemovalObserver = new MutationObserver((mutations) => {
-            mutations.forEach(mutation => {
-                if (mutation.addedNodes.length > 0) mutation.addedNodes.forEach(node => { if (node.nodeType === Node.ELEMENT_NODE) removeDOMAdElements(node); });
+    // Function to remove DOM ad elements, now takes selectors as an argument
+    function removeDOMAdElements(selectorsToRemove) {
+        if (!CONFIG.ATTEMPT_DOM_AD_REMOVAL) return;
+        if (!adRemovalObserver) {
+            adRemovalObserver = new MutationObserver(() => removeDOMAdElements(selectorsToRemove)); // Pass selectors
+            adRemovalObserver.observe(document.body, { childList: true, subtree: true });
+            _logCoreDebug('DOMAdRemoval', 'MutationObserver for ad removal started.');
+        }
+        selectorsToRemove.forEach(selector => {
+            document.querySelectorAll(selector).forEach(el => {
+                if (el && el.parentNode) {
+                    try { el.parentNode.removeChild(el); } catch (e) {}
+                }
             });
         });
-        try { adRemovalObserver.observe(observedNode, { childList: true, subtree: true }); } catch (e) { adRemovalObserver = null; logError('AdRemovalObserver', 'Failed to start observer:', e); }
     }
 
-    function findVideoElement() {
-        if (videoElement && document.contains(videoElement)) return videoElement;
-        for (const selector of PLAYER_CONTAINER_SELECTORS) {
-            try {
-                const videoContainer = document.querySelector(selector);
-                if (videoContainer) {
-                    const video = videoContainer.querySelector('video');
-                    if (video && document.contains(video)) {
-                        videoElement = video;
-                        logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'VideoFinder', `Found video element via container: ${selector}`);
-                        return videoElement;
-                    }
-                }
-            } catch (e) {}
-        }
-        videoElement = null;
-        return null;
-    }
+    // --- Video Player Monitoring & Autoplay ---
+    let videoPlayerMutationObserver = null;
+    function setupVideoPlayerMonitor() {
+        if (videoPlayerMutationObserver) return;
 
-    function startPlayerFinderObserver() {
-        if (playerFinderObserver) return;
-        playerFinderObserver = new MutationObserver(() => {
-            if (!videoElement || !document.contains(videoElement)) {
-                const newVideo = findVideoElement();
-                if (newVideo) setupVideoPlayerMonitor(newVideo);
-            }
-        });
-        try { playerFinderObserver.observe(document.documentElement || document.body, { childList: true, subtree: true }); } catch (e) { playerFinderObserver = null; logError('PlayerFinderObserver', 'Failed to start observer:', e); }
-    }
-
-    function checkPlayerState() {
-        const now = performance.now();
-        if (!videoElement || !document.contains(videoElement)) { videoElement = null; return false; }
-        const isPlaying = !videoElement.paused && videoElement.currentTime > 0;
-        let bufferedEnd = 0;
-        for (let i = 0; i < videoElement.buffered.length; i++) {
-            if (videoElement.currentTime >= videoElement.buffered.start(i) && videoElement.currentTime <= videoElement.buffered.end(i)) {
-                bufferedEnd = videoElement.buffered.end(i);
-                break;
-            }
-        }
-        const bufferAhead = bufferedEnd - videoElement.currentTime;
-        if (isPlaying && videoElement.currentTime === lastKnownVideoTime && lastKnownVideoTime > 0) {
-            if (isWaitingForDataTimestamp && (now - isWaitingForDataTimestamp) > RELOAD_BUFFERING_THRESHOLD_MS && bufferAhead < 5) {
-                triggerReload('Player stuck, insufficient buffer');
-            }
-        } else if (!isPlaying && !videoElement.paused && isWaitingForDataTimestamp && (now - isWaitingForDataTimestamp) > RELOAD_STALL_THRESHOLD_MS) {
-            triggerReload('Player waiting for data');
-        } else {
-            lastKnownVideoTime = videoElement.currentTime;
-            isWaitingForDataTimestamp = 0;
-        }
-        return isPlaying;
-    }
-
-    function handleErrorEvent(event) {
-        if (!event.target || !event.target.error) return;
-        const errorCode = event.target.error.code;
-        if (RELOAD_ON_ERROR_CODES.includes(errorCode)) {
-            logError('PlayerMonitor', `Triggering reload due to video element error code ${errorCode}`);
-            triggerReload(`Player error code ${errorCode}`);
-        }
-    }
-
-    function handleWaitingEvent() {
-        if (!isWaitingForDataTimestamp) {
-            isWaitingForDataTimestamp = performance.now();
-        }
-    }
-
-    function handleTimeUpdateEvent() {
-        if (videoElement) {
-            lastKnownVideoTime = videoElement.currentTime;
-            lastVideoTimeUpdateTimestamp = performance.now();
-            isWaitingForDataTimestamp = 0;
-        }
-    }
-
-    function setupVideoPlayerMonitor(videoEl) {
-        if (!videoEl || videoEl._adblockMonitored) return;
-        try {
-            videoEl.addEventListener('error', handleErrorEvent, { passive: true });
-            videoEl.addEventListener('waiting', handleWaitingEvent, { passive: true });
-            videoEl.addEventListener('timeupdate', handleTimeUpdateEvent, { passive: true });
-            videoEl._adblockMonitored = true;
-            logCoreDebug('PlayerMonitor', 'Video player monitor setup');
-        } catch (e) {
-            logError('PlayerMonitor', 'Failed to setup video player monitor:', e);
-        }
-    }
-
-    function startErrorScreenObserver() {
-        if (errorScreenObserver || !ENABLE_AUTO_RELOAD) return;
-        const playerRoot = document.querySelector('.video-player, .persistent-player');
-        const targetNode = playerRoot || document.body;
-
-        if (!targetNode) {
-            setTimeout(startErrorScreenObserver, 1000);
-            return;
-        }
-
-        errorScreenObserver = new MutationObserver((mutations) => {
-            for (const mutation of mutations) {
-                if (mutation.addedNodes.length) {
+        videoPlayerMutationObserver = new MutationObserver((mutationsList) => {
+            let foundNewVideo = false;
+            for (const mutation of mutationsList) {
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                     for (const node of mutation.addedNodes) {
                         if (node.nodeType === Node.ELEMENT_NODE) {
-                            if (node.querySelector('[data-a-target="player-error-screen"]') || node.matches('[data-a-target="player-error-screen"]')) {
-                                logError('ErrorScreenObserver', 'Twitch error screen detected. Triggering reload.');
-                                triggerReload('Detected player error screen');
+                            const newVideoElement = node.querySelector('video') || (node.tagName === 'VIDEO' ? node : null);
+                            if (newVideoElement && newVideoElement !== videoElement) {
+                                videoElement = newVideoElement;
+                                foundNewVideo = true;
+                                _logCoreDebug('PlayerMonitor', 'Found new video element.');
+
+                                const attemptPlay = () => {
+                                    if (videoElement && videoElement.paused) {
+                                        _logModuleTrace(CONFIG.LOG_PLAYER_MONITOR_DEBUG, 'Autoplay', 'Proactively playing newly discovered video element.');
+                                        videoElement.play().catch(e => {
+                                            _logWarn('Autoplay', `Failed to autoplay video: ${e.message}. User interaction may be required.`);
+                                        });
+                                    }
+                                };
+                                setTimeout(attemptPlay, 1000); // Increased delay
+                                videoElement.addEventListener('play', attemptPlay, { once: true, passive: true });
+                                videoElement.addEventListener('click', attemptPlay, { once: true, passive: true });
+
+                                videoElement.addEventListener('error', (e) => {
+                                    const errorCode = e?.target?.error?.code;
+                                    if (errorCode && CONFIG.RELOAD_ON_ERROR_CODES.includes(errorCode)) {
+                                        _logError('PlayerMonitor', `Player error code ${errorCode} detected. Reloading.`);
+                                        triggerReload(`Player error code ${errorCode}`);
+                                    }
+                                }, { passive: true });
                                 return;
                             }
                         }
@@ -868,82 +668,53 @@
                 }
             }
         });
-
-        try {
-            errorScreenObserver.observe(targetNode, { childList: true, subtree: true });
-            logCoreDebug('ErrorScreenObserver', 'Started observer for player error screen.');
-        } catch (e) {
-            errorScreenObserver = null;
-            logError('ErrorScreenObserver', 'Failed to start observer:', e);
-        }
+        videoPlayerMutationObserver.observe(document.body, { childList: true, subtree: true });
+        _logCoreDebug('PlayerMonitor', 'Video player mutation observer started.');
     }
 
-    function startMonitors() {
-        if (!ENABLE_AUTO_RELOAD) return;
-        startPlayerFinderObserver();
-        startErrorScreenObserver();
-        playerMonitorIntervalId = setInterval(() => {
-            if (document.hidden) return;
-            if (!videoElement || !document.contains(videoElement)) {
-                videoElement = findVideoElement();
-                if (videoElement) setupVideoPlayerMonitor(videoElement);
-            }
-            if (videoElement) checkPlayerState();
-        }, 1000);
-        logCoreDebug('Monitors', 'Started all player monitors.');
-    }
-
-    function stopMonitors() {
-        if (playerMonitorIntervalId) { clearInterval(playerMonitorIntervalId); playerMonitorIntervalId = null; }
-        if (playerFinderObserver) { playerFinderObserver.disconnect(); playerFinderObserver = null; }
-        if (errorScreenObserver) { errorScreenObserver.disconnect(); errorScreenObserver = null; }
-        logCoreDebug('Monitors', 'Stopped all player monitors.');
-    }
-
+    // --- Page Reload Logic ---
     function triggerReload(reason) {
+        if (!CONFIG.ENABLE_AUTO_RELOAD) return;
         const now = Date.now();
         if (now - lastReloadTimestamp < RELOAD_COOLDOWN_MS || reloadCount >= MAX_RELOADS_PER_SESSION) {
-            logWarn('ReloadTrigger', `Reload skipped: ${reason} (cooldown or max reloads reached)`);
+            _logWarn('ReloadTrigger', `Reload skipped: ${reason} (cooldown or max reloads reached)`);
             return;
         }
-        if (reloadTimeoutId) { clearTimeout(reloadTimeoutId); reloadTimeoutId = null; }
-        reloadTimeoutId = setTimeout(() => {
-            lastReloadTimestamp = now;
-            reloadCount++;
-            logCoreDebug('ReloadTrigger', `Reloading page: ${reason}`);
-            try { window.location.reload(); } catch (e) {
-                logError('ReloadTrigger', `Failed to reload: ${e.message}`);
+        lastReloadTimestamp = now;
+        reloadCount++;
+        _logCoreDebug('ReloadTrigger', `Reloading page: ${reason}`);
+        unsafeWindow.location.reload();
+    }
+
+    // --- Error Screen Observer ---
+    function startErrorScreenObserver() {
+        if (!CONFIG.ENABLE_AUTO_RELOAD || errorScreenObserver) return;
+        errorScreenObserver = new MutationObserver(() => {
+            if (document.querySelector('[data-a-target="player-error-screen"]')) {
+                _logError('ErrorScreenObserver', 'Twitch error screen detected. Reloading.');
+                triggerReload('Detected player error screen');
             }
-        }, 500);
+        });
+        errorScreenObserver.observe(document.body, { childList: true, subtree: true });
+        _logCoreDebug('ErrorScreenObserver', 'Observer for player error screen started.');
     }
 
-    function handleVisibilityChange() {
-        if (document.hidden) {
-            stopMonitors();
-            stopWorkerPinger();
-        } else {
-            if (visibilityResumeTimer) clearTimeout(visibilityResumeTimer);
-            visibilityResumeTimer = setTimeout(() => {
-                startMonitors();
-                startWorkerPinger();
-                setQualitySettings();
-            }, VISIBILITY_RESUME_DELAY_MS);
-        }
-    }
-
+    // --- Script Initialization ---
     function initializeScript() {
+        if (hooksInstalledMain) return;
+
+        injectCSS();
+        hookQualitySettings();
         installHooks();
-        startMonitors();
-        startWorkerPinger();
-        startAdRemovalObserver();
-        setQualitySettings(true);
-        try { document.addEventListener('visibilitychange', handleVisibilityChange, { passive: true }); } catch (e) {
-            logError('Initialize', 'Failed to add visibilitychange listener:', e);
-        }
-        removeDOMAdElements();
-        logCoreDebug('Initialize', 'Script initialized');
+        removeDOMAdElements(AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST); // Pass the static list
+        startErrorScreenObserver();
+        setupVideoPlayerMonitor();
+
+        hooksInstalledMain = true;
+        _logCoreDebug('Initialize', 'Script initialized successfully.');
     }
 
+    // Ensure initialization runs after DOM is ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initializeScript, { once: true });
     } else {
