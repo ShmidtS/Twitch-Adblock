@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      19.2.4
-// @description  Блокировка рекламы Twitch через очистку M3U8 и модификацию GQL.
+// @version      19.2.8
+// @description  Блокировка рекламы. Улучшена работа с VPN. Добавлен наблюдатель за ошибками плеера для авто-восстановления.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -16,7 +16,6 @@
 // @connect      *.ttvnw.net
 // @connect      *.twitch.tv
 // @connect      gql.twitch.tv
-// @connect      api.twitch.tv
 // @connect      github.com
 // @connect      raw.githubusercontent.com
 // @updateURL    https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
@@ -28,8 +27,8 @@
 (function() {
     'use strict';
 
-    const SCRIPT_VERSION = '19.2.4';
-    const INJECT_INTO_WORKERS = GM_getValue('TT sprechen Sie Deutsch? V_AdBlock_InjectWorkers', false);
+    const SCRIPT_VERSION = '19.2.8';
+    const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true);
     const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
     const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
     const BLOCK_NATIVE_ADS_SCRIPT = GM_getValue('TTV_AdBlock_BlockNatScript', true);
@@ -38,15 +37,14 @@
     const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
     const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', false);
     const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', false);
-    const LOG_WORKER_INJECTION_DEBUG = GM_getValue('TTV_AdBlock_Debug_WorkerInject', false);
     const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', false);
     const LOG_M3U8_CLEANING_DEBUG = GM_getValue('TTV_AdBlock_Debug_M3U8', false);
     const LOG_GQL_MODIFY_DEBUG = GM_getValue('TTV_AdBlock_Debug_GQL', false);
     const LOG_NETWORK_BLOCKING_DEBUG = GM_getValue('TTV_AdBlock_Debug_NetBlock', false);
-    const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', '2,3,4,9,10,403,1000,3000,4000,5000,6001');
+    const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', '0,2,3,4,9,10,403,1000,2000,3000,4000,5000,6001');
     const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 20000);
     const RELOAD_BUFFERING_THRESHOLD_MS = GM_getValue('TTV_AdBlock_BufferingThresholdMs', 45000);
-    const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 30000);
+    const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 15000);
     const VISIBILITY_RESUME_DELAY_MS = GM_getValue('TTV_AdBlock_VisResumeDelayMs', 1500);
     const WORKER_PING_INTERVAL_MS = GM_getValue('TTV_AdBlock_WorkerPingIntervalMs', 20000);
     const USE_REGEX_M3U8_CLEANING = GM_getValue('TTV_AdBlock_UseRegexM3U8', true);
@@ -59,9 +57,9 @@
     const AD_SIGNIFIER_DATERANGE_ATTR = 'twitch-stitched-ad';
     const AD_DATERANGE_ATTRIBUTE_KEYWORDS = ['ADVERTISING', 'ADVERTISEMENT', 'PROMOTIONAL', 'SPONSORED', 'COMMERCIALBREAK'];
     const AD_DATERANGE_REGEX = USE_REGEX_M3U8_CLEANING ? /CLASS="(?:TWITCH-)?STITCHED-AD"/i : null;
-    let AD_URL_KEYWORDS_BLOCK = ['amazon-adsystem.com', 'doubleclick.net', 'googleadservices.com', 'googletagservices.com', 'imasdk.googleapis.com', 'pubmatic.com', 'rubiconproject.com', 'adsrvr.org', 'adnxs.com', 'taboola.com', 'outbrain.com', 'ads.yieldmo.com', 'ads.adaptv.advertising.com', 'scorecardresearch.com', 'yandex.ru/clck/', 'omnitagjs', 'omnitag', 'innovid.com', 'eyewonder.com', 'serverbid.com', 'spotxchange.com', 'spotx.tv', 'springserve.com', 'flashtalking.com', 'contextual.media.net', 'advertising.com', 'adform.net', 'freewheel.tv', 'stickyadstv.com', 'tremorhub.com', 'aniview.com', 'criteo.com', 'adition.com', 'teads.tv', 'undertone.com', 'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads'];
+    let AD_URL_KEYWORDS_BLOCK = ['d2v02itv0y9u9t.cloudfront.net', 'amazon-adsystem.com', 'doubleclick.net', 'googleadservices.com', 'googletagservices.com', 'imasdk.googleapis.com', 'pubmatic.com', 'rubiconproject.com', 'adsrvr.org', 'adnxs.com', 'taboola.com', 'outbrain.com', 'ads.yieldmo.com', 'ads.adaptv.advertising.com', 'scorecardresearch.com', 'yandex.ru/clck/', 'omnitagjs', 'omnitag', 'innovid.com', 'eyewonder.com', 'serverbid.com', 'spotxchange.com', 'spotx.tv', 'springserve.com', 'flashtalking.com', 'contextual.media.net', 'advertising.com', 'adform.net', 'freewheel.tv', 'stickyadstv.com', 'tremorhub.com', 'aniview.com', 'criteo.com', 'adition.com', 'teads.tv', 'undertone.com', 'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads'];
     if (BLOCK_NATIVE_ADS_SCRIPT) AD_URL_KEYWORDS_BLOCK.push('nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com');
-    const PLAYER_SELECTORS_IMPROVED = ['div[data-a-target="video-player"] video[playsinline]', '.video-player video[playsinline]', 'div[data-a-player-state] video', 'main video[playsinline][src]', 'video.persistent-player', 'video[class*="video-player"]', 'video[class*="player-video"]', 'video[src]', 'video'];
+    const PLAYER_CONTAINER_SELECTORS = ['div[data-a-target="video-player"]', '.video-player', 'div[data-a-player-state]', 'main', '.persistent-player'];
     const AD_OVERLAY_SELECTORS_CSS = ['.video-player__ad-info-container', 'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]', 'button[aria-label*="feedback for this Ad"]', '.player-ad-notice', '.ad-interrupt-screen', 'div[data-test-selector="ad-banner-default-text-area"]', 'div[data-test-selector="ad-display-root"]', '.persistent-player__ad-container', '[data-a-target="advertisement-notice"]', 'div[data-a-target="ax-overlay"]', '[data-test-selector="sad-overlay"]', 'div[class*="video-ad-label"]', '.player-ad-overlay', 'div[class*="advertisement"]', 'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'];
     const COOKIE_BANNER_SELECTOR = '.consent-banner';
     const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE = ['div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]', 'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]', 'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay', '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]', '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'];
@@ -85,6 +83,7 @@
     let visibilityResumeTimer = null;
     let playerFinderObserver = null;
     let adRemovalObserver = null;
+    let errorScreenObserver = null;
     let workerPingIntervalId = null;
     const RELOAD_ON_ERROR_CODES = RELOAD_ON_ERROR_CODES_RAW.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
     const MAX_RELOADS_PER_SESSION = 5;
@@ -491,7 +490,7 @@
                 for (const keyword of AD_URL_KEYWORDS_BLOCK) {
                     if (lowerCaseUrl.includes(keyword.toLowerCase())) {
                         if (keyword === 'nat.min.js' && !BLOCK_NATIVE_ADS_SCRIPT) continue;
-                        if (lowerCaseUrl.includes('.ts')) continue; // Allow .ts segments to prevent stream interruptions
+                        if (lowerCaseUrl.includes('.ts')) continue;
                         blocked = true;
                         blockingKeyword = keyword;
                         break;
@@ -592,11 +591,9 @@
             if (msgData.type === 'ADBLOCK_WORKER_HOOKS_READY') {
                 const workerState = hookedWorkers.get(workerLabel) || Array.from(hookedWorkers.values()).find(s => s.instance === workerInstance);
                 if (workerState) workerState.hooksReady = true;
-                logModuleTrace(LOG_WORKER_INJECTION_DEBUG, 'WorkerHook', `Worker hooks ready: ${workerLabel}`);
             } else if (msgData.type === 'PONG_WORKER_ADBLOCK') {
                 const workerState = hookedWorkers.get(workerLabel);
                 if (workerState) workerState.lastPong = Date.now();
-                logModuleTrace(LOG_WORKER_INJECTION_DEBUG, 'WorkerPing', `Received pong from ${workerLabel}`);
             } else if (msgData.type === 'ADBLOCK_FETCH_M3U8_REQUEST') {
                 const { url, initDetails, id } = msgData;
                 if (!workerInstance) return;
@@ -610,22 +607,16 @@
                             const responseHeadersObj = {};
                             if (response.responseHeaders) response.responseHeaders.trim().split(/[\r\n]+/).forEach(line => { const parts = line.split(': ', 2); if (parts.length === 2 && parts[0].toLowerCase() !== 'content-length') responseHeadersObj[parts[0]] = parts[1]; });
                             postData.headers = responseHeadersObj;
-                            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'WorkerM3U8', `Processed M3U8 for ${url}: adsFound=${adsFound}`);
                         } else {
                             postData.error = `Failed: ${response.status} ${response.statusText}`; postData.status = response.status; postData.statusText = response.statusText;
-                            logError('WorkerM3U8', `Worker M3U8 request failed for ${url}: ${response.statusText}`);
                         }
-                        try { workerInstance.postMessage(postData); } catch (e) {
-                            logError('WorkerM3U8', `Failed to post message to worker: ${e.message}`);
-                        }
+                        try { workerInstance.postMessage(postData); } catch (e) {}
                     },
                     onerror: function(error) {
                         try { workerInstance.postMessage({ type: 'ADBLOCK_M3U8_RESPONSE', id: id, error: 'Network error', status: 0, statusText: 'Network Error' }); } catch (e) {}
-                        logError('WorkerM3U8', `Network error in worker M3U8 request for ${url}`);
                     },
                     ontimeout: function() {
                         try { workerInstance.postMessage({ type: 'ADBLOCK_M3U8_RESPONSE', id: id, error: 'Timeout', status: 0, statusText: 'Timeout' }); } catch (e) {}
-                        logError('WorkerM3U8', `Timeout in worker M3U8 request for ${url}`);
                     }
                 });
             }
@@ -657,12 +648,15 @@
                     newWorkerInstance._workerLabel = workerLabel; newWorkerInstance._createdAt = Date.now();
                     hookedWorkers.set(workerLabel, { instance: newWorkerInstance, lastPing: 0, lastPong: Date.now(), hooksReady: false, url: urlString, isBlob: isBlobURL, isIVS: isIVSWorker });
                     addWorkerMessageListeners(newWorkerInstance, workerLabel);
-                    if (!isBlobURL && !isIVSWorker) {
+                    if (!isBlobURL) {
                         setTimeout(() => {
                             const workerState = hookedWorkers.get(workerLabel);
                             if (workerState && !workerState.hooksReady) {
-                                try { const codeToInject = getWorkerInjectionCode(); newWorkerInstance.postMessage({ type: 'EVAL_ADBLOCK_CODE', code: codeToInject }); } catch(e) {
-                                    logError('WorkerHook', `Failed to inject code into worker ${workerLabel}: ${e.message}`);
+                                try {
+                                    const codeToInject = getWorkerInjectionCode();
+                                    newWorkerInstance.postMessage({ type: 'EVAL_ADBLOCK_CODE', code: codeToInject });
+                                } catch(e) {
+                                    logError('WorkerHook', `Failed to post injection message to worker ${workerLabel}: ${e.message}`);
                                 }
                             }
                         }, 300);
@@ -677,7 +671,7 @@
         try { Object.keys(OriginalWorker).forEach(key => { if (!unsafeWindow.Worker.hasOwnProperty(key)) try { unsafeWindow.Worker[key] = OriginalWorker[key]; } catch(e){} }); Object.setPrototypeOf(unsafeWindow.Worker, OriginalWorker); } catch (e) {}
         unsafeWindow.Worker.hooked_by_adblock_ult = true;
         unsafeWindow.addEventListener('message', handleMessageFromWorkerGlobal, { passive: true });
-        logModuleTrace(LOG_WORKER_INJECTION_DEBUG, 'WorkerHook', 'Worker constructor hooked');
+        logCoreDebug('WorkerHook', 'Worker constructor hooked');
     }
 
     function startWorkerPinger() {
@@ -690,18 +684,16 @@
                     if (state.instance && typeof state.instance.postMessage === 'function') {
                         let shouldPing = false;
                         if (state.hooksReady) shouldPing = true;
-                        else if (!state.isBlob && !state.isIVS) {
+                        else if (!state.isBlob) {
                             const timeSinceCreation = now - (state.instance._createdAt || state.lastPing || now);
                             if (timeSinceCreation > WORKER_PING_INTERVAL_MS * 1.5) shouldPing = true;
                         }
                         if (shouldPing) {
                             if (state.lastPing > 0 && state.lastPong < state.lastPing && (now - state.lastPing > WORKER_PING_INTERVAL_MS * 2.5)) {
-                                if (!state.isIVS && !state.isBlob) { try { state.instance.terminate(); } catch(e){} hookedWorkers.delete(label); }
-                                logModuleTrace(LOG_WORKER_INJECTION_DEBUG, 'WorkerPing', `Terminated unresponsive worker ${label}`);
+                                if (!state.isBlob) { try { state.instance.terminate(); } catch(e){} hookedWorkers.delete(label); }
                                 return;
                             }
                             state.instance.postMessage({ type: 'PING_WORKER_ADBLOCK' }); state.lastPing = now;
-                            logModuleTrace(LOG_WORKER_INJECTION_DEBUG, 'WorkerPing', `Sent ping to ${label}`);
                         }
                     } else { hookedWorkers.delete(label); }
                 } catch (e) { if (e.message.includes("terminated") || e.message.includes("detached")) hookedWorkers.delete(label); }
@@ -737,7 +729,7 @@
             try {
                 const elements = contextNode.querySelectorAll(selector);
                 elements.forEach(el => {
-                    if (el && el.parentNode && !el.querySelector('video') && !el.closest(PLAYER_SELECTORS_IMPROVED.join(','))) {
+                    if (el && el.parentNode && !el.querySelector('video') && !el.closest(PLAYER_CONTAINER_SELECTORS.join(','))) {
                         try { el.parentNode.removeChild(el); removedCount++; } catch (removeError) {}
                     }
                 });
@@ -761,14 +753,17 @@
     }
 
     function findVideoElement() {
-        if (videoElement && !videoElement.paused && document.contains(videoElement)) return videoElement;
-        for (const selector of PLAYER_SELECTORS_IMPROVED) {
+        if (videoElement && document.contains(videoElement)) return videoElement;
+        for (const selector of PLAYER_CONTAINER_SELECTORS) {
             try {
-                const foundElement = document.querySelector(selector);
-                if (foundElement && foundElement.tagName.toLowerCase() === 'video' && document.contains(foundElement)) {
-                    videoElement = foundElement;
-                    logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'VideoFinder', `Found video element with selector: ${selector}`);
-                    return videoElement;
+                const videoContainer = document.querySelector(selector);
+                if (videoContainer) {
+                    const video = videoContainer.querySelector('video');
+                    if (video && document.contains(video)) {
+                        videoElement = video;
+                        logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'VideoFinder', `Found video element via container: ${selector}`);
+                        return videoElement;
+                    }
                 }
             } catch (e) {}
         }
@@ -779,7 +774,7 @@
     function startPlayerFinderObserver() {
         if (playerFinderObserver) return;
         playerFinderObserver = new MutationObserver(() => {
-            if (!videoElement) {
+            if (!videoElement || !document.contains(videoElement)) {
                 const newVideo = findVideoElement();
                 if (newVideo) setupVideoPlayerMonitor(newVideo);
             }
@@ -816,7 +811,7 @@
         if (!event.target || !event.target.error) return;
         const errorCode = event.target.error.code;
         if (RELOAD_ON_ERROR_CODES.includes(errorCode)) {
-            logError('PlayerMonitor', `Triggering reload due to error code ${errorCode}`);
+            logError('PlayerMonitor', `Triggering reload due to video element error code ${errorCode}`);
             triggerReload(`Player error code ${errorCode}`);
         }
     }
@@ -824,7 +819,6 @@
     function handleWaitingEvent() {
         if (!isWaitingForDataTimestamp) {
             isWaitingForDataTimestamp = performance.now();
-            logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMonitor', 'Video waiting event triggered');
         }
     }
 
@@ -833,7 +827,6 @@
             lastKnownVideoTime = videoElement.currentTime;
             lastVideoTimeUpdateTimestamp = performance.now();
             isWaitingForDataTimestamp = 0;
-            logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMonitor', `Time update: ${lastKnownVideoTime}`);
         }
     }
 
@@ -844,14 +837,51 @@
             videoEl.addEventListener('waiting', handleWaitingEvent, { passive: true });
             videoEl.addEventListener('timeupdate', handleTimeUpdateEvent, { passive: true });
             videoEl._adblockMonitored = true;
-            logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMonitor', 'Video player monitor setup');
+            logCoreDebug('PlayerMonitor', 'Video player monitor setup');
         } catch (e) {
             logError('PlayerMonitor', 'Failed to setup video player monitor:', e);
         }
     }
 
-    function startPlayerMonitor() {
-        if (playerMonitorIntervalId || !ENABLE_AUTO_RELOAD) return;
+    function startErrorScreenObserver() {
+        if (errorScreenObserver || !ENABLE_AUTO_RELOAD) return;
+        const playerRoot = document.querySelector('.video-player, .persistent-player');
+        const targetNode = playerRoot || document.body;
+
+        if (!targetNode) {
+            setTimeout(startErrorScreenObserver, 1000);
+            return;
+        }
+
+        errorScreenObserver = new MutationObserver((mutations) => {
+            for (const mutation of mutations) {
+                if (mutation.addedNodes.length) {
+                    for (const node of mutation.addedNodes) {
+                        if (node.nodeType === Node.ELEMENT_NODE) {
+                            if (node.querySelector('[data-a-target="player-error-screen"]') || node.matches('[data-a-target="player-error-screen"]')) {
+                                logError('ErrorScreenObserver', 'Twitch error screen detected. Triggering reload.');
+                                triggerReload('Detected player error screen');
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        try {
+            errorScreenObserver.observe(targetNode, { childList: true, subtree: true });
+            logCoreDebug('ErrorScreenObserver', 'Started observer for player error screen.');
+        } catch (e) {
+            errorScreenObserver = null;
+            logError('ErrorScreenObserver', 'Failed to start observer:', e);
+        }
+    }
+
+    function startMonitors() {
+        if (!ENABLE_AUTO_RELOAD) return;
+        startPlayerFinderObserver();
+        startErrorScreenObserver();
         playerMonitorIntervalId = setInterval(() => {
             if (document.hidden) return;
             if (!videoElement || !document.contains(videoElement)) {
@@ -860,14 +890,14 @@
             }
             if (videoElement) checkPlayerState();
         }, 1000);
-        startPlayerFinderObserver();
-        logCoreDebug('PlayerMonitor', 'Started player monitor');
+        logCoreDebug('Monitors', 'Started all player monitors.');
     }
 
-    function stopPlayerMonitor() {
+    function stopMonitors() {
         if (playerMonitorIntervalId) { clearInterval(playerMonitorIntervalId); playerMonitorIntervalId = null; }
         if (playerFinderObserver) { playerFinderObserver.disconnect(); playerFinderObserver = null; }
-        logCoreDebug('PlayerMonitor', 'Stopped player monitor');
+        if (errorScreenObserver) { errorScreenObserver.disconnect(); errorScreenObserver = null; }
+        logCoreDebug('Monitors', 'Stopped all player monitors.');
     }
 
     function triggerReload(reason) {
@@ -889,12 +919,12 @@
 
     function handleVisibilityChange() {
         if (document.hidden) {
-            stopPlayerMonitor();
+            stopMonitors();
             stopWorkerPinger();
         } else {
             if (visibilityResumeTimer) clearTimeout(visibilityResumeTimer);
             visibilityResumeTimer = setTimeout(() => {
-                startPlayerMonitor();
+                startMonitors();
                 startWorkerPinger();
                 setQualitySettings();
             }, VISIBILITY_RESUME_DELAY_MS);
@@ -903,7 +933,7 @@
 
     function initializeScript() {
         installHooks();
-        startPlayerMonitor();
+        startMonitors();
         startWorkerPinger();
         startAdRemovalObserver();
         setQualitySettings(true);
