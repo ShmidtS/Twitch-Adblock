@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      25.0.3
-// @description  Комплексная блокировка: модификация GQL, проактивная замена токена, восстановление после mid-roll и классические оптимизации.
+// @version      25.0.5
+// @description  Комплексная блокировка рекламы: проактивная замена токена, механизм восстановления, форсирование качества и классические оптимизации.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -16,6 +16,10 @@
 // @connect      *.ttvnw.net
 // @connect      *.twitch.tv
 // @connect      gql.twitch.tv
+// @connect      github.com
+// @connect      raw.githubusercontent.com
+// @updateURL    https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
+// @downloadURL  https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
 // @run-at       document-start
 // @license      MIT
 // ==/UserScript==
@@ -24,61 +28,76 @@
     'use strict';
 
     // --- START OF CONFIGURATION ---
-    const SCRIPT_VERSION = '25.0.3';
-    //  Проактивная замена токена для плеера. Не ломает интерфейс.
+    const SCRIPT_VERSION = '25.0.5';
+    // [ГИБРИД] Проактивная замена токена для плеера (из новой версии)
     const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
-    // Модификация GQL-ответов для предотвращения обнаружения блокировщика.
-    const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
-    // Продвинутая блокировка Mid-roll рекламы
+    // [ГИБРИД] Продвинутая блокировка Mid-roll рекламы (из новой версии)
     const ENABLE_MIDROLL_RECOVERY = GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true);
-    // Форсировать максимальное качество видео, когда вкладка неактивна
+    // [НОВОЕ] Форсировать максимальное качество видео, когда вкладка неактивна.
     const FORCE_MAX_QUALITY_IN_BACKGROUND = GM_getValue('TTV_AdBlock_ForceMaxQuality', true);
+    // [ВОССТАНОВЛЕНО] Инъекция в Worker'ы для перехвата на низком уровне
+    const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true);
+    // [ВОССТАНОВЛЕНО] Модификация GQL-ответов для предотвращения обнаружения
+    const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
     // Классические оптимизации
-    const ATTEMPT_DOM_AD_REMOVAL = GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true);
-    const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
     const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
     const BLOCK_NATIVE_ADS_SCRIPT = GM_getValue('TTV_AdBlock_BlockNatScript', true);
     const HIDE_AD_OVERLAY_ELEMENTS = GM_getValue('TTV_AdBlock_HideAdOverlay', true);
+    const ATTEMPT_DOM_AD_REMOVAL = GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true);
+    const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
     // Отладка
-    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true);
+    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', false);
     const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', false);
     const LOG_M3U8_CLEANING_DEBUG = GM_getValue('TTV_AdBlock_Debug_M3U8', false);
     const LOG_GQL_MODIFY_DEBUG = GM_getValue('TTV_AdBlock_Debug_GQL', false);
     const LOG_NETWORK_BLOCKING_DEBUG = GM_getValue('TTV_AdBlock_Debug_NetBlock', false);
     // Настройки перезагрузки
-    const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', '1000,2000,3000,4000');
+    const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', '1000,2000,3000,4000,5000');
     const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 15000);
     const MAX_RELOADS_PER_SESSION = 5;
     // --- END OF CONFIGURATION ---
 
     const LOG_PREFIX = `[TTV ADBLOCK ULT v${SCRIPT_VERSION}]`;
+    const LS_KEY_QUALITY = 'video-quality';
+    const TARGET_QUALITY_VALUE = '{"default":"chunked"}';
     const GQL_URL = 'https://gql.twitch.tv/gql';
-    const AD_SIGNIFIERS = ['#EXT-X-DATERANGE', '#EXT-X-ASSET', 'stitched-ad', 'midroll', '#EXT-X-TWITCH-AD-SIGNAL'];
     const GQL_OPERATIONS_TO_SKIP_MODIFICATION = new Set(['PlaybackAccessToken', 'PlaybackAccessToken_Template', 'ChannelPointsContext', 'ViewerPoints', 'CommunityPointsSettings', 'ClaimCommunityPoints', 'CreateCommunityPointsReward', 'UpdateCommunityPointsReward', 'DeleteCommunityPointsReward', 'UpdateCommunityPointsSettings', 'CustomRewardRedemption', 'RedeemCommunityPointsCustomReward', 'RewardCenter', 'ChannelPointsAutomaticRewards', 'predictions', 'polls', 'UserFollows', 'VideoComments', 'ChatHighlights', 'VideoPreviewCard__VideoHover', 'UseLive', 'UseBrowseQueries', 'ViewerCardModLogsMessagesBySender', 'ComscoreStreamingQuery', 'StreamTags', 'StreamMetadata', 'VideoMetadata', 'ChannelPage_GetChannelStat', 'Chat_Userlookup', 'RealtimeStreamTagList_Tags', 'UserModStatus', 'FollowButton_FollowUser', 'FollowButton_UnfollowUser', 'Clips_Popular_ miesiąc', 'PersonalSections', 'RecommendedChannels', 'FrontPage', 'GetHomePageRecommendations', 'VideoComments_SentMessage', 'UseUserReportModal', 'ReportUserModal_UserReport', 'UserLeaveSquad', 'UserModal_GetFollowersForUser', 'UserModal_GetFollowedChannelsForUser', 'PlayerOverlaysContext', 'MessageBufferPresences', 'RecentChatMessages', 'ChatRoomState', 'VideoPreviewCard__VideoPlayer', 'ChannelPage_ChannelInfoBar_User', 'ChannelPage_SetSessionStatus', 'UseSquadStream', 'OnsiteNotifications', 'OnsiteWaffleNotifications', 'UserActions', 'BitsLeaderboard', 'ChannelLeaderboards', 'PrimeOffer', 'ChannelExtensions', 'ExtensionsForChannel', 'DropCampaignDetails', 'DropsDashboardPage_GetDropCampaigns', 'StreamEventsSlice', 'StreamElementsService_GetOverlays', 'StreamElementsService_GetTheme', 'ViewerBounties', 'GiftASubModal_UserGiftEligibility', 'WebGiftSubButton_SubGiftEligibility', 'CharityCampaign', 'GoalCreateDialog_User', 'GoalsManageOverlay_ChannelGoals', 'PollCreateDialog_User', 'MultiMonthDiscount', 'FreeSubBenefit', 'SubPrices', 'SubscriptionProductBenefitMessages', 'UserCurrentSubscriptionsContext', 'VideoPreviewCard_VideoMarkers', 'UpdateVideoMutation', 'DeleteVideos', 'HostModeTargetDetails', 'StreamInformation', 'VideoPlayer_StreamAnalytics', 'VideoPlayer_VideoSourceManager', 'VideoPlayerStreamMetadata', 'VideoPlayerStatusOverlayChannel']);
-    const AD_URL_KEYWORDS_BLOCK = ['d2v02itv0y9u9t.cloudfront.net', 'amazon-adsystem.com', 'doubleclick.net', 'googleadservices.com', 'googletagservices.com', 'imasdk.googleapis.com', 'pubmatic.com', 'rubiconproject.com', 'adsrvr.org', 'adnxs.com', 'taboola.com', 'outbrain.com', 'ads.yieldmo.com', 'ads.adaptv.advertising.com', 'scorecardresearch.com', 'yandex.ru/clck/', 'omnitagjs', 'omnitag', 'innovid.com', 'eyewonder.com', 'serverbid.com', 'spotxchange.com', 'spotx.tv', 'springserve.com', 'flashtalking.com', 'contextual.media.net', 'advertising.com', 'adform.net', 'freewheel.tv', 'stickyadstv.com', 'tremorhub.com', 'aniview.com', 'criteo.com', 'adition.com', 'teads.tv', 'undertone.com', 'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads'];
+    const AD_SIGNIFIER_DATERANGE_ATTR = 'twitch-stitched-ad';
+    let AD_URL_KEYWORDS_BLOCK = ['d2v02itv0y9u9t.cloudfront.net', 'amazon-adsystem.com', 'doubleclick.net', 'googleadservices.com', 'googletagservices.com', 'imasdk.googleapis.com', 'pubmatic.com', 'rubiconproject.com', 'adsrvr.org', 'adnxs.com', 'taboola.com', 'outbrain.com', 'ads.yieldmo.com', 'ads.adaptv.advertising.com', 'scorecardresearch.com', 'yandex.ru/clck/', 'omnitagjs', 'omnitag', 'innovid.com', 'eyewonder.com', 'serverbid.com', 'spotxchange.com', 'spotx.tv', 'springserve.com', 'flashtalking.com', 'contextual.media.net', 'advertising.com', 'adform.net', 'freewheel.tv', 'stickyadstv.com', 'tremorhub.com', 'aniview.com', 'criteo.com', 'adition.com', 'teads.tv', 'undertone.com', 'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads'];
     if (BLOCK_NATIVE_ADS_SCRIPT) AD_URL_KEYWORDS_BLOCK.push('nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com');
-
     const AD_OVERLAY_SELECTORS_CSS = ['.video-player__ad-info-container', 'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]', 'button[aria-label*="feedback for this Ad"]', '.player-ad-notice', '.ad-interrupt-screen', 'div[data-test-selector="ad-banner-default-text-area"]', 'div[data-test-selector="ad-display-root"]', '.persistent-player__ad-container', '[data-a-target="advertisement-notice"]', 'div[data-a-target="ax-overlay"]', '[data-test-selector="sad-overlay"]', 'div[class*="video-ad-label"]', '.player-ad-overlay', 'div[class*="advertisement"]', 'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]', 'div[data-a-target="request-ad-block-disable-modal"]'];
     const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST = ['div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]', 'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]', 'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay', '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]', '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'];
     if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push('.consent-banner');
-    const RELOAD_ON_ERROR_CODES = RELOAD_ON_ERROR_CODES_RAW.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
+    const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
 
-    let cachedCleanToken = null;
+    let hooksInstalledMain = false;
     let adRemovalObserver = null;
     let errorScreenObserver = null;
     let videoPlayerMutationObserver = null;
-    let videoElement = null;
-    let lastReloadTimestamp = 0;
-    let reloadCount = 0;
-
+    const RELOAD_ON_ERROR_CODES = RELOAD_ON_ERROR_CODES_RAW.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
     const originalFetch = unsafeWindow.fetch;
     const originalXhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
     const originalXhrSend = unsafeWindow.XMLHttpRequest.prototype.send;
+    const OriginalWorker = unsafeWindow.Worker;
+    const originalLocalStorageSetItem = unsafeWindow.localStorage.setItem;
+    const originalLocalStorageGetItem = unsafeWindow.localStorage.getItem;
+    let videoElement = null;
+    let lastReloadTimestamp = 0;
+    let reloadCount = 0;
+    let cachedQualityValue = null;
+    let cachedCleanToken = null;
 
     function logError(source, message, ...args) { if (SHOW_ERRORS_CONSOLE) console.error(`${LOG_PREFIX} [${source}] ERROR:`, message, ...args); }
     function logWarn(source, message, ...args) { if (SHOW_ERRORS_CONSOLE) console.warn(`${LOG_PREFIX} [${source}] WARN:`, message, ...args); }
     function logCoreDebug(source, message, ...args) { if (CORE_DEBUG_LOGGING) console.info(`${LOG_PREFIX} [${source}] DEBUG:`, message, ...args); }
     function logModuleTrace(moduleFlag, source, message, ...args) { if (moduleFlag) console.debug(`${LOG_PREFIX} [${source}] TRACE:`, message, ...args.map(arg => typeof arg === 'string' && arg.length > 150 ? arg.substring(0, 150) + '...' : arg)); }
+
+    function injectCSS() {
+        let cssToInject = '';
+        if (HIDE_AD_OVERLAY_ELEMENTS) cssToInject += `${AD_OVERLAY_SELECTORS_CSS.join(',\n')} { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }\n`;
+        if (HIDE_COOKIE_BANNER) cssToInject += `.consent-banner { display: none !important; }\n`;
+        if (cssToInject) try { GM_addStyle(cssToInject); } catch (e) { logError('CSSInject', 'CSS apply failed:', e); }
+    }
 
     function forceMaxQuality() {
         try {
@@ -89,11 +108,93 @@
         } catch (e) { logError('ForceQuality', 'Не удалось активировать форсирование качества.', e); }
     }
 
-    function injectCSS() {
-        let cssToInject = '';
-        if (HIDE_AD_OVERLAY_ELEMENTS) cssToInject += `${AD_OVERLAY_SELECTORS_CSS.join(',\n')} { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }\n`;
-        if (HIDE_COOKIE_BANNER) cssToInject += `.consent-banner { display: none !important; }\n`;
-        if (cssToInject) try { GM_addStyle(cssToInject); } catch (e) { logError('CSSInject', 'CSS apply failed:', e); }
+    function setQualitySettings(forceCheck = false) {
+        try {
+            let currentValue = cachedQualityValue;
+            if (currentValue === null || forceCheck) {
+                currentValue = originalLocalStorageGetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY);
+                cachedQualityValue = currentValue;
+            }
+            if (currentValue !== TARGET_QUALITY_VALUE) {
+                originalLocalStorageSetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY, TARGET_QUALITY_VALUE);
+                cachedQualityValue = TARGET_QUALITY_VALUE;
+                logCoreDebug('QualitySet', 'Forced video quality to "chunked".');
+            }
+        } catch (e) {
+            logError('QualitySet', 'Set quality error:', e);
+            cachedQualityValue = null;
+        }
+    }
+
+    function hookQualitySettings() {
+        try {
+            unsafeWindow.localStorage.setItem = function(key, value) {
+                if (key === LS_KEY_QUALITY && value !== TARGET_QUALITY_VALUE) {
+                    cachedQualityValue = TARGET_QUALITY_VALUE;
+                    return originalLocalStorageSetItem.call(unsafeWindow.localStorage, key, TARGET_QUALITY_VALUE);
+                }
+                return originalLocalStorageSetItem.apply(this, arguments);
+            };
+            cachedQualityValue = originalLocalStorageGetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY);
+            setQualitySettings(true);
+        } catch(e) {
+            logError('QualitySet:Hook', 'localStorage.setItem hook error:', e);
+            if(originalLocalStorageSetItem) unsafeWindow.localStorage.setItem = originalLocalStorageSetItem;
+        }
+    }
+
+    function parseAndCleanM3U8(m3u8Text, url = "N/A") {
+        const adFound = /#EXT-X-DATERANGE:.*(stitched-ad|TWITCH-AD-SIGNAL|ADVERTISING|PROMOTIONAL|SPONSORED)/.test(m3u8Text) || /#EXT-X-ASSET:/.test(m3u8Text);
+        if (!adFound) return { cleanedText: m3u8Text, adFound: false };
+
+        const lines = m3u8Text.split('\n');
+        const cleanLines = [];
+        let isAdSection = false;
+
+        for (const line of lines) {
+            if (line.includes('stitched-ad') || line.includes('TWITCH-AD-SIGNAL')) {
+                isAdSection = true;
+                continue;
+            } else if (isAdSection && (line.startsWith('#EXTINF') || line.startsWith('#EXT-X-CUE-IN'))) {
+                isAdSection = false;
+            }
+            if (!isAdSection) {
+                cleanLines.push(line);
+            }
+        }
+        logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'M3U8Clean', `M3U8 содержал рекламу и был очищен. URL: ${url}`);
+        return { cleanedText: cleanLines.join('\n'), adFound: true };
+    }
+
+    function getWorkerInjectionCode() {
+        return `
+            const SCRIPT_VERSION_WORKER = '${SCRIPT_VERSION}';
+            const LOG_PREFIX_WORKER = '[TTV ADBLOCK ULT v' + SCRIPT_VERSION_WORKER + '] [WORKER]';
+            const originalFetch = self.fetch;
+
+            self.fetch = async function(input, init) {
+                let requestUrl = (input instanceof Request) ? input.url : String(input);
+                if (requestUrl.toLowerCase().endsWith('.m3u8') && requestUrl.includes('usher.ttvnw.net')) {
+                    try {
+                        const response = await originalFetch.apply(this, arguments);
+                        if (response.ok) {
+                            let text = await response.clone().text();
+                            if (/#EXT-X-DATERANGE:.*(stitched-ad|TWITCH-AD-SIGNAL)/.test(text) || /#EXT-X-ASSET:/.test(text)) {
+                                const cleanLines = text.split('\\n').filter(line => !line.includes('stitched-ad') && !line.includes('TWITCH-AD-SIGNAL') && !line.includes('#EXT-X-ASSET'));
+                                text = cleanLines.join('\\n');
+                                const newHeaders = new Headers(response.headers);
+                                newHeaders.delete('Content-Length');
+                                return new Response(text, { status: response.status, statusText: response.statusText, headers: newHeaders });
+                            }
+                        }
+                        return response;
+                    } catch (e) {
+                        return originalFetch.apply(this, arguments);
+                    }
+                }
+                return originalFetch.apply(this, arguments);
+            };
+        `;
     }
 
     function modifyGqlResponse(responseText, url) {
@@ -115,24 +216,20 @@
                     }
                 } else if (operationName === 'ClientSideAd') {
                     if (opData.data) {
-                        opData.data.ads = [];
-                        opData.data.clientAd = null;
-                        opData.data.companionSlots = [];
-                        opData.data.playerAdParams = null;
+                        opData.data.ads = []; opData.data.clientAd = null; opData.data.companionSlots = []; opData.data.playerAdParams = null;
                         currentOpModified = true;
                     }
                 } else if (operationName === "Interstitials") {
-                    if (opData.data?.stream?.interstitials && Array.isArray(opData.data.stream.interstitials) && opData.data.stream.interstitials.length > 0) {
+                    if (opData.data?.stream?.interstitials?.length > 0) {
                         opData.data.stream.interstitials = [];
                         currentOpModified = true;
                     }
                 } else if (opData.data?.stream?.playbackAccessToken && typeof opData.data.stream.playbackAccessToken.value === 'string') {
                     try {
                         const tokenValue = JSON.parse(opData.data.stream.playbackAccessToken.value);
-                        let tokenModified = false;
-                        if (tokenValue.hide_ads === false) { tokenValue.hide_ads = true; tokenModified = true; }
-                        if (tokenValue.show_ads === true) { tokenValue.show_ads = false; tokenModified = true; }
-                        if (tokenModified) {
+                        if (tokenValue.hide_ads === false || tokenValue.show_ads === true) {
+                            tokenValue.hide_ads = true;
+                            tokenValue.show_ads = false;
                             opData.data.stream.playbackAccessToken.value = JSON.stringify(tokenValue);
                             currentOpModified = true;
                         }
@@ -168,7 +265,7 @@
                         try {
                             const token = JSON.parse(response.responseText)?.data?.streamPlaybackAccessToken;
                             if (token) {
-                                logCoreDebug('TokenSwap', `(1/2) Успешно получен анонимный токен: ${token.value.substring(0, 20)}...`);
+                                logCoreDebug('TokenSwap', `(1/2) Успешно получен анонимный токен.`);
                                 resolve(token);
                             } else { reject('Анонимный токен не найден в ответе GraphQL.'); }
                         } catch (e) { reject(`Ошибка парсинга ответа GraphQL: ${e}`); }
@@ -184,9 +281,6 @@
         const url = new URL(originalUsherUrl);
         url.searchParams.set('token', newAccessToken.value);
         url.searchParams.set('sig', newAccessToken.signature);
-        url.searchParams.set('p', Math.floor(Math.random() * 1000000));
-        url.searchParams.set('allow_source', 'true');
-        url.searchParams.set('allow_audio_only', 'true');
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: "GET", url: url.href, responseType: "text",
@@ -201,14 +295,6 @@
         });
     }
 
-    function parseAndCleanM3U8(m3u8Text, url = "N/A") {
-        const adFound = AD_SIGNIFIERS.some(s => m3u8Text.includes(s));
-        if (!adFound) return { cleanedText: m3u8Text, adFound: false };
-        const cleanLines = m3u8Text.split('\n').filter(line => !AD_SIGNIFIERS.some(s => line.includes(s)));
-        logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'M3U8Clean', `M3U8 содержал рекламу. URL: ${url}`);
-        return { cleanedText: cleanLines.join('\n'), adFound: true };
-    }
-
     async function fetchOverride(input, init) {
         let requestUrl = (input instanceof Request) ? input.url : String(input);
         const lowerCaseUrl = requestUrl.toLowerCase();
@@ -218,7 +304,7 @@
             return new Response(null, { status: 403, statusText: 'Blocked by TTV Adblock Ultimate' });
         }
 
-        if (lowerCaseUrl.includes('usher.ttvnw.net') && lowerCaseUrl.endsWith('.m3u8')) {
+        if (lowerCaseUrl.includes('usher.ttvnw.net') && TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl)) {
             if (PROACTIVE_TOKEN_SWAP_ENABLED && cachedCleanToken) {
                 logCoreDebug('TokenSwap', `(2/2) Подменяем токен в URL для usher.ttvnw.net`);
                 const url = new URL(requestUrl);
@@ -233,8 +319,7 @@
                     method: "GET", url: requestUrl, responseType: "text",
                     onload: async (response) => {
                         if (response.status >= 200 && response.status < 300) {
-                            let m3u8Text = response.responseText;
-                            const { adFound } = parseAndCleanM3U8(m3u8Text, requestUrl);
+                            let { cleanedText, adFound } = parseAndCleanM3U8(response.responseText, requestUrl);
                             if (adFound && ENABLE_MIDROLL_RECOVERY) {
                                 logWarn('MidrollRecovery', `Обнаружена реклама в M3U8. Запускаю механизм восстановления...`);
                                 try {
@@ -246,13 +331,12 @@
                                     const newM3u8Text = await fetchNewUsherM3U8(requestUrl, newAccessToken);
                                     const finalCleanedResult = parseAndCleanM3U8(newM3u8Text, "RECOVERY_URL");
                                     logCoreDebug('MidrollRecovery', `(3/3) Восстановление успешно. Используется новый, чистый манифест.`);
-                                    m3u8Text = finalCleanedResult.cleanedText;
+                                    cleanedText = finalCleanedResult.cleanedText;
                                 } catch (e) {
-                                    logError('MidrollRecovery', `Ошибка восстановления, возврат к старой логике очистки. Причина: ${e}`);
-                                    m3u8Text = parseAndCleanM3U8(m3u8Text, requestUrl).cleanedText;
+                                    logError('MidrollRecovery', `Ошибка восстановления, возврат к простой очистке. Причина: ${e}`);
                                 }
-                            } else if (adFound) { m3u8Text = parseAndCleanM3U8(m3u8Text, requestUrl).cleanedText; }
-                            resolve(new Response(m3u8Text, { status: 200, statusText: "OK", headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } }));
+                            }
+                            resolve(new Response(cleanedText, { status: 200, statusText: "OK", headers: { 'Content-Type': 'application/vnd.apple.mpegurl' } }));
                         } else { reject(new TypeError(`GM_xmlhttpRequest failed: ${response.statusText || response.status}`)); }
                     },
                     onerror: (error) => reject(new TypeError('Network error'))
@@ -284,7 +368,6 @@
                     newHeaders.delete('Content-Length');
                     return new Response(modifiedText, { status: originalResponse.status, statusText: originalResponse.statusText, headers: newHeaders });
                 }
-
             } catch (e) { /* Игнорируем ошибки парсинга */ }
         }
         return originalResponse;
@@ -324,12 +407,40 @@
         originalXhrSend.apply(this, arguments);
     }
 
+    function hookWorkerConstructor() {
+        if (!INJECT_INTO_WORKERS || unsafeWindow.Worker.hooked_by_adblock_ult) return;
+        unsafeWindow.Worker = class HookedWorker extends OriginalWorker {
+            constructor(scriptURL, options) {
+                const urlString = (scriptURL instanceof URL) ? scriptURL.href : String(scriptURL);
+                const workerCode = getWorkerInjectionCode();
+                const blob = new Blob([workerCode, `\nimportScripts("${urlString}");`], { type: 'application/javascript' });
+                const newScriptURL = URL.createObjectURL(blob);
+                const workerInstance = super(newScriptURL, options);
+                URL.revokeObjectURL(newScriptURL);
+                logCoreDebug('WorkerHook', `Intercepted Worker creation for: ${urlString}`);
+                return workerInstance;
+            }
+        };
+        unsafeWindow.Worker.hooked_by_adblock_ult = true;
+    }
+
+    function installHooks() {
+        if (hooksInstalledMain) return;
+        try { unsafeWindow.fetch = fetchOverride; } catch (e) { logError('HookInstall', 'Failed to hook fetch:', e); }
+        try {
+            unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride;
+            unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride;
+        } catch (e) { logError('HookInstall', 'Failed to hook XHR:', e); }
+        try { hookWorkerConstructor(); } catch (e) { logError('HookInstall', 'Failed to hook Worker:', e); }
+        hooksInstalledMain = true;
+        logCoreDebug('HookInstall', 'Все хуки успешно установлены.');
+    }
+
     function removeDOMAdElements() {
         if (!ATTEMPT_DOM_AD_REMOVAL) return;
         if (!adRemovalObserver) {
             adRemovalObserver = new MutationObserver(() => removeDOMAdElements());
             adRemovalObserver.observe(document.body, { childList: true, subtree: true });
-            logCoreDebug('DOMAdRemoval', 'MutationObserver для удаления DOM-элементов рекламы запущен.');
         }
         AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.forEach(selector => document.querySelectorAll(selector).forEach(el => el.remove()));
     }
@@ -390,14 +501,11 @@
 
     function initializeScript() {
         injectCSS();
-        if (FORCE_MAX_QUALITY_IN_BACKGROUND) forceMaxQuality();
-        try { unsafeWindow.fetch = fetchOverride; }
-        catch (e) { logError('HookInstall', 'Не удалось перехватить fetch:', e); }
-        try {
-            unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride;
-            unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride;
-        } catch (e) { logError('HookInstall', 'Не удалось перехватить XHR:', e); }
-
+        if (FORCE_MAX_QUALITY_IN_BACKGROUND) {
+            forceMaxQuality();
+        }
+        hookQualitySettings();
+        installHooks();
         removeDOMAdElements();
         startErrorScreenObserver();
         setupVideoPlayerMonitor();
