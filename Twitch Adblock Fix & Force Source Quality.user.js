@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      25.0.0
+// @version      25.0.1
 // @description  Комплексная блокировка рекламы: проактивная замена токена, механизм восстановления, форсирование качества и классические оптимизации.
-// @author       ShmidtS
+// @author       ShmidtS (исправления от AI)
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
 // @match        https://player.twitch.tv/*
@@ -28,7 +28,7 @@
     'use strict';
 
     // --- START OF CONFIGURATION ---
-    const SCRIPT_VERSION = '25.0.0';
+    const SCRIPT_VERSION = '25.0.1';
     // [НОВОЕ] Проактивная замена токена для плеера. Не ломает интерфейс.
     const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
     // Форсировать максимальное качество видео, когда вкладка неактивна
@@ -59,6 +59,19 @@
     const AD_SIGNIFIERS = ['#EXT-X-DATERANGE', '#EXT-X-ASSET', 'stitched-ad', 'midroll'];
     const AD_URL_KEYWORDS_BLOCK = ['d2v02itv0y9u9t.cloudfront.net', 'amazon-adsystem.com', 'doubleclick.net', 'googleadservices.com', 'googletagservices.com', 'imasdk.googleapis.com', 'pubmatic.com', 'rubiconproject.com', 'adsrvr.org', 'adnxs.com', 'taboola.com', 'outbrain.com', 'ads.yieldmo.com', 'ads.adaptv.advertising.com', 'scorecardresearch.com', 'yandex.ru/clck/', 'omnitagjs', 'omnitag', 'innovid.com', 'eyewonder.com', 'serverbid.com', 'spotxchange.com', 'spotx.tv', 'springserve.com', 'flashtalking.com', 'contextual.media.net', 'advertising.com', 'adform.net', 'freewheel.tv', 'stickyadstv.com', 'tremorhub.com', 'aniview.com', 'criteo.com', 'adition.com', 'teads.tv', 'undertone.com', 'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads'];
     if (BLOCK_NATIVE_ADS_SCRIPT) AD_URL_KEYWORDS_BLOCK.push('nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com');
+
+    // [ИСПРАВЛЕНО] Восстановлен полный список селекторов из старой версии для надежного скрытия оверлеев
+    const AD_OVERLAY_SELECTORS_CSS = [
+        '.video-player__ad-info-container', 'span[data-a-target="video-ad-label"]',
+        'span[data-a-target="video-ad-countdown"]', 'button[aria-label*="feedback for this Ad"]',
+        '.player-ad-notice', '.ad-interrupt-screen', 'div[data-test-selector="ad-banner-default-text-area"]',
+        'div[data-test-selector="ad-display-root"]', '.persistent-player__ad-container',
+        '[data-a-target="advertisement-notice"]', 'div[data-a-target="ax-overlay"]',
+        '[data-test-selector="sad-overlay"]', 'div[class*="video-ad-label"]', '.player-ad-overlay',
+        'div[class*="advertisement"]', 'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]',
+        'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'
+    ];
+
     const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST = ['div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]', 'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]', 'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay', '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]', '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'];
     if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push('.consent-banner');
     const RELOAD_ON_ERROR_CODES = RELOAD_ON_ERROR_CODES_RAW.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
@@ -87,19 +100,22 @@
         } catch (e) { logError('ForceQuality', 'Не удалось активировать форсирование качества.', e); }
     }
 
+    // [ИСПРАВЛЕНО] Функция переработана для использования полного списка селекторов
     function injectCSS() {
-        const cssToInject = `
-            .video-player__ad-info-container, span[data-a-target="video-ad-label"],
-            .player-ad-notice, .ad-interrupt-screen, div[data-test-selector="ad-banner-default-text-area"],
-            div[data-test-selector="ad-display-root"], .persistent-player__ad-container,
-            [data-a-target="advertisement-notice"], div[data-a-target="ax-overlay"],
-            [data-test-selector="sad-overlay"], div[class*="video-ad-label"], .player-ad-overlay,
-            div[class*="advertisement"], div[class*="-ad-"], div[data-a-target="sad-overlay-container"],
-            div[data-test-selector="sad-overlay-v-one-container"], div[data-test-selector*="sad-overlay"] {
-                display: none !important; visibility: hidden !important;
+        let cssToInject = '';
+        if (HIDE_AD_OVERLAY_ELEMENTS) {
+            cssToInject += `${AD_OVERLAY_SELECTORS_CSS.join(',\n')} { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; }\n`;
+        }
+        if (HIDE_COOKIE_BANNER) {
+            cssToInject += `.consent-banner { display: none !important; }\n`;
+        }
+        if (cssToInject) {
+            try {
+                GM_addStyle(cssToInject);
+            } catch (e) {
+                logError('CSSInject', 'CSS apply failed:', e);
             }
-        `;
-        if (HIDE_AD_OVERLAY_ELEMENTS) try { GM_addStyle(cssToInject); } catch (e) { logError('CSSInject', 'CSS apply failed:', e); }
+        }
     }
 
     async function fetchNewPlaybackAccessToken(channelName, deviceId) {
@@ -171,14 +187,13 @@
         }
 
         if (lowerCaseUrl.includes('usher.ttvnw.net') && lowerCaseUrl.endsWith('.m3u8')) {
-            // [НОВАЯ ЛОГИКА] Подмена токена перед запросом плейлиста
             if (PROACTIVE_TOKEN_SWAP_ENABLED && cachedCleanToken) {
                 logCoreDebug('TokenSwap', `(2/2) Подменяем токен в URL для usher.ttvnw.net`);
                 const url = new URL(requestUrl);
                 url.searchParams.set('token', cachedCleanToken.value);
                 url.searchParams.set('sig', cachedCleanToken.signature);
                 requestUrl = url.href;
-                cachedCleanToken = null; // Используем токен только один раз
+                cachedCleanToken = null;
             }
 
             return new Promise((resolve, reject) => {
@@ -191,9 +206,10 @@
                             if (adFound && ENABLE_MIDROLL_RECOVERY) {
                                 logWarn('MidrollRecovery', `Обнаружена реклама в M3U8. Запускаю механизм восстановления...`);
                                 try {
-                                    const channelName = new URLSearchParams(new URL(requestUrl).search).get('login');
+                                    const urlParams = new URL(requestUrl).searchParams;
+                                    const channelName = urlParams.get('login') || urlParams.get('channel');
                                     if (!channelName) throw new Error("Не удалось определить имя канала из URL.");
-                                    const deviceId = new URLSearchParams(new URL(requestUrl).search).get('player_id'); // Используем player_id как аналог device_id
+                                    const deviceId = new Headers(init?.headers).get('Device-ID');
                                     const newAccessToken = await fetchNewPlaybackAccessToken(channelName, deviceId);
                                     const newM3u8Text = await fetchNewUsherM3U8(requestUrl, newAccessToken);
                                     const finalCleanedResult = parseAndCleanM3U8(newM3u8Text, "RECOVERY_URL");
@@ -221,7 +237,6 @@
                 const operationName = Array.isArray(data) ? data[0]?.extensions?.operationName : data.extensions?.operationName;
                 const deviceId = new Headers(init?.headers).get('Device-ID');
 
-                // [НОВАЯ ЛОГИКА] Проактивный запрос чистого токена
                 if (PROACTIVE_TOKEN_SWAP_ENABLED && (operationName === 'PlaybackAccessToken' || operationName === 'PlaybackAccessToken_Template')) {
                     const channelName = (Array.isArray(data) ? data[0]?.data?.streamPlaybackAccessToken : data.data?.streamPlaybackAccessToken) ?
                                         (Array.isArray(data) ? data[0]?.variables?.login : data.variables?.login) : null;
