@@ -28,18 +28,12 @@
     'use strict';
 
     // --- START OF CONFIGURATION ---
-    const SCRIPT_VERSION = '25.0.5';
-    // [ГИБРИД] Проактивная замена токена для плеера (из новой версии)
+    const SCRIPT_VERSION = '25.0.5-fixed';
     const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
-    // [ГИБРИД] Продвинутая блокировка Mid-roll рекламы (из новой версии)
     const ENABLE_MIDROLL_RECOVERY = GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true);
-    // [НОВОЕ] Форсировать максимальное качество видео, когда вкладка неактивна.
     const FORCE_MAX_QUALITY_IN_BACKGROUND = GM_getValue('TTV_AdBlock_ForceMaxQuality', true);
-    // [ВОССТАНОВЛЕНО] Инъекция в Worker'ы для перехвата на низком уровне
     const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true);
-    // [ВОССТАНОВЛЕНО] Модификация GQL-ответов для предотвращения обнаружения
     const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
-    // Классические оптимизации
     const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
     const BLOCK_NATIVE_ADS_SCRIPT = GM_getValue('TTV_AdBlock_BlockNatScript', true);
     const HIDE_AD_OVERLAY_ELEMENTS = GM_getValue('TTV_AdBlock_HideAdOverlay', true);
@@ -62,11 +56,10 @@
     const TARGET_QUALITY_VALUE = '{"default":"chunked"}';
     const GQL_URL = 'https://gql.twitch.tv/gql';
     const GQL_OPERATIONS_TO_SKIP_MODIFICATION = new Set(['PlaybackAccessToken', 'PlaybackAccessToken_Template', 'ChannelPointsContext', 'ViewerPoints', 'CommunityPointsSettings', 'ClaimCommunityPoints', 'CreateCommunityPointsReward', 'UpdateCommunityPointsReward', 'DeleteCommunityPointsReward', 'UpdateCommunityPointsSettings', 'CustomRewardRedemption', 'RedeemCommunityPointsCustomReward', 'RewardCenter', 'ChannelPointsAutomaticRewards', 'predictions', 'polls', 'UserFollows', 'VideoComments', 'ChatHighlights', 'VideoPreviewCard__VideoHover', 'UseLive', 'UseBrowseQueries', 'ViewerCardModLogsMessagesBySender', 'ComscoreStreamingQuery', 'StreamTags', 'StreamMetadata', 'VideoMetadata', 'ChannelPage_GetChannelStat', 'Chat_Userlookup', 'RealtimeStreamTagList_Tags', 'UserModStatus', 'FollowButton_FollowUser', 'FollowButton_UnfollowUser', 'Clips_Popular_ miesiąc', 'PersonalSections', 'RecommendedChannels', 'FrontPage', 'GetHomePageRecommendations', 'VideoComments_SentMessage', 'UseUserReportModal', 'ReportUserModal_UserReport', 'UserLeaveSquad', 'UserModal_GetFollowersForUser', 'UserModal_GetFollowedChannelsForUser', 'PlayerOverlaysContext', 'MessageBufferPresences', 'RecentChatMessages', 'ChatRoomState', 'VideoPreviewCard__VideoPlayer', 'ChannelPage_ChannelInfoBar_User', 'ChannelPage_SetSessionStatus', 'UseSquadStream', 'OnsiteNotifications', 'OnsiteWaffleNotifications', 'UserActions', 'BitsLeaderboard', 'ChannelLeaderboards', 'PrimeOffer', 'ChannelExtensions', 'ExtensionsForChannel', 'DropCampaignDetails', 'DropsDashboardPage_GetDropCampaigns', 'StreamEventsSlice', 'StreamElementsService_GetOverlays', 'StreamElementsService_GetTheme', 'ViewerBounties', 'GiftASubModal_UserGiftEligibility', 'WebGiftSubButton_SubGiftEligibility', 'CharityCampaign', 'GoalCreateDialog_User', 'GoalsManageOverlay_ChannelGoals', 'PollCreateDialog_User', 'MultiMonthDiscount', 'FreeSubBenefit', 'SubPrices', 'SubscriptionProductBenefitMessages', 'UserCurrentSubscriptionsContext', 'VideoPreviewCard_VideoMarkers', 'UpdateVideoMutation', 'DeleteVideos', 'HostModeTargetDetails', 'StreamInformation', 'VideoPlayer_StreamAnalytics', 'VideoPlayer_VideoSourceManager', 'VideoPlayerStreamMetadata', 'VideoPlayerStatusOverlayChannel']);
-    const AD_SIGNIFIER_DATERANGE_ATTR = 'twitch-stitched-ad';
     let AD_URL_KEYWORDS_BLOCK = ['d2v02itv0y9u9t.cloudfront.net', 'amazon-adsystem.com', 'doubleclick.net', 'googleadservices.com', 'googletagservices.com', 'imasdk.googleapis.com', 'pubmatic.com', 'rubiconproject.com', 'adsrvr.org', 'adnxs.com', 'taboola.com', 'outbrain.com', 'ads.yieldmo.com', 'ads.adaptv.advertising.com', 'scorecardresearch.com', 'yandex.ru/clck/', 'omnitagjs', 'omnitag', 'innovid.com', 'eyewonder.com', 'serverbid.com', 'spotxchange.com', 'spotx.tv', 'springserve.com', 'flashtalking.com', 'contextual.media.net', 'advertising.com', 'adform.net', 'freewheel.tv', 'stickyadstv.com', 'tremorhub.com', 'aniview.com', 'criteo.com', 'adition.com', 'teads.tv', 'undertone.com', 'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads'];
     if (BLOCK_NATIVE_ADS_SCRIPT) AD_URL_KEYWORDS_BLOCK.push('nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com');
     const AD_OVERLAY_SELECTORS_CSS = ['.video-player__ad-info-container', 'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]', 'button[aria-label*="feedback for this Ad"]', '.player-ad-notice', '.ad-interrupt-screen', 'div[data-test-selector="ad-banner-default-text-area"]', 'div[data-test-selector="ad-display-root"]', '.persistent-player__ad-container', '[data-a-target="advertisement-notice"]', 'div[data-a-target="ax-overlay"]', '[data-test-selector="sad-overlay"]', 'div[class*="video-ad-label"]', '.player-ad-overlay', 'div[class*="advertisement"]', 'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]', 'div[data-a-target="request-ad-block-disable-modal"]'];
-    const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST = ['div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]', 'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]', 'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay', '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]', '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]'];
+    const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST = ['div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]', 'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]', 'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay', '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]', '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]', 'div[data-a-target="sad-overlay-container"]', 'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]', 'div[data-a-target="request-ad-block-disable-modal"]']; // <<< ИСПРАВЛЕНИЕ: Добавлен селектор сюда
     if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push('.consent-banner');
     const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
 
@@ -168,34 +161,34 @@
 
     function getWorkerInjectionCode() {
         return `
-            const SCRIPT_VERSION_WORKER = '${SCRIPT_VERSION}';
-            const LOG_PREFIX_WORKER = '[TTV ADBLOCK ULT v' + SCRIPT_VERSION_WORKER + '] [WORKER]';
-            const originalFetch = self.fetch;
+        const SCRIPT_VERSION_WORKER = '${SCRIPT_VERSION}';
+        const LOG_PREFIX_WORKER = '[TTV ADBLOCK ULT v' + SCRIPT_VERSION_WORKER + '] [WORKER]';
+        const originalFetch = self.fetch;
 
-            self.fetch = async function(input, init) {
-                let requestUrl = (input instanceof Request) ? input.url : String(input);
-                if (requestUrl.toLowerCase().endsWith('.m3u8') && requestUrl.includes('usher.ttvnw.net')) {
-                    try {
-                        const response = await originalFetch.apply(this, arguments);
-                        if (response.ok) {
-                            let text = await response.clone().text();
-                            if (/#EXT-X-DATERANGE:.*(stitched-ad|TWITCH-AD-SIGNAL)/.test(text) || /#EXT-X-ASSET:/.test(text)) {
-                                const cleanLines = text.split('\\n').filter(line => !line.includes('stitched-ad') && !line.includes('TWITCH-AD-SIGNAL') && !line.includes('#EXT-X-ASSET'));
-                                text = cleanLines.join('\\n');
-                                const newHeaders = new Headers(response.headers);
-                                newHeaders.delete('Content-Length');
-                                return new Response(text, { status: response.status, statusText: response.statusText, headers: newHeaders });
-                            }
+        self.fetch = async function(input, init) {
+            let requestUrl = (input instanceof Request) ? input.url : String(input);
+            if (requestUrl.toLowerCase().endsWith('.m3u8') && requestUrl.includes('usher.ttvnw.net')) {
+                try {
+                    const response = await originalFetch.apply(this, arguments);
+                    if (response.ok) {
+                        let text = await response.clone().text();
+                        if (/#EXT-X-DATERANGE:.*(stitched-ad|TWITCH-AD-SIGNAL)/.test(text) || /#EXT-X-ASSET:/.test(text)) {
+                            const cleanLines = text.split('\\n').filter(line => !line.includes('stitched-ad') && !line.includes('TWITCH-AD-SIGNAL') && !line.includes('#EXT-X-ASSET'));
+                            text = cleanLines.join('\\n');
+                            const newHeaders = new Headers(response.headers);
+                            newHeaders.delete('Content-Length');
+                            return new Response(text, { status: response.status, statusText: response.statusText, headers: newHeaders });
                         }
-                        return response;
-                    } catch (e) {
-                        return originalFetch.apply(this, arguments);
                     }
+                    return response;
+                } catch (e) {
+                    return originalFetch.apply(this, arguments);
                 }
-                return originalFetch.apply(this, arguments);
-            };
-        `;
-    }
+            }
+            return originalFetch.apply(this, arguments);
+        };
+    `;
+}
 
     function modifyGqlResponse(responseText, url) {
         if (!MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || responseText.length === 0) return responseText;
@@ -517,4 +510,5 @@
     } else {
         initializeScript();
     }
+
 })();
