@@ -16,6 +16,10 @@
 // @connect      *.ttvnw.net
 // @connect      *.twitch.tv
 // @connect      gql.twitch.tv
+// @connect      github.com
+// @connect      raw.githubusercontent.com
+// @updateURL    https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
+// @downloadURL  https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
 // @run-at       document-start
 // @license      MIT
 // ==/UserScript==
