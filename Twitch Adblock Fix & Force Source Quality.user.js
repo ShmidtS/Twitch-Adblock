@@ -27,11 +27,11 @@
 (function() {
     'use strict';
 
-    const SCRIPT_VERSION = '26.0.1'; // Обновлена версия
+    const SCRIPT_VERSION = '26.0.1';
     const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
     const ENABLE_MIDROLL_RECOVERY = GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true);
     const FORCE_MAX_QUALITY_IN_BACKGROUND = GM_getValue('TTV_AdBlock_ForceMaxQuality', true);
-    const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true);
+    // const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true); // Удалено, т.к. отказываемся от инъекции в воркеры
     const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
     const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
     const BLOCK_NATIVE_ADS_SCRIPT = GM_getValue('TTV_AdBlock_BlockNatScript', true);
@@ -98,9 +98,10 @@
         'serverbid.com', 'spotxchange.com', 'spotx.tv', 'springserve.com', 'flashtalking.com',
         'contextual.media.net', 'advertising.com', 'adform.net', 'freewheel.tv', 'stickyadstv.com',
         'tremorhub.com', 'aniview.com', 'criteo.com', 'adition.com', 'teads.tv', 'undertone.com',
-        'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads'
+        'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads',
+        'amazon-ads.com' // Добавлено из 26.0.1
     ];
-    if (BLOCK_NATIVE_ADS_SCRIPT) AD_URL_KEYWORDS_BLOCK.push('nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com', 'amazon-ads.com');
+    if (BLOCK_NATIVE_ADS_SCRIPT) AD_URL_KEYWORDS_BLOCK.push('nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com');
 
     const AD_OVERLAY_SELECTORS_CSS = [
         'div[data-a-target="request-ad-block-disable-modal"]',
@@ -112,7 +113,6 @@
         '[data-test-selector="sad-overlay"]', 'div[class*="video-ad-label"]', '.player-ad-overlay',
         'div[class*="advertisement"]', 'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]',
         'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]',
-        // Новые селекторы для большей гибкости
         'div[data-a-target*="ad-block-nag"]',
         'div[data-test-selector*="ad-block-nag"]',
         'div[data-a-target*="disable-adblocker-modal"]'
@@ -128,18 +128,12 @@
         '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]',
         'div[data-ad-boundary]', 'div[data-a-target="sad-overlay-container"]',
         'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]',
-        // Новые селекторы
         'div[data-a-target*="ad-block-nag"]',
         'div[data-test-selector*="ad-block-nag"]',
         'div[data-a-target*="disable-adblocker-modal"]'
     ];
+    if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push(COOKIE_BANNER_SELECTOR);
 
-    // Ключевые слова для поиска оверлеев с просьбой отключить блокировщик
-    const AD_NAG_TEXT_KEYWORDS = [
-        "отключив блокировщик рекламы", "disable your ad blocker", "disable adblocker",
-        "помогите каналу", "support the channel by disabling", "поддержите канал",
-        "ad blocker may be causing issues", "обнаружен блокировщик", "adblocker detected"
-    ];
 
     const PLAYER_CONTAINER_SELECTORS = ['div[data-a-target="video-player"]', '.video-player', 'div[data-a-player-state]', 'main', '.persistent-player'];
 
@@ -151,7 +145,7 @@
     const originalFetch = unsafeWindow.fetch;
     const originalXhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
     const originalXhrSend = unsafeWindow.XMLHttpRequest.prototype.send;
-    const OriginalWorker = unsafeWindow.Worker;
+    // const OriginalWorker = unsafeWindow.Worker; // Удалено
     const originalLocalStorageSetItem = unsafeWindow.localStorage.setItem;
     const originalLocalStorageGetItem = unsafeWindow.localStorage.getItem;
     let videoElement = null;
@@ -170,7 +164,12 @@
     function injectCSS() {
         let cssToInject = '';
         if (HIDE_AD_OVERLAY_ELEMENTS) cssToInject += `${AD_OVERLAY_SELECTORS_CSS.join(',\n')} { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; z-index: -1 !important; }\n`;
-        if (HIDE_COOKIE_BANNER) cssToInject += `${COOKIE_BANNER_SELECTOR} { display: none !important; }\n`;
+        // HIDE_COOKIE_BANNER обрабатывается через AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST, если включен.
+        // Если он не включен, а HIDE_AD_OVERLAY_ELEMENTS включен, то CSS для баннера не добавится.
+        // Если нужно отдельное CSS правило для COOKIE_BANNER_SELECTOR независимо от ATTEMPT_DOM_AD_REMOVAL:
+        if (HIDE_COOKIE_BANNER && !AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.includes(COOKIE_BANNER_SELECTOR)) { // Защита от дублирования, если он уже в списке для DOM удаления
+            cssToInject += `${COOKIE_BANNER_SELECTOR} { display: none !important; }\n`;
+        }
         if (cssToInject) try { GM_addStyle(cssToInject); } catch (e) { logError('CSSInject', 'CSS apply failed:', e); }
     }
 
@@ -277,26 +276,23 @@
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
             } else if (upperTrimmedLine.startsWith('#EXT-X-CUE-OUT')) {
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
-            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-HIDE')) {
+            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-HIDE')) { // Added based on 26.0.1 worker logic
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
             } else if (upperTrimmedLine.startsWith('#EXT-X-SCTE35')) {
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
             } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-PREFETCH')) {
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true;
-                // PREFETCH не должен сам по себе начинать секцию с удалением контента или discontinuity,
-                // поэтому isAdSection и discontinuityShouldBeRemoved не меняются на true здесь.
             } else if (isAdSection) {
                 if (upperTrimmedLine.startsWith('#EXT-X-CUE-IN')) {
                     removeThisLine = true; currentLineIsAdMarker = true; isAdSection = false; discontinuityShouldBeRemoved = false;
                 } else if (upperTrimmedLine.startsWith('#EXTINF')) {
-                    // Если после рекламного маркера идет #EXTINF, значит, это уже не рекламный сегмент
                     isAdSection = false; discontinuityShouldBeRemoved = false;
                 } else if (upperTrimmedLine.startsWith('#EXT-X-DISCONTINUITY')) {
                     if (discontinuityShouldBeRemoved) {
                         removeThisLine = true; currentLineIsAdMarker = true; discontinuityShouldBeRemoved = false;
                     }
-                } else if (!trimmedLine.startsWith('#') && trimmedLine !== '') { // Это URL сегмента
-                    removeThisLine = true; // Удаляем URL сегмента, если он внутри isAdSection
+                } else if (!trimmedLine.startsWith('#') && trimmedLine !== '') {
+                    removeThisLine = true;
                 }
             }
 
@@ -329,166 +325,6 @@
         }
 
         return { cleanedText: cleanedText, adsFound: adsFoundOverall, linesRemoved: linesRemovedCount, wasPotentiallyAd: potentialAdContent, errorDuringClean: false };
-    }
-
-    function _universalParseAndCleanM3U8_WorkerLogic(m3u8Text, url = "N/A", debugLogging = false) {
-        const AD_SIGNIFIER_DATERANGE_ATTR_WORKER = 'twitch-stitched-ad';
-        const AD_DATERANGE_ATTRIBUTE_KEYWORDS_WORKER = ['ADVERTISING', 'ADVERTISEMENT', 'PROMOTIONAL', 'SPONSORED', 'COMMERCIALBREAK'];
-        const AD_DATERANGE_REGEX_WORKER_STR = '/CLASS="(?:TWITCH-)?STITCHED-AD"/i';
-        const USE_REGEX_M3U8_CLEANING_WORKER = false;
-        const AD_DATERANGE_REGEX_WORKER = USE_REGEX_M3U8_CLEANING_WORKER ? new RegExp(AD_DATERANGE_REGEX_WORKER_STR.slice(1, -2), AD_DATERANGE_REGEX_WORKER_STR.slice(-1)) : null;
-
-        const urlShort = url.includes('?') ? url.substring(0, url.indexOf('?')) : url;
-        const urlFilename = urlShort.substring(urlShort.lastIndexOf('/') + 1) || urlShort;
-
-        if (!m3u8Text || typeof m3u8Text !== 'string') {
-            if (debugLogging) console.log(`[WORKER M3U8Clean] Invalid M3U8 content for ${urlFilename}`);
-            return { cleanedText: m3u8Text, adsFound: false };
-        }
-
-        const upperM3U8Text = m3u8Text.toUpperCase();
-        let potentialAdContent = false;
-        if (upperM3U8Text.includes("#EXT-X-DATERANGE:") && (upperM3U8Text.includes(AD_SIGNIFIER_DATERANGE_ATTR_WORKER.toUpperCase()) || AD_DATERANGE_ATTRIBUTE_KEYWORDS_WORKER.some(kw => upperM3U8Text.includes(kw)))) {
-            potentialAdContent = true;
-        } else if (upperM3U8Text.includes("#EXT-X-ASSET:") || upperM3U8Text.includes("#EXT-X-CUE-OUT") || upperM3U8Text.includes("#EXT-X-TWITCH-AD-SIGNAL") || upperM3U8Text.includes("#EXT-X-SCTE35:") || upperM3U8Text.includes("#EXT-X-TWITCH-PREFETCH:")) {
-            potentialAdContent = true;
-        } else if (AD_DATERANGE_REGEX_WORKER && AD_DATERANGE_REGEX_WORKER.test(m3u8Text)) {
-            potentialAdContent = true;
-        }
-
-        if (!potentialAdContent) {
-            return { cleanedText: m3u8Text, adsFound: false };
-        }
-
-        const lines = m3u8Text.split('\n');
-        const cleanLines = [];
-        let isAdSection = false;
-        let adsFoundOverall = false;
-        let discontinuityShouldBeRemoved = false;
-        let linesRemovedCount = 0;
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            const trimmedLine = line.trim();
-            const upperTrimmedLine = trimmedLine.toUpperCase();
-            let removeThisLine = false;
-
-            if (upperTrimmedLine.startsWith('#EXT-X-DATERANGE')) {
-                if (upperTrimmedLine.includes(AD_SIGNIFIER_DATERANGE_ATTR_WORKER.toUpperCase()) ||
-                    (AD_DATERANGE_REGEX_WORKER && AD_DATERANGE_REGEX_WORKER.test(trimmedLine)) ||
-                    AD_DATERANGE_ATTRIBUTE_KEYWORDS_WORKER.some(kw => upperTrimmedLine.includes(kw))) {
-                    removeThisLine = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
-                }
-            } else if (upperTrimmedLine.startsWith('#EXT-X-ASSET') || upperTrimmedLine.startsWith('#EXT-X-CUE-OUT') || upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-HIDE') || upperTrimmedLine.startsWith('#EXT-X-SCTE35')) {
-                removeThisLine = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
-            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-PREFETCH')) {
-                 removeThisLine = true; adsFoundOverall = true;
-            } else if (isAdSection) {
-                if (upperTrimmedLine.startsWith('#EXT-X-CUE-IN')) {
-                    removeThisLine = true; isAdSection = false; discontinuityShouldBeRemoved = false;
-                } else if (upperTrimmedLine.startsWith('#EXTINF')) {
-                    isAdSection = false; discontinuityShouldBeRemoved = false;
-                } else if (upperTrimmedLine.startsWith('#EXT-X-DISCONTINUITY')) {
-                    if (discontinuityShouldBeRemoved) {
-                        removeThisLine = true; discontinuityShouldBeRemoved = false;
-                    }
-                } else if (!trimmedLine.startsWith('#') && trimmedLine !== '') {
-                    removeThisLine = true;
-                }
-            }
-
-            if (removeThisLine) {
-                linesRemovedCount++;
-            } else {
-                cleanLines.push(line);
-            }
-        }
-        const cleanedText = cleanLines.join('\n');
-        if (debugLogging && adsFoundOverall) {
-            console.log(`[WORKER M3U8Clean] Cleaned ${urlFilename}: ${linesRemovedCount} lines removed.`);
-        }
-        return { cleanedText: cleanedText, adsFound: adsFoundOverall };
-    }
-
-    function getWorkerInjectionCode() {
-        const _universalParseAndCleanM3U8String = _universalParseAndCleanM3U8_WorkerLogic.toString();
-
-        return `
-            const SCRIPT_VERSION_WORKER = '${SCRIPT_VERSION}';
-            const CORE_DEBUG_LOGGING_WORKER = ${CORE_DEBUG_LOGGING};
-            const LOG_M3U8_CLEANING_WORKER = ${LOG_M3U8_CLEANING_DEBUG};
-            const LOG_PREFIX_WORKER_BASE = '[TTV ADBLOCK ULT v' + SCRIPT_VERSION_WORKER + '] [WORKER]';
-
-            ${_universalParseAndCleanM3U8String}
-
-            (function() {
-                function workerLogError(message, ...args) { if (CORE_DEBUG_LOGGING_WORKER) console.error(LOG_PREFIX_WORKER_BASE + ' ERROR:', message, ...args); }
-                function workerLogM3U8Trace(message, ...args) { if (LOG_M3U8_CLEANING_WORKER) console.debug(LOG_PREFIX_WORKER_BASE + ' [M3U8 Relay] TRACE:', message, ...args.map(arg => typeof arg === 'string' && arg.length > 100 ? arg.substring(0, 100) + '...' : arg)); }
-
-                const originalFetch = self.fetch;
-                if (typeof self.fetch === 'function' && !self.fetch.hooked_by_adblock_ult_worker) {
-                    self.fetch = async function(input, init) {
-                        let requestUrl = (input instanceof Request) ? input.url : String(input);
-                        const lowerCaseUrl = requestUrl.toLowerCase();
-                        const isM3U8Request = (lowerCaseUrl.endsWith('.m3u8') || lowerCaseUrl.includes('.m3u8?')) && lowerCaseUrl.includes('usher.ttvnw.net');
-
-                        if (isM3U8Request) {
-                            workerLogM3U8Trace('Worker Fetch: Intercepted M3U8 request', requestUrl);
-                            try {
-                                const response = await originalFetch.apply(this, arguments);
-                                if (response.ok) {
-                                    const text = await response.clone().text();
-                                    const { cleanedText, adsFound } = _universalParseAndCleanM3U8_WorkerLogic(text, requestUrl, LOG_M3U8_CLEANING_WORKER);
-
-                                    if (adsFound) {
-                                        workerLogM3U8Trace('Worker Fetch: Ads found and M3U8 cleaned for', requestUrl);
-                                        const newHeaders = new Headers(response.headers);
-                                        newHeaders.delete('Content-Length');
-                                        return new Response(cleanedText, {
-                                            status: response.status,
-                                            statusText: response.statusText,
-                                            headers: newHeaders
-                                        });
-                                    }
-                                }
-                                return response;
-                            } catch (e) {
-                                workerLogError('Worker Fetch M3U8 Error:', e, requestUrl);
-                                const requestId = 'worker_fetch_' + Date.now() + Math.random();
-                                self.postMessage({
-                                    adblock_message_request: true,
-                                    type: 'WORKER_FETCH_M3U8_FALLBACK',
-                                    url: requestUrl,
-                                    id: requestId,
-                                    init: init
-                                });
-                                return new Promise((resolve, reject) => {
-                                    const listener = (event) => {
-                                        if (event.data && event.data.adblock_message_response && event.data.id === requestId) {
-                                            self.removeEventListener('message', listener);
-                                            if (event.data.error) {
-                                                workerLogError('Worker Fetch M3U8 Fallback Error from Main:', event.data.error, requestUrl);
-                                                reject(new Error(event.data.error));
-                                            } else {
-                                                workerLogM3U8Trace('Worker Fetch: M3U8 Fallback from Main successful for', requestUrl);
-                                                const headers = new Headers();
-                                                for(const key in event.data.headers) headers.append(key, event.data.headers[key]);
-                                                if(!headers.has('content-type')) headers.set('content-type', 'application/vnd.apple.mpegurl');
-                                                resolve(new Response(event.data.body, { status: event.data.status, statusText: event.data.statusText, headers: headers }));
-                                            }
-                                        }
-                                    };
-                                    self.addEventListener('message', listener);
-                                });
-                            }
-                        }
-                        return originalFetch.apply(this, arguments);
-                    };
-                    self.fetch.hooked_by_adblock_ult_worker = true;
-                    if (CORE_DEBUG_LOGGING_WORKER) console.log(LOG_PREFIX_WORKER_BASE, 'Fetch API in worker hooked.');
-                }
-            })();
-        `;
     }
 
     function modifyGqlResponse(responseText, url) {
@@ -698,20 +534,19 @@
                                         cleanedText = finalCleanedResult.cleanedText;
                                     } else {
                                         logWarn('MidrollRecovery', `(3/3) Mid-roll recovery for ${channelName} still resulted in an M3U8 with ads. Using this potentially ad-laden M3U8.`);
-                                        cleanedText = finalCleanedResult.cleanedText; // Use the recovered M3U8 even if it still has ads, it might be better
+                                        cleanedText = finalCleanedResult.cleanedText;
                                     }
                                 } catch (e) {
                                     logError('MidrollRecovery', `(3/3) Mid-roll recovery for ${urlShortForLog} failed. Reverting to initial cleaning. Reason: ${e}`);
-                                    // cleanedText remains the result of the initial cleaning
                                 }
                             } else if (errorDuringClean) {
                                 logWarn('FetchM3U8', `Initial M3U8 cleaning for ${urlShortForLog} resulted in an error (e.g. too few segments). Using original M3U8.`);
-                                cleanedText = response.responseText; // Revert to original on cleaning error
+                                cleanedText = response.responseText;
                             }
 
                             const newHeaders = new Headers();
                             if (response.responseHeaders) response.responseHeaders.trim().split(/[\r\n]+/).forEach(line => { const parts = line.split(': ', 2); if (parts.length === 2 && parts[0].toLowerCase() !== 'content-length') newHeaders.append(parts[0], parts[1]); });
-                            if (!newHeaders.has('Content-Type')) newHeaders.set('Content-Type', 'application/vnd.apple.mpegurl'); // Ensure correct content type
+                            if (!newHeaders.has('Content-Type')) newHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
                             logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'FetchM3U8', `Processed M3U8 for ${urlShortForLog} (via GM_XHR in Fetch).`);
                             resolve(new Response(cleanedText, { status: response.status, statusText: response.statusText, headers: newHeaders }));
                         } else {
@@ -786,7 +621,7 @@
         for (const keyword of AD_URL_KEYWORDS_BLOCK) {
             if (lowerCaseUrl.includes(keyword.toLowerCase())) {
                 logModuleTrace(LOG_NETWORK_BLOCKING_DEBUG, 'XHRBlock', `Blocked XHR ${method} request to ${urlShortForLog} (Keyword: ${keyword})`);
-                this.dispatchEvent(new Event('error')); // Simulate network error
+                this.dispatchEvent(new Event('error'));
                 return;
             }
         }
@@ -822,7 +657,7 @@
                 onerror: function(error) {
                     logError('XHR_M3U8', `GM_xmlhttpRequest error for ${urlShortForLog}:`, error);
                     Object.defineProperties(xhr, {
-                        'status': { value: 0, configurable: true }, // Indicate error
+                        'status': { value: 0, configurable: true },
                         'readyState': { value: 4, configurable: true }
                     });
                     xhr.dispatchEvent(new Event('error'));
@@ -851,81 +686,6 @@
         originalXhrSend.apply(this, arguments);
     }
 
-    function handleMessageFromWorkerGlobal(event) {
-        const msg = event.data;
-        if (msg?.adblock_message_request && msg.type === 'WORKER_FETCH_M3U8_FALLBACK') {
-            const workerPort = event.source;
-            if (!workerPort) return;
-
-            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'WorkerFallback', `Main: Received M3U8 fetch fallback request from worker for: ${msg.url.substring(0,100)}`);
-            GM_xmlhttpRequest({
-                method: "GET",
-                url: msg.url,
-                responseType: "text",
-                onload: (response) => {
-                    let bodyToWorker = response.responseText;
-                    if (response.status >= 200 && response.status < 300) {
-                        const { cleanedText, adsFound, errorDuringClean } = parseAndCleanM3U8(response.responseText, msg.url);
-                        if (adsFound && !errorDuringClean) bodyToWorker = cleanedText;
-                        else if (errorDuringClean) logWarn('WorkerFallback', `M3U8 cleaning error during worker fallback for ${msg.url.substring(0,100)}, sending original.`);
-                    }
-
-                    const responseHeaders = {};
-                    if (response.responseHeaders) {
-                        response.responseHeaders.trim().split(/[\r\n]+/).forEach(line => {
-                            const parts = line.split(': ', 2);
-                            if (parts.length === 2) responseHeaders[parts[0].toLowerCase()] = parts[1];
-                        });
-                    }
-                    workerPort.postMessage({
-                        adblock_message_response: true, id: msg.id,
-                        body: bodyToWorker, status: response.status,
-                        statusText: response.statusText, headers: responseHeaders
-                    });
-                },
-                onerror: (error) => {
-                    logError('WorkerFallback', `Main: GM_XHR Network Error during worker fallback for ${msg.url.substring(0,100)}:`, error);
-                    workerPort.postMessage({
-                        adblock_message_response: true, id: msg.id,
-                        error: `GM_XHR Network Error: ${error.error || 'Unknown'}`, status: 0
-                    });
-                }
-            });
-        }
-    }
-
-    function hookWorkerConstructor() {
-        if (!INJECT_INTO_WORKERS || unsafeWindow.Worker.hooked_by_adblock_ult) return;
-        unsafeWindow.Worker = class HookedWorker extends OriginalWorker {
-            constructor(scriptURL, options) {
-                const urlString = (scriptURL instanceof URL) ? scriptURL.href : String(scriptURL);
-                logCoreDebug('WorkerHook', `Attempting to intercept Worker creation for: ${urlString.substring(0, 100)}...`);
-
-                if (urlString.startsWith('blob:')) {
-                    logCoreDebug('WorkerHook', `Skipping injection for blob URL: ${urlString.substring(0,100)}`);
-                    super(scriptURL, options);
-                    return;
-                }
-
-                try {
-                    const workerCodeToInject = getWorkerInjectionCode();
-                    const blob = new Blob([workerCodeToInject, `\ntry { importScripts("${urlString}"); } catch(e) { console.error("${LOG_PREFIX} [WORKER] Failed to import original script ${urlString}:", e); throw e; }`], { type: 'application/javascript' });
-                    const newScriptURL = URL.createObjectURL(blob);
-                    const workerInstance = super(newScriptURL, options);
-                    URL.revokeObjectURL(newScriptURL);
-                    logCoreDebug('WorkerHook', `Successfully intercepted and injected code into Worker for: ${urlString.substring(0, 100)}`);
-                    return workerInstance;
-                } catch (e) {
-                    logError('WorkerHook', `Failed to create hooked worker for ${urlString.substring(0,100)}:`, e);
-                    return new OriginalWorker(scriptURL, options);
-                }
-            }
-        };
-        unsafeWindow.Worker.hooked_by_adblock_ult = true;
-        unsafeWindow.addEventListener('message', handleMessageFromWorkerGlobal, { passive: true });
-        logCoreDebug('WorkerHook', 'Worker constructor hooked. Listening for M3U8 fallbacks.');
-    }
-
     function installHooks() {
         if (hooksInstalledMain) return;
         try { unsafeWindow.fetch = fetchOverride; } catch (e) { logError('HookInstall', 'Failed to hook fetch:', e); }
@@ -933,105 +693,38 @@
             unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride;
             unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride;
         } catch (e) { logError('HookInstall', 'Failed to hook XHR:', e); }
-        try { hookWorkerConstructor(); } catch (e) { logError('HookInstall', 'Failed to hook Worker:', e); }
+        // hookWorkerConstructor(); // Удален вызов
         hooksInstalledMain = true;
-        logCoreDebug('HookInstall', 'All network and worker hooks installed.');
+        logCoreDebug('HookInstall', 'Network hooks installed (Worker hook removed).');
     }
 
-    function removeDOMAdElementsImproved() {
+    // Замена на более простую версию из 25.0.0
+    function removeDOMAdElements() {
         if (!ATTEMPT_DOM_AD_REMOVAL) return;
-
-        const AD_NAG_TEXT_LOWERCASE = AD_NAG_TEXT_KEYWORDS.map(k => k.toLowerCase());
-
-        const checkAndRemoveNode = (node) => {
-            if (node.nodeType !== Node.ELEMENT_NODE || !node.parentNode) {
-                return false; // Not an element or already removed
-            }
-
-            // 1. Проверка по селекторам из списка
-            for (const selector of AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST) {
-                if (node.matches(selector)) {
-                    node.parentNode.removeChild(node);
-                    logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, 'DOMAdRemoval', `Removed element by selector: ${selector}`);
-                    return true; // Node removed
-                }
-            }
-
-            // 2. Проверка по тексту
-            // textContent может быть null, поэтому ?.
-            const nodeText = node.textContent?.toLowerCase() || "";
-            if (AD_NAG_TEXT_LOWERCASE.some(keyword => nodeText.includes(keyword))) {
-                const role = node.getAttribute('role');
-                const ariaModal = node.getAttribute('aria-modal');
-                const dataTestSelector = node.getAttribute('data-test-selector');
-                const hasVideoPlayerChild = node.querySelector('video') !== null;
-
-                // Эвристики для определения, что это действительно оверлей/модальное окно
-                if (!hasVideoPlayerChild && // Не удалять, если внутри есть видео (защита от удаления плеера)
-                    (
-                        (role === 'dialog' || role === 'alertdialog' || ariaModal === 'true') || // Стандартные атрибуты модальных окон
-                        (dataTestSelector && (dataTestSelector.includes('ad') || dataTestSelector.includes('nag') || dataTestSelector.includes('modal'))) || // Twitch-специфичные тестовые селекторы
-                        (node.classList && Array.from(node.classList).some(cls => cls.includes('modal') || cls.includes('overlay') || cls.includes('nag-banner') || cls.includes('interstitial'))) // Общие классы для оверлеев
-                    )
-                   ) {
-                    const matchedKeyword = AD_NAG_TEXT_LOWERCASE.find(k => nodeText.includes(k)) || "unknown";
-                    logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, 'DOMAdRemoval', `Removing element by text content (keyword: "${matchedKeyword}"). Role: ${role}, aria-modal: ${ariaModal}, data-test: ${dataTestSelector}, Classes: ${node.className.substring(0,50)}`);
-                    node.parentNode.removeChild(node);
-                    return true; // Node removed
-                }
-            }
-            return false; // Node not removed by this function call
-        };
-
-        // Начальное сканирование существующих элементов
-        AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.forEach(selector => {
-            document.querySelectorAll(selector).forEach(el => {
-                if (el.parentNode) { // Дополнительная проверка, вдруг элемент уже удален другим правилом
-                    el.parentNode.removeChild(el);
-                    logModuleTrace(ATTEMPT_DOM_AD_REMOVAL, 'DOMAdRemoval', `Initial DOM scan: Removed element by selector: ${selector}`);
-                }
-            });
-        });
-        // Начальное сканирование по тексту для элементов, которые могли быть не пойманы селекторами
-        // Ограничиваем начальный поиск потенциальными контейнерами, чтобы не сканировать весь DOM слишком агрессивно
-        document.querySelectorAll('div[role="dialog"], div[aria-modal="true"], div[class*="modal"], div[class*="overlay"], div[data-a-target]').forEach(checkAndRemoveNode);
-
-
         if (!adRemovalObserver) {
-            adRemovalObserver = new MutationObserver((mutationsList) => {
-                for (const mutation of mutationsList) {
-                    if (mutation.addedNodes) {
-                        mutation.addedNodes.forEach(addedNode => {
-                            if (addedNode.nodeType === Node.ELEMENT_NODE) {
-                                // Сначала проверяем сам добавленный узел
-                                if (!checkAndRemoveNode(addedNode)) {
-                                    // Если сам узел не удален, проверяем его прямых потомков (неглубокий поиск)
-                                    // Это компромисс между производительностью и полнотой
-                                    if (addedNode.children && addedNode.children.length > 0) {
-                                    // Преобразуем в массив, так как коллекция может изменяться при удалении
-                                    const children = Array.from(addedNode.children);
-                                    for(const child of children){
-                                        if (child.nodeType === Node.ELEMENT_NODE) {
-                                             checkAndRemoveNode(child); // Не важно, удалился ли ребенок, основной узел `addedNode` остается
-                                        }
-                                    }
-                                    }
-                                }
-                            }
-                        });
-                    }
-                }
-            });
-
-            try {
-                adRemovalObserver.observe(document.documentElement || document.body, { childList: true, subtree: true });
-                logCoreDebug('DOMAdRemoval', 'MutationObserver for DOM ad removal started on documentElement.');
-            } catch (e) {
-                logError('DOMAdRemoval', 'Failed to start MutationObserver for DOM ad removal:', e);
+            adRemovalObserver = new MutationObserver(() => removeDOMAdElements());
+            const observeTarget = document.body || document.documentElement;
+            if (observeTarget) {
+                adRemovalObserver.observe(observeTarget, { childList: true, subtree: true });
+                logCoreDebug('DOMAdRemoval', 'MutationObserver for DOM ad removal started.');
+            } else {
+                document.addEventListener('DOMContentLoaded', () => {
+                    const target = document.body || document.documentElement;
+                    if(target) adRemovalObserver.observe(target, { childList: true, subtree: true });
+                    logCoreDebug('DOMAdRemoval', 'MutationObserver for DOM ad removal started (DOMContentLoaded).');
+                }, { once: true });
             }
         }
+        AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.forEach(selector => {
+            try {
+                document.querySelectorAll(selector).forEach(el => {
+                    if (el.parentNode) el.remove();
+                });
+            } catch(e) {
+                logError('DOMAdRemoval', `Error removing elements for selector "${selector}":`, e);
+            }
+        });
     }
-
 
     function setupVideoPlayerMonitor() {
         if (videoPlayerMutationObserver) return;
@@ -1066,27 +759,28 @@
                                 logCoreDebug('PlayerMonitor', 'New video element detected through mutation.');
                                 if (videoElement) {
                                     logCoreDebug('PlayerMonitor', 'Removing listeners from old video element.');
-                                    // Тут можно было бы удалить старые слушатели, но т.к. videoElement перезаписывается,
-                                    // и мы проверяем vidElement._adblock_listeners_attached, это не так критично.
                                 }
                                 videoElement = newVideoElement;
                                 attachVideoEventListeners(videoElement);
-                                return; // Выходим после обработки первого нового видеоэлемента
+                                return;
                             }
                         }
                     }
                 }
-                // Можно добавить обработку изменения атрибута data-player-error, если это необходимо
-                // if (mutation.type === 'attributes' && mutation.target === videoElement && mutation.attributeName === 'data-player-error') {
-                //    const errorVal = videoElement.getAttribute('data-player-error');
-                //    if (errorVal && errorVal !== 'false') { /* ... */ }
-                // }
             }
         });
 
-        // Наблюдаем за body, т.к. плеер может быть пересоздан в любом месте
-        videoPlayerMutationObserver.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-player-error'] });
-        logCoreDebug('PlayerMonitor', 'Video player mutation observer started.');
+        const observeTarget = document.body || document.documentElement;
+        if (observeTarget) {
+            videoPlayerMutationObserver.observe(observeTarget, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-player-error'] });
+            logCoreDebug('PlayerMonitor', 'Video player mutation observer started.');
+        } else {
+            document.addEventListener('DOMContentLoaded', () => {
+                const target = document.body || document.documentElement;
+                if (target) videoPlayerMutationObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-player-error'] });
+                logCoreDebug('PlayerMonitor', 'Video player mutation observer started (DOMContentLoaded).');
+            }, { once: true });
+        }
     }
 
     function attachVideoEventListeners(vidElement) {
@@ -1098,8 +792,6 @@
             if (vidElement && vidElement.paused) {
                 logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'Autoplay', 'Proactively trying to play video element.');
                 vidElement.play().catch(e => {
-                    // NotAllowedError часто возникает, если нет взаимодействия пользователя, это нормально.
-                    // Другие ошибки могут быть более значимыми.
                     if (e.name !== 'NotAllowedError') {
                         logWarn('Autoplay', `Failed to autoplay video: ${e.name} - ${e.message}. User interaction might be required.`);
                     }
@@ -1107,12 +799,11 @@
             }
         };
 
-        // Небольшая задержка перед первой попыткой воспроизведения, если страница только загрузилась
         setTimeout(attemptPlay, VISIBILITY_RESUME_DELAY_MS);
-        vidElement.addEventListener('canplay', attemptPlay, { once: true, passive: true }); // Попробовать воспроизвести, когда видео готово
+        vidElement.addEventListener('canplay', attemptPlay, { once: true, passive: true });
 
         vidElement.addEventListener('error', (e) => {
-            const error = e?.target?.error; // HTMLMediaElement.error
+            const error = e?.target?.error;
             const errorCode = error?.code;
             const errorMessage = error?.message;
             logError('PlayerMonitor', `Player error event. Code: ${errorCode || 'N/A'}, Message: "${errorMessage || 'N/A'}"`);
@@ -1129,23 +820,20 @@
 
         vidElement.addEventListener('waiting', () => {
             logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMonitor', 'Video event: waiting (buffering)');
-            lastTimeUpdate = Date.now(); // Обновляем время последнего события, чтобы таймаут считался от начала 'waiting'
+            lastTimeUpdate = Date.now();
             if (RELOAD_BUFFERING_THRESHOLD_MS > 0) {
                 setTimeout(() => {
-                    // Проверяем, не было ли воспроизведение возобновлено (paused), не было ли перемотки (seeking),
-                    // и достаточно ли данных для воспроизведения (readyState < 3).
                     if (vidElement.paused || vidElement.seeking || vidElement.readyState >= 3) return;
                     if (Date.now() - lastTimeUpdate > RELOAD_BUFFERING_THRESHOLD_MS) {
                         logWarn('PlayerMonitor', `Video appears stuck buffering for over ${RELOAD_BUFFERING_THRESHOLD_MS / 1000}s. Triggering reload.`);
                         triggerReload('Video buffering timeout');
                     }
-                }, RELOAD_BUFFERING_THRESHOLD_MS + 1000); // Проверяем чуть позже порога
+                }, RELOAD_BUFFERING_THRESHOLD_MS + 1000);
             }
         }, { passive: true });
 
         vidElement.addEventListener('stalled', () => {
             logWarn('PlayerMonitor', 'Video event: stalled (browser unable to fetch data).');
-            // 'stalled' само по себе может не означать зависание, поэтому используем таймаут.
             if (RELOAD_STALL_THRESHOLD_MS > 0) {
                 setTimeout(() => {
                     if (vidElement.paused || vidElement.seeking || vidElement.readyState >= 3) return;
@@ -1189,24 +877,32 @@
         if (!ENABLE_AUTO_RELOAD || errorScreenObserver) return;
 
         const errorScreenSelectors = [
-            '[data-a-target="player-error-screen"]', // Стандартный экран ошибки плеера
-            '.content-overlay-gate__content',       // Оверлей возрастного ограничения или других блокировок контента
-            'div[data-test-selector="content-overlay-gate-text"]' // Текст внутри такого оверлея
+            '[data-a-target="player-error-screen"]',
+            '.content-overlay-gate__content',
+            'div[data-test-selector="content-overlay-gate-text"]'
         ];
 
         errorScreenObserver = new MutationObserver(() => {
             for (const selector of errorScreenSelectors) {
                 const errorScreenElement = document.querySelector(selector);
-                // Проверяем, что элемент видим (offsetParent !== null) или имеет активный класс для оверлеев
                 if (errorScreenElement && (errorScreenElement.offsetParent !== null || errorScreenElement.classList.contains('content-overlay-gate--active'))) {
                     logError('ErrorScreenObserver', `Twitch error screen detected (selector: ${selector}). Triggering reload.`);
                     triggerReload(`Detected player error screen: ${selector}`);
-                    return; // Перезагружаемся при первом обнаружении
+                    return;
                 }
             }
         });
-        errorScreenObserver.observe(document.body, { childList: true, subtree: true });
-        logCoreDebug('ErrorScreenObserver', 'Observer for player error screens started.');
+        const observeTarget = document.body || document.documentElement;
+        if (observeTarget) {
+            errorScreenObserver.observe(observeTarget, { childList: true, subtree: true });
+            logCoreDebug('ErrorScreenObserver', 'Observer for player error screens started.');
+        } else {
+            document.addEventListener('DOMContentLoaded', () => {
+                const target = document.body || document.documentElement;
+                if (target) errorScreenObserver.observe(target, { childList: true, subtree: true });
+                logCoreDebug('ErrorScreenObserver', 'Observer for player error screens started (DOMContentLoaded).');
+            }, { once: true });
+        }
     }
 
     function initializeScript() {
@@ -1215,7 +911,7 @@
         if (FORCE_MAX_QUALITY_IN_BACKGROUND) forceMaxQuality();
         hookQualitySettings();
         installHooks();
-        removeDOMAdElementsImproved(); // Используем улучшенную функцию
+        removeDOMAdElements();
         startErrorScreenObserver();
         setupVideoPlayerMonitor();
         logCoreDebug('Initialize', 'Script initialized successfully.');
