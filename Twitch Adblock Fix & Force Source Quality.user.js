@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      26.0.1
+// @version      26.0.2
 // @description  Комплексная блокировка рекламы Twitch с проактивной заменой токенов, восстановлением после мид-роллов, принудительным качеством, очисткой M3U8 и другими оптимизациями.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -27,14 +27,12 @@
 (function() {
     'use strict';
 
-    const SCRIPT_VERSION = '26.0.1';
+    const SCRIPT_VERSION = '26.0.2-merged';
     const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
     const ENABLE_MIDROLL_RECOVERY = GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true);
     const FORCE_MAX_QUALITY_IN_BACKGROUND = GM_getValue('TTV_AdBlock_ForceMaxQuality', true);
-    // const INJECT_INTO_WORKERS = GM_getValue('TTV_AdBlock_InjectWorkers', true); // Удалено, т.к. отказываемся от инъекции в воркеры
     const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
     const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
-    const BLOCK_NATIVE_ADS_SCRIPT = GM_getValue('TTV_AdBlock_BlockNatScript', true);
     const HIDE_AD_OVERLAY_ELEMENTS = GM_getValue('TTV_AdBlock_HideAdOverlay', true);
     const ATTEMPT_DOM_AD_REMOVAL = GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true);
     const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
@@ -45,19 +43,61 @@
     const LOG_GQL_MODIFY_DEBUG = GM_getValue('TTV_AdBlock_Debug_GQL', false);
     const LOG_NETWORK_BLOCKING_DEBUG = GM_getValue('TTV_AdBlock_Debug_NetBlock', false);
     const LOG_TOKEN_SWAP_DEBUG = GM_getValue('TTV_AdBlock_Debug_TokenSwap', false);
-    const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', '0,2,3,4,9,10,403,1000,2000,3000,4000,5000,6001');
     const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 20000);
     const RELOAD_BUFFERING_THRESHOLD_MS = GM_getValue('TTV_AdBlock_BufferingThresholdMs', 45000);
     const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 15000);
     const VISIBILITY_RESUME_DELAY_MS = GM_getValue('TTV_AdBlock_VisResumeDelayMs', 1500);
-    const USE_REGEX_M3U8_CLEANING = GM_getValue('TTV_AdBlock_UseRegexM3U8', false);
     const MAX_RELOADS_PER_SESSION = GM_getValue('TTV_AdBlock_MaxReloadsPerSession', 5);
-
     const LOG_PREFIX = `[TTV ADBLOCK ULT v${SCRIPT_VERSION}]`;
     const LS_KEY_QUALITY = 'video-quality';
     const TARGET_QUALITY_VALUE = '{"default":"chunked"}';
     const GQL_URL = 'https://gql.twitch.tv/gql';
     const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
+    const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "0,2,3,4,9,10,403,1000,2000,3000,4000,5000,6001,500,502,503,504");
+
+    // Обновленные ключевые слова для блокировки рекламных запросов
+    const AD_URL_KEYWORDS_BLOCK = [
+        'nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js',
+        'assets.adobedtm.com', 'adservice.google.com', 'doubleclick.net',
+        'googlesyndication.com', 'pubads.g.doubleclick.net', 'adnxs.com',
+        'amazon-adsystem.com', 'taboola.com', 'outbrain.com', 'taboolacdn.com',
+        'yieldmo.com', 'criteo.com', 'smartadserver.com', 'rubiconproject.com',
+        'appier.net', 'inmobi.com', 'adform.net', 'taboola.com', 'taboolaads.com'
+    ];
+
+    // Обновленные CSS-селекторы для рекламных элементов
+    const AD_OVERLAY_SELECTORS_CSS = [
+        'div[data-a-target="request-ad-block-disable-modal"]', '.video-player__ad-info-container',
+        'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]',
+        'button[aria-label*="feedback for this Ad"]', '.player-ad-notice', '.ad-interrupt-screen',
+        'div[data-test-selector="ad-banner-default-text-area"]', 'div[data-test-selector="ad-display-root"]',
+        '.persistent-player__ad-container', '[data-a-target="advertisement-notice"]',
+        'div[data-a-target="ax-overlay"]', '[data-test-selector="sad-overlay"]',
+        'div[class*="video-ad-label"]', '.player-ad-overlay', 'div[class*="advertisement"]',
+        'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]',
+        'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]',
+        'div[data-a-target*="ad-block-nag"]', 'div[data-test-selector*="ad-block-nag"]',
+        'div[data-a-target*="disable-adblocker-modal"]',
+        'div[data-test-id="ad-break"]', '.ad-break-ui-container', '.ad-break-overlay',
+        'div[data-a-target="ad-break-countdown"]', 'div[data-test-id="ad-break-countdown"]',
+        'div[data-a-target="ad-break-skip-button"]', 'div[data-test-id="ad-break-skip-button"]'
+    ];
+    // Обновленные параметры для обработки M3U8
+    const AD_SIGNIFIER_DATERANGE_ATTR = "Twitch-Ad-Signal";
+    const AD_DATERANGE_ATTRIBUTE_KEYWORDS = [ "AD-ID=", "CUE-OUT", "SCTE35", "Twitch-Ad-Signal", "Twitch-Prefetch", "Twitch-Ad-Hide", "Twitch-Ads" ];
+
+    const COOKIE_BANNER_SELECTOR = '.consent-banner';
+
+    const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST = [
+        ...AD_OVERLAY_SELECTORS_CSS,
+        'div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]',
+        'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]',
+        'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay',
+        '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]',
+        '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]',
+        'div[data-ad-boundary]',
+    ];
+    if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push(COOKIE_BANNER_SELECTOR);
 
     const GQL_OPERATIONS_TO_SKIP_MODIFICATION = new Set([
         'PlaybackAccessToken', 'PlaybackAccessToken_Template', 'ChannelPointsContext', 'ViewerPoints',
@@ -85,56 +125,6 @@
         'DeleteVideos', 'HostModeTargetDetails', 'StreamInformation', 'VideoPlayer_StreamAnalytics',
         'VideoPlayer_VideoSourceManager', 'VideoPlayerStreamMetadata', 'VideoPlayerStatusOverlayChannel'
     ]);
-
-    const AD_SIGNIFIER_DATERANGE_ATTR = 'twitch-stitched-ad';
-    const AD_DATERANGE_ATTRIBUTE_KEYWORDS = ['ADVERTISING', 'ADVERTISEMENT', 'PROMOTIONAL', 'SPONSORED', 'COMMERCIALBREAK'];
-    const AD_DATERANGE_REGEX = USE_REGEX_M3U8_CLEANING ? /CLASS="(?:TWITCH-)?STITCHED-AD"/i : null;
-
-    let AD_URL_KEYWORDS_BLOCK = [
-        'd2v02itv0y9u9t.cloudfront.net', 'amazon-adsystem.com', 'doubleclick.net', 'googleadservices.com',
-        'googletagservices.com', 'imasdk.googleapis.com', 'pubmatic.com', 'rubiconproject.com', 'adsrvr.org',
-        'adnxs.com', 'taboola.com', 'outbrain.com', 'ads.yieldmo.com', 'ads.adaptv.advertising.com',
-        'scorecardresearch.com', 'yandex.ru/clck/', 'omnitagjs', 'omnitag', 'innovid.com', 'eyewonder.com',
-        'serverbid.com', 'spotxchange.com', 'spotx.tv', 'springserve.com', 'flashtalking.com',
-        'contextual.media.net', 'advertising.com', 'adform.net', 'freewheel.tv', 'stickyadstv.com',
-        'tremorhub.com', 'aniview.com', 'criteo.com', 'adition.com', 'teads.tv', 'undertone.com',
-        'vidible.tv', 'vidoomy.com', 'appnexus.com', '.google.com/pagead/conversion/', '.youtube.com/api/stats/ads',
-        'amazon-ads.com' // Добавлено из 26.0.1
-    ];
-    if (BLOCK_NATIVE_ADS_SCRIPT) AD_URL_KEYWORDS_BLOCK.push('nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com');
-
-    const AD_OVERLAY_SELECTORS_CSS = [
-        'div[data-a-target="request-ad-block-disable-modal"]',
-        '.video-player__ad-info-container', 'span[data-a-target="video-ad-label"]',
-        'span[data-a-target="video-ad-countdown"]', 'button[aria-label*="feedback for this Ad"]',
-        '.player-ad-notice', '.ad-interrupt-screen', 'div[data-test-selector="ad-banner-default-text-area"]',
-        'div[data-test-selector="ad-display-root"]', '.persistent-player__ad-container',
-        '[data-a-target="advertisement-notice"]', 'div[data-a-target="ax-overlay"]',
-        '[data-test-selector="sad-overlay"]', 'div[class*="video-ad-label"]', '.player-ad-overlay',
-        'div[class*="advertisement"]', 'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]',
-        'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]',
-        'div[data-a-target*="ad-block-nag"]',
-        'div[data-test-selector*="ad-block-nag"]',
-        'div[data-a-target*="disable-adblocker-modal"]'
-    ];
-    const COOKIE_BANNER_SELECTOR = '.consent-banner';
-
-    const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST = [
-        'div[data-a-target="request-ad-block-disable-modal"]',
-        'div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]',
-        'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]',
-        'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay',
-        '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]',
-        '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]',
-        'div[data-ad-boundary]', 'div[data-a-target="sad-overlay-container"]',
-        'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]',
-        'div[data-a-target*="ad-block-nag"]',
-        'div[data-test-selector*="ad-block-nag"]',
-        'div[data-a-target*="disable-adblocker-modal"]'
-    ];
-    if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push(COOKIE_BANNER_SELECTOR);
-
-
     const PLAYER_CONTAINER_SELECTORS = ['div[data-a-target="video-player"]', '.video-player', 'div[data-a-player-state]', 'main', '.persistent-player'];
 
     let hooksInstalledMain = false;
@@ -145,7 +135,6 @@
     const originalFetch = unsafeWindow.fetch;
     const originalXhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
     const originalXhrSend = unsafeWindow.XMLHttpRequest.prototype.send;
-    // const OriginalWorker = unsafeWindow.Worker; // Удалено
     const originalLocalStorageSetItem = unsafeWindow.localStorage.setItem;
     const originalLocalStorageGetItem = unsafeWindow.localStorage.getItem;
     let videoElement = null;
@@ -164,10 +153,7 @@
     function injectCSS() {
         let cssToInject = '';
         if (HIDE_AD_OVERLAY_ELEMENTS) cssToInject += `${AD_OVERLAY_SELECTORS_CSS.join(',\n')} { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; z-index: -1 !important; }\n`;
-        // HIDE_COOKIE_BANNER обрабатывается через AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST, если включен.
-        // Если он не включен, а HIDE_AD_OVERLAY_ELEMENTS включен, то CSS для баннера не добавится.
-        // Если нужно отдельное CSS правило для COOKIE_BANNER_SELECTOR независимо от ATTEMPT_DOM_AD_REMOVAL:
-        if (HIDE_COOKIE_BANNER && !AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.includes(COOKIE_BANNER_SELECTOR)) { // Защита от дублирования, если он уже в списке для DOM удаления
+        if (HIDE_COOKIE_BANNER && !AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.includes(COOKIE_BANNER_SELECTOR)) {
             cssToInject += `${COOKIE_BANNER_SELECTOR} { display: none !important; }\n`;
         }
         if (cssToInject) try { GM_addStyle(cssToInject); } catch (e) { logError('CSSInject', 'CSS apply failed:', e); }
@@ -226,7 +212,6 @@
             if(originalLocalStorageSetItem) unsafeWindow.localStorage.setItem = originalLocalStorageSetItem;
         }
     }
-
     function parseAndCleanM3U8(m3u8Text, url = "N/A") {
         const urlShort = url.includes('?') ? url.substring(0, url.indexOf('?')) : url;
         const urlFilename = urlShort.substring(urlShort.lastIndexOf('/') + 1) || urlShort;
@@ -241,9 +226,7 @@
 
         if (upperM3U8Text.includes("#EXT-X-DATERANGE:") && (upperM3U8Text.includes(AD_SIGNIFIER_DATERANGE_ATTR.toUpperCase()) || AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperM3U8Text.includes(kw)))) {
             potentialAdContent = true;
-        } else if (upperM3U8Text.includes("#EXT-X-ASSET:") || upperM3U8Text.includes("#EXT-X-CUE-OUT") || upperM3U8Text.includes("#EXT-X-TWITCH-AD-SIGNAL") || upperM3U8Text.includes("#EXT-X-SCTE35:") || upperM3U8Text.includes("#EXT-X-TWITCH-PREFETCH:")) {
-            potentialAdContent = true;
-        } else if (AD_DATERANGE_REGEX && AD_DATERANGE_REGEX.test(m3u8Text)) {
+        } else if (upperM3U8Text.includes("#EXT-X-ASSET:") || upperM3U8Text.includes("#EXT-X-CUE-OUT") || upperM3U8Text.includes("#EXT-X-TWITCH-AD-SIGNAL") || upperM3U8Text.includes("#EXT-X-SCTE35:") || upperM3U8Text.includes("#EXT-X-TWITCH-PREFETCH:") || upperM3U8Text.includes("#EXT-X-TWITCH-AD-HIDE")) {
             potentialAdContent = true;
         }
 
@@ -268,7 +251,6 @@
 
             if (upperTrimmedLine.startsWith('#EXT-X-DATERANGE')) {
                 if (upperTrimmedLine.includes(AD_SIGNIFIER_DATERANGE_ATTR.toUpperCase()) ||
-                    (AD_DATERANGE_REGEX && AD_DATERANGE_REGEX.test(trimmedLine)) ||
                     AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperTrimmedLine.includes(kw))) {
                     removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
                 }
@@ -276,7 +258,7 @@
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
             } else if (upperTrimmedLine.startsWith('#EXT-X-CUE-OUT')) {
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
-            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-HIDE')) { // Added based on 26.0.1 worker logic
+            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-HIDE')) {
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
             } else if (upperTrimmedLine.startsWith('#EXT-X-SCTE35')) {
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
@@ -326,7 +308,6 @@
 
         return { cleanedText: cleanedText, adsFound: adsFoundOverall, linesRemoved: linesRemovedCount, wasPotentiallyAd: potentialAdContent, errorDuringClean: false };
     }
-
     function modifyGqlResponse(responseText, url) {
         if (!MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || responseText.length === 0) return responseText;
         try {
@@ -456,7 +437,7 @@
         const url = new URL(originalUsherUrl);
         url.searchParams.set('token', newAccessToken.value);
         url.searchParams.set('sig', newAccessToken.signature);
-        url.searchParams.set('player_version', '1.20.0'); // Use a known good player version
+        url.searchParams.set('player_version', '1.20.0');
         url.searchParams.set('allow_source', 'true');
         url.searchParams.set('allow_audio_only', 'true');
 
@@ -503,7 +484,7 @@
                 url.searchParams.set('token', cachedCleanToken.value);
                 url.searchParams.set('sig', cachedCleanToken.signature);
                 actualRequestUrl = url.href;
-                cachedCleanToken = null; // Consume the token
+                cachedCleanToken = null;
             }
 
             return new Promise((resolve, reject) => {
@@ -693,12 +674,10 @@
             unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride;
             unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride;
         } catch (e) { logError('HookInstall', 'Failed to hook XHR:', e); }
-        // hookWorkerConstructor(); // Удален вызов
         hooksInstalledMain = true;
-        logCoreDebug('HookInstall', 'Network hooks installed (Worker hook removed).');
+        logCoreDebug('HookInstall', 'Network hooks installed.');
     }
 
-    // Замена на более простую версию из 25.0.0
     function removeDOMAdElements() {
         if (!ATTEMPT_DOM_AD_REMOVAL) return;
         if (!adRemovalObserver) {
