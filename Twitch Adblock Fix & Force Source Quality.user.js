@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      26.0.3
+// @version      26.0.4
 // @description  Комплексная блокировка рекламы Twitch с проактивной заменой токенов, восстановлением после мид-роллов, принудительным качеством, очисткой M3U8 и другими оптимизациями.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -27,7 +27,8 @@
 (function() {
     'use strict';
 
-    const SCRIPT_VERSION = '26.0.3';
+    // --- НАСТРОЙКИ СКРИПТА (можно изменить через меню Tampermonkey) ---
+    const SCRIPT_VERSION = '26.0.4';
     const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
     const ENABLE_MIDROLL_RECOVERY = GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true);
     const FORCE_MAX_QUALITY_IN_BACKGROUND = GM_getValue('TTV_AdBlock_ForceMaxQuality', true);
@@ -36,6 +37,8 @@
     const HIDE_AD_OVERLAY_ELEMENTS = GM_getValue('TTV_AdBlock_HideAdOverlay', true);
     const ATTEMPT_DOM_AD_REMOVAL = GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true);
     const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
+
+    // --- НАСТРОЙКИ ОТЛАДКИ (включите для диагностики проблем) ---
     const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true);
     const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', false);
     const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', false);
@@ -43,33 +46,36 @@
     const LOG_GQL_MODIFY_DEBUG = GM_getValue('TTV_AdBlock_Debug_GQL', false);
     const LOG_NETWORK_BLOCKING_DEBUG = GM_getValue('TTV_AdBlock_Debug_NetBlock', false);
     const LOG_TOKEN_SWAP_DEBUG = GM_getValue('TTV_AdBlock_Debug_TokenSwap', false);
+
+    // --- ПРОДВИНУТЫЕ НАСТРОЙКИ ---
     const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 20000);
     const RELOAD_BUFFERING_THRESHOLD_MS = GM_getValue('TTV_AdBlock_BufferingThresholdMs', 45000);
     const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 15000);
     const VISIBILITY_RESUME_DELAY_MS = GM_getValue('TTV_AdBlock_VisResumeDelayMs', 1500);
     const MAX_RELOADS_PER_SESSION = GM_getValue('TTV_AdBlock_MaxReloadsPerSession', 5);
+    const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "0,2,3,4,9,10,403,1000,2000,3000,4000,5000,6001,500,502,503,504");
+
+    // --- КОНСТАНТЫ И ФИЛЬТРЫ ---
     const LOG_PREFIX = `[TTV ADBLOCK ULT v${SCRIPT_VERSION}]`;
     const LS_KEY_QUALITY = 'video-quality';
     const TARGET_QUALITY_VALUE = '{"default":"chunked"}';
     const GQL_URL = 'https://gql.twitch.tv/gql';
     const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
-    const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "0,2,3,4,9,10,403,1000,2000,3000,4000,5000,6001,500,502,503,504");
 
-    // Обновленные ключевые слова для блокировки рекламных запросов
+    // Обновленный и объединенный список ключевых слов для блокировки URL
     const AD_URL_KEYWORDS_BLOCK = [
-        'nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js',
-        'assets.adobedtm.com', 'adservice.google.com', 'doubleclick.net',
-        'googlesyndication.com', 'pubads.g.doubleclick.net', 'adnxs.com',
-        'amazon-adsystem.com', 'taboola.com', 'outbrain.com', 'taboolacdn.com',
-        'yieldmo.com', 'criteo.com', 'smartadserver.com', 'rubiconproject.com',
-        'appier.net', 'inmobi.com', 'adform.net', 'taboola.com', 'taboolaads.com',
-        'ad.twitch.tv', 'ads.twitch.tv', 'beacon.twist.tv', 'analytics.twitch.tv',
-        'sentry.io', 'ext-twitch.tv', 'supervisor.ext-twitch.tv',
-        'ad.twitch.tv', 'ads.twitch.tv', 'beacon.twist.tv', 'analytics.twitch.tv',
-        'sentry.io', 'ext-twitch.tv', 'supervisor.ext-twitch.tv'
+        'nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com',
+        'adservice.google.com', 'doubleclick.net', 'googlesyndication.com',
+        'pubads.g.doubleclick.net', 'adnxs.com', 'amazon-adsystem.com', 'taboola.com',
+        'outbrain.com', 'taboolacdn.com', 'yieldmo.com', 'criteo.com', 'smartadserver.com',
+        'rubiconproject.com', 'appier.net', 'inmobi.com', 'adform.net', 'ads.ttvnw.net',
+        'adserver.ttvnw.net', 'beacon.ads.ttvnw.net', 'mraid.googleapis.com',
+        'securepubads.g.doubleclick.net', 'googleads.g.doubleclick.net', 'twitchads.net',
+        'ad.twitch.tv', 'analytics.twitch.tv', 'beacon.twist.tv', 'sentry.io',
+        'ext-twitch.tv', 'supervisor.ext-twitch.tv'
     ];
 
-    // Обновленные CSS-селекторы для рекламных элементов
+    // Обновленный и объединенный список CSS-селекторов для скрытия/удаления
     const AD_OVERLAY_SELECTORS_CSS = [
         'div[data-a-target="request-ad-block-disable-modal"]', '.video-player__ad-info-container',
         'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]',
@@ -81,18 +87,20 @@
         'div[class*="-ad-"]', 'div[data-a-target="sad-overlay-container"]',
         'div[data-test-selector="sad-overlay-v-one-container"]', 'div[data-test-selector*="sad-overlay"]',
         'div[data-a-target*="ad-block-nag"]', 'div[data-test-selector*="ad-block-nag"]',
-        'div[data-a-target*="disable-adblocker-modal"]',
-        'div[data-test-id="ad-break"]', '.ad-break-ui-container', '.ad-break-overlay',
-        'div[data-a-target="ad-break-countdown"]', 'div[data-test-id="ad-break-countdown"]',
-        'div[data-a-target="ad-break-skip-button"]', 'div[data-test-id="ad-break-skip-button"]',
-         '[data-a-target="ad-banner"]', '[data-test-id="ad-overlay"]', '.ad-break-ui-container',
-        '.promoted-content-card', '[data-ad-placeholder="true"]'
+        'div[data-a-target*="disable-adblocker-modal"]', 'div[data-test-id="ad-break"]',
+        '.ad-break-ui-container', '.ad-break-overlay', 'div[data-a-target="ad-break-countdown"]',
+        'div[data-test-id="ad-break-countdown"]', 'div[data-a-target="ad-break-skip-button"]',
+        'div[data-test-id="ad-break-skip-button"]', '[data-a-target="ad-banner"]',
+        '[data-test-id="ad-overlay"]', '.promoted-content-card', '[data-ad-placeholder="true"]',
+        '.video-ad-display__container', '[data-ad-overlay]'
     ];
-    // Обновленные параметры для обработки M3U8
+    
+    // Обновленные ключевые слова для тегов в M3U8
     const AD_SIGNIFIER_DATERANGE_ATTR = "Twitch-Ad-Signal";
-    const AD_DATERANGE_ATTRIBUTE_KEYWORDS = [ "AD-ID=", "CUE-OUT", "SCTE35", "Twitch-Ad-Signal", "Twitch-Prefetch", "Twitch-Ad-Hide",
-                                             "Twitch-Ads", "Twitch-Ad-Signal", "CUE-OUT", "SCTE35", "Twitch-Prefetch", "Twitch-Ad-Hide",
-                                             "Twitch-Ads", "X-CUSTOM", "X-AD", "X-TWITCH-AD" ];
+    const AD_DATERANGE_ATTRIBUTE_KEYWORDS = [
+        "AD-ID=", "CUE-OUT", "SCTE35", "Twitch-Ad-Signal", "Twitch-Prefetch",
+        "Twitch-Ad-Hide", "Twitch-Ads", "X-CUSTOM", "X-AD", "X-TWITCH-AD"
+    ];
 
     const COOKIE_BANNER_SELECTOR = '.consent-banner';
 
@@ -102,8 +110,7 @@
         'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]',
         'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay',
         '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]',
-        '.promoted-content-card', 'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]',
-        'div[data-ad-boundary]', 'div[data-a-target="ad-break-countdown"]', 'div[data-test-id="ad-break-skip-button"]'
+        'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]'
     ];
     if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push(COOKIE_BANNER_SELECTOR);
 
