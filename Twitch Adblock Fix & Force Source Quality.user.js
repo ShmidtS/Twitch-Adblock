@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      26.0.5
+// @version      26.0.6
 // @description  Комплексная блокировка рекламы Twitch.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -28,7 +28,7 @@
     'use strict';
 
     // --- НАСТРОЙКИ СКРИПТА (можно изменить через меню Tampermonkey) ---
-    const SCRIPT_VERSION = '26.0.5';
+    const SCRIPT_VERSION = '26.0.6';
     const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
     const ENABLE_MIDROLL_RECOVERY = GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true);
     const FORCE_MAX_QUALITY_IN_BACKGROUND = GM_getValue('TTV_AdBlock_ForceMaxQuality', true);
@@ -47,9 +47,9 @@
     const LOG_NETWORK_BLOCKING_DEBUG = GM_getValue('TTV_AdBlock_Debug_NetBlock', false);
     const LOG_TOKEN_SWAP_DEBUG = GM_getValue('TTV_AdBlock_Debug_TokenSwap', false);
 
-    // --- ПРОДВИНУТЫЕ НАСТРОЙКИ ---
-    const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 15000);
-    const RELOAD_BUFFERING_THRESHOLD_MS = GM_getValue('TTV_AdBlock_BufferingThresholdMs', 15000);
+    // --- ПРОДВИНУТЫЕ НАСТРОЙКИ  ---
+    const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 20000);
+    const RELOAD_BUFFERING_THRESHOLD_MS = GM_getValue('TTV_AdBlock_BufferingThresholdMs', 45000);
     const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 15000);
     const MAX_RELOADS_PER_SESSION = GM_getValue('TTV_AdBlock_MaxReloadsPerSession', 5);
     const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "0,2,3,4,9,10,403,1000,2000,3000,4000,5000,6001,500,502,503,504");
@@ -152,7 +152,6 @@
     const originalLocalStorageSetItem = unsafeWindow.localStorage.setItem;
     const originalLocalStorageGetItem = unsafeWindow.localStorage.getItem;
     let videoElement = null;
-    const attachedListeners = new WeakMap();
     let lastReloadTimestamp = 0;
     let reloadCount = 0;
     let cachedQualityValue = null;
@@ -324,7 +323,6 @@
 
         return { cleanedText: cleanedText, adsFound: adsFoundOverall, linesRemoved: linesRemovedCount, wasPotentiallyAd: potentialAdContent, errorDuringClean: false };
     }
-
     function modifyGqlResponse(responseText, url) {
         if (!MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || responseText.length === 0) return responseText;
         try {
@@ -697,80 +695,65 @@
         logCoreDebug('HookInstall', 'Network hooks installed.');
     }
 
-    function removeDOMAdElements(nodes) {
-        if (!ATTEMPT_DOM_AD_REMOVAL || !nodes || nodes.length === 0) return;
-
-        for (const node of nodes) {
-            if (node.nodeType === Node.ELEMENT_NODE) {
-                if (node.matches(AD_DOM_REMOVAL_SELECTOR_STRING)) {
-                    logModuleTrace(LOG_NETWORK_BLOCKING_DEBUG, 'DOMAdRemoval', 'Removing matched ad node:', node);
-                    node.remove();
-                }
-                const adElements = node.querySelectorAll(AD_DOM_REMOVAL_SELECTOR_STRING);
-                if (adElements.length > 0) {
-                    adElements.forEach(el => {
-                        logModuleTrace(LOG_NETWORK_BLOCKING_DEBUG, 'DOMAdRemoval', 'Removing matched ad child node:', el);
-                        el.remove();
-                    });
-                }
+    function removeDOMAdElements() {
+        if (!ATTEMPT_DOM_AD_REMOVAL) return;
+        if (!adRemovalObserver) {
+            adRemovalObserver = new MutationObserver(() => removeDOMAdElements());
+            const observeTarget = document.body || document.documentElement;
+            if (observeTarget) {
+                adRemovalObserver.observe(observeTarget, { childList: true, subtree: true });
+                logCoreDebug('DOMAdRemoval', 'MutationObserver for DOM ad removal started.');
+            } else {
+                document.addEventListener('DOMContentLoaded', () => {
+                    const target = document.body || document.documentElement;
+                    if(target) adRemovalObserver.observe(target, { childList: true, subtree: true });
+                    logCoreDebug('DOMAdRemoval', 'MutationObserver for DOM ad removal started (DOMContentLoaded).');
+                }, { once: true });
             }
         }
-    }
-
-    function setupDOMAdRemovalObserver() {
-        if (!ATTEMPT_DOM_AD_REMOVAL || adRemovalObserver) return;
-
-        adRemovalObserver = new MutationObserver((mutations) => {
-            for (const mutation of mutations) {
-                if (mutation.addedNodes.length > 0) {
-                    removeDOMAdElements(mutation.addedNodes);
-                }
+        document.querySelectorAll(AD_DOM_REMOVAL_SELECTOR_STRING).forEach(el => {
+            if (el.parentNode) {
+                logModuleTrace(LOG_NETWORK_BLOCKING_DEBUG, 'DOMAdRemoval', 'Removing matched ad node:', el);
+                el.remove();
             }
         });
-
-        const observeTarget = document.documentElement;
-        adRemovalObserver.observe(observeTarget, { childList: true, subtree: true });
-        logCoreDebug('DOMAdRemoval', 'Optimized MutationObserver for DOM ad removal started.');
-        removeDOMAdElements([document.body]);
     }
 
-    function isValidPlayerVideo(videoEl) {
-        if (!videoEl) return false;
-        if (videoEl.src && videoEl.src.startsWith('blob:')) {
-            return true;
-        }
-        if (videoEl.hasAttribute('poster') || videoEl.loop) {
-            return false;
-        }
-        return PLAYER_CONTAINER_SELECTORS.some(selector => videoEl.closest(selector));
-    }
 
     function setupVideoPlayerMonitor() {
         if (videoPlayerMutationObserver) return;
 
-        const initialVideoEl = document.querySelector('video');
-        if (initialVideoEl && isValidPlayerVideo(initialVideoEl)) {
-            videoElement = initialVideoEl;
-            logCoreDebug('PlayerMonitor', 'Found initial valid video element.');
-            attachVideoEventListeners(videoElement);
+        PLAYER_CONTAINER_SELECTORS.forEach(selector => {
+            if (videoElement) return;
+            const container = document.querySelector(selector);
+            if (container) {
+                const vid = container.querySelector('video');
+                if (vid) {
+                    videoElement = vid;
+                    logCoreDebug('PlayerMonitor', 'Found initial video element in container:', selector);
+                    attachVideoEventListeners(videoElement);
+                }
+            }
+        });
+        if (!videoElement) {
+            videoElement = document.querySelector('video');
+            if(videoElement) {
+                logCoreDebug('PlayerMonitor', 'Found initial video element via direct query.');
+                attachVideoEventListeners(videoElement);
+            }
         }
 
         videoPlayerMutationObserver = new MutationObserver((mutationsList) => {
-            if (videoElement && !document.body.contains(videoElement)) {
-                logCoreDebug('PlayerMonitor', 'Current video element was removed from DOM (channel switched?). Resetting.');
-                detachVideoEventListeners(videoElement);
-                videoElement = null;
-            }
-
-            if (videoElement) return;
-
             for (const mutation of mutationsList) {
-                if (mutation.addedNodes.length > 0) {
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                     for (const node of mutation.addedNodes) {
                         if (node.nodeType === Node.ELEMENT_NODE) {
-                            const newVideoElement = node.matches('video') ? node : node.querySelector('video');
-                            if (newVideoElement && isValidPlayerVideo(newVideoElement)) {
+                            const newVideoElement = node.querySelector('video') || (node.tagName === 'VIDEO' ? node : null);
+                            if (newVideoElement && newVideoElement !== videoElement) {
                                 logCoreDebug('PlayerMonitor', 'Found new valid video element.');
+                                if (videoElement) {
+                                    logCoreDebug('PlayerMonitor', 'Removing listeners from old video element.');
+                                }
                                 videoElement = newVideoElement;
                                 attachVideoEventListeners(videoElement);
                                 return;
@@ -782,32 +765,28 @@
         });
 
         const observeTarget = document.body || document.documentElement;
-        videoPlayerMutationObserver.observe(observeTarget, { childList: true, subtree: true });
-        logCoreDebug('PlayerMonitor', 'Video player mutation observer started.');
-    }
-
-    function detachVideoEventListeners(vidElement) {
-        if (!vidElement || !attachedListeners.has(vidElement)) return;
-        const listeners = attachedListeners.get(vidElement);
-        for (const eventName in listeners) {
-            vidElement.removeEventListener(eventName, listeners[eventName]);
+        if (observeTarget) {
+            videoPlayerMutationObserver.observe(observeTarget, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-player-error'] });
+            logCoreDebug('PlayerMonitor', 'Video player mutation observer started.');
+        } else {
+            document.addEventListener('DOMContentLoaded', () => {
+                const target = document.body || document.documentElement;
+                if (target) videoPlayerMutationObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-player-error'] });
+                logCoreDebug('PlayerMonitor', 'Video player mutation observer started (DOMContentLoaded).');
+            }, { once: true });
         }
-        attachedListeners.delete(vidElement);
-        logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMonitor', 'Detached event listeners from video element:', vidElement);
     }
 
     function attachVideoEventListeners(vidElement) {
-        if (!vidElement || attachedListeners.has(vidElement)) return;
+        if (!vidElement || vidElement._adblock_listeners_attached) return;
 
         logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMonitor', 'Attaching event listeners to video element:', vidElement);
 
-        const listeners = {};
-
-        listeners.play = () => {
+        const attemptPlay = () => {
             if (vidElement && vidElement.paused) {
                 logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'Autoplay', 'Proactively trying to play video element.');
                 const playPromise = vidElement.play();
-                if (playPromise !== undefined) {
+                if(playPromise !== undefined) {
                     playPromise.catch(e => {
                         if (e.name !== 'NotAllowedError') {
                             logWarn('Autoplay', `Failed to autoplay video: ${e.name} - ${e.message}. User interaction might be required.`);
@@ -817,7 +796,10 @@
             }
         };
 
-        listeners.error = (e) => {
+        setTimeout(attemptPlay, 1500);
+        vidElement.addEventListener('canplay', attemptPlay, { once: true, passive: true });
+
+        vidElement.addEventListener('error', (e) => {
             const error = e?.target?.error;
             const errorCode = error?.code;
             const errorMessage = error?.message;
@@ -826,45 +808,41 @@
                 logError('PlayerMonitor', `Player error code ${errorCode} is in critical list. Triggering reload.`);
                 triggerReload(`Player error code ${errorCode}`);
             }
-        };
+        }, { passive: true });
 
         let lastTimeUpdate = Date.now();
-        listeners.timeupdate = () => { lastTimeUpdate = Date.now(); };
+        vidElement.addEventListener('timeupdate', () => {
+            lastTimeUpdate = Date.now();
+        }, { passive: true });
 
-        listeners.waiting = () => {
+        vidElement.addEventListener('waiting', () => {
             logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMonitor', 'Video event: waiting (buffering)');
             lastTimeUpdate = Date.now();
             if (RELOAD_BUFFERING_THRESHOLD_MS > 0) {
                 setTimeout(() => {
-                    if (!vidElement || vidElement.paused || vidElement.seeking || vidElement.readyState >= 3) return;
+                    if (vidElement.paused || vidElement.seeking || vidElement.readyState >= 3) return;
                     if (Date.now() - lastTimeUpdate > RELOAD_BUFFERING_THRESHOLD_MS) {
                         logWarn('PlayerMonitor', `Video appears stuck buffering for over ${RELOAD_BUFFERING_THRESHOLD_MS / 1000}s. Triggering reload.`);
                         triggerReload('Video buffering timeout');
                     }
                 }, RELOAD_BUFFERING_THRESHOLD_MS + 1000);
             }
-        };
+        }, { passive: true });
 
-        listeners.stalled = () => {
+        vidElement.addEventListener('stalled', () => {
             logWarn('PlayerMonitor', 'Video event: stalled (browser unable to fetch data).');
             if (RELOAD_STALL_THRESHOLD_MS > 0) {
                 setTimeout(() => {
-                    if (!vidElement || vidElement.paused || vidElement.seeking || vidElement.readyState >= 3) return;
+                    if (vidElement.paused || vidElement.seeking || vidElement.readyState >= 3) return;
                     if (Date.now() - lastTimeUpdate > RELOAD_STALL_THRESHOLD_MS) {
                         logWarn('PlayerMonitor', `Video appears stalled for over ${RELOAD_STALL_THRESHOLD_MS / 1000}s. Triggering reload.`);
                         triggerReload('Video stall timeout');
                     }
                 }, RELOAD_STALL_THRESHOLD_MS + 1000);
             }
-        };
+        }, { passive: true });
 
-        vidElement.addEventListener('canplay', listeners.play, { once: true, passive: true });
-        vidElement.addEventListener('error', listeners.error, { passive: true });
-        vidElement.addEventListener('timeupdate', listeners.timeupdate, { passive: true });
-        vidElement.addEventListener('waiting', listeners.waiting, { passive: true });
-        vidElement.addEventListener('stalled', listeners.stalled, { passive: true });
-
-        attachedListeners.set(vidElement, listeners);
+        vidElement._adblock_listeners_attached = true;
     }
 
     function triggerReload(reason) {
@@ -930,7 +908,23 @@
         if (FORCE_MAX_QUALITY_IN_BACKGROUND) forceMaxQuality();
         hookQualitySettings();
         installHooks();
-        setupDOMAdRemovalObserver();
+        if (ATTEMPT_DOM_AD_REMOVAL) {
+            const observeTarget = document.documentElement || document.body;
+            if (observeTarget) {
+                removeDOMAdElements();
+                adRemovalObserver = new MutationObserver(() => removeDOMAdElements());
+                adRemovalObserver.observe(observeTarget, { childList: true, subtree: true });
+                logCoreDebug('DOMAdRemoval', 'Optimized MutationObserver for DOM ad removal started.');
+            } else {
+                document.addEventListener('DOMContentLoaded', () => {
+                    removeDOMAdElements();
+                    const target = document.documentElement || document.body;
+                    adRemovalObserver = new MutationObserver(() => removeDOMAdElements());
+                    adRemovalObserver.observe(target, { childList: true, subtree: true });
+                    logCoreDebug('DOMAdRemoval', 'Observer started on DOMContentLoaded.');
+                }, { once: true });
+            }
+        }
         startErrorScreenObserver();
         setupVideoPlayerMonitor();
         logCoreDebug('Initialize', 'Script initialized successfully.');
