@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      26.0.4
+// @version      26.0.5
 // @description  Комплексная блокировка рекламы Twitch с проактивной заменой токенов, восстановлением после мид-роллов, принудительным качеством, очисткой M3U8 и другими оптимизациями.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -28,7 +28,7 @@
     'use strict';
 
     // --- НАСТРОЙКИ СКРИПТА (можно изменить через меню Tampermonkey) ---
-    const SCRIPT_VERSION = '26.0.4';
+    const SCRIPT_VERSION = '26.0.5';
     const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
     const ENABLE_MIDROLL_RECOVERY = GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true);
     const FORCE_MAX_QUALITY_IN_BACKGROUND = GM_getValue('TTV_AdBlock_ForceMaxQuality', true);
@@ -39,7 +39,7 @@
     const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
 
     // --- НАСТРОЙКИ ОТЛАДКИ (включите для диагностики проблем) ---
-    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true);
+    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', false);
     const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', false);
     const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', false);
     const LOG_M3U8_CLEANING_DEBUG = GM_getValue('TTV_AdBlock_Debug_M3U8', false);
@@ -62,7 +62,6 @@
     const GQL_URL = 'https://gql.twitch.tv/gql';
     const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
 
-    // Обновленный и объединенный список ключевых слов для блокировки URL
     const AD_URL_KEYWORDS_BLOCK = [
         'nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com',
         'adservice.google.com', 'doubleclick.net', 'googlesyndication.com',
@@ -71,11 +70,9 @@
         'rubiconproject.com', 'appier.net', 'inmobi.com', 'adform.net', 'ads.ttvnw.net',
         'adserver.ttvnw.net', 'beacon.ads.ttvnw.net', 'mraid.googleapis.com',
         'securepubads.g.doubleclick.net', 'googleads.g.doubleclick.net', 'twitchads.net',
-        'ad.twitch.tv', 'analytics.twitch.tv', 'beacon.twist.tv', 'sentry.io',
-        'ext-twitch.tv', 'supervisor.ext-twitch.tv'
+        'ad.twitch.tv', 'analytics.twitch.tv', 'beacon.twist.tv', 'sentry.io'
     ];
 
-    // Обновленный и объединенный список CSS-селекторов для скрытия/удаления
     const AD_OVERLAY_SELECTORS_CSS = [
         'div[data-a-target="request-ad-block-disable-modal"]', '.video-player__ad-info-container',
         'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]',
@@ -94,12 +91,11 @@
         '[data-test-id="ad-overlay"]', '.promoted-content-card', '[data-ad-placeholder="true"]',
         '.video-ad-display__container', '[data-ad-overlay]'
     ];
-    
-    // Обновленные ключевые слова для тегов в M3U8
+
     const AD_SIGNIFIER_DATERANGE_ATTR = "Twitch-Ad-Signal";
     const AD_DATERANGE_ATTRIBUTE_KEYWORDS = [
         "AD-ID=", "CUE-OUT", "SCTE35", "Twitch-Ad-Signal", "Twitch-Prefetch",
-        "Twitch-Ad-Hide", "Twitch-Ads", "X-CUSTOM", "X-AD", "X-TWITCH-AD"
+        "Twitch-Ad-Hide", "Twitch-Ads", "X-CUSTOM", "X-AD", "X-TWITCH-AD", "EXT-X-TWITCH-INFO"
     ];
 
     const COOKIE_BANNER_SELECTOR = '.consent-banner';
@@ -138,7 +134,8 @@
         'MultiMonthDiscount', 'FreeSubBenefit', 'SubPrices', 'SubscriptionProductBenefitMessages',
         'UserCurrentSubscriptionsContext', 'VideoPreviewCard_VideoMarkers', 'UpdateVideoMutation',
         'DeleteVideos', 'HostModeTargetDetails', 'StreamInformation', 'VideoPlayer_StreamAnalytics',
-        'VideoPlayer_VideoSourceManager', 'VideoPlayerStreamMetadata', 'VideoPlayerStatusOverlayChannel'
+        'VideoPlayer_VideoSourceManager', 'VideoPlayerStreamMetadata', 'VideoPlayerStatusOverlayChannel',
+        'VideoPlayer_PlayerHeartbeat'
     ]);
     const PLAYER_CONTAINER_SELECTORS = ['div[data-a-target="video-player"]', '.video-player', 'div[data-a-player-state]', 'main', '.persistent-player'];
 
@@ -239,9 +236,7 @@
         const upperM3U8Text = m3u8Text.toUpperCase();
         let potentialAdContent = false;
 
-        if (upperM3U8Text.includes("#EXT-X-DATERANGE:") && (upperM3U8Text.includes(AD_SIGNIFIER_DATERANGE_ATTR.toUpperCase()) || AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperM3U8Text.includes(kw)))) {
-            potentialAdContent = true;
-        } else if (upperM3U8Text.includes("#EXT-X-ASSET:") || upperM3U8Text.includes("#EXT-X-CUE-OUT") || upperM3U8Text.includes("#EXT-X-TWITCH-AD-SIGNAL") || upperM3U8Text.includes("#EXT-X-SCTE35:") || upperM3U8Text.includes("#EXT-X-TWITCH-PREFETCH:") || upperM3U8Text.includes("#EXT-X-TWITCH-AD-HIDE")) {
+        if (AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperM3U8Text.includes(kw))) {
             potentialAdContent = true;
         }
 
@@ -264,21 +259,21 @@
             let removeThisLine = false;
             let currentLineIsAdMarker = false;
 
-            if (upperTrimmedLine.startsWith('#EXT-X-DATERANGE')) {
-                if (upperTrimmedLine.includes(AD_SIGNIFIER_DATERANGE_ATTR.toUpperCase()) ||
-                    AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperTrimmedLine.includes(kw))) {
+            if (upperTrimmedLine.startsWith('#EXT-X-DATERANGE') ||
+                upperTrimmedLine.startsWith('#EXT-X-TWITCH-INFO') ||
+                upperTrimmedLine.startsWith('#EXT-X-ASSET') ||
+                upperTrimmedLine.startsWith('#EXT-X-CUE-OUT') ||
+                upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-HIDE') ||
+                upperTrimmedLine.startsWith('#EXT-X-SCTE35')
+               ) {
+                if (AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperTrimmedLine.includes(kw))) {
                     removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
                 }
-            } else if (upperTrimmedLine.startsWith('#EXT-X-ASSET')) {
-                removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
-            } else if (upperTrimmedLine.startsWith('#EXT-X-CUE-OUT')) {
-                removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
-            } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-HIDE')) {
-                removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
-            } else if (upperTrimmedLine.startsWith('#EXT-X-SCTE35')) {
-                removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
             } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-PREFETCH')) {
                 removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true;
+                if (i + 1 < lines.length && !lines[i+1].trim().startsWith('#')) {
+                    lines[i+1] = '';
+                }
             } else if (isAdSection) {
                 if (upperTrimmedLine.startsWith('#EXT-X-CUE-IN')) {
                     removeThisLine = true; currentLineIsAdMarker = true; isAdSection = false; discontinuityShouldBeRemoved = false;
@@ -296,7 +291,7 @@
             if (removeThisLine) {
                 linesRemovedCount++;
                 if (currentLineIsAdMarker) adsFoundOverall = true;
-            } else {
+            } else if (trimmedLine !== '') {
                 cleanLines.push(line);
             }
         }
@@ -325,83 +320,103 @@
     }
     function modifyGqlResponse(responseText, url) {
         if (!MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || responseText.length === 0) return responseText;
+
+        let data;
         try {
-            let data = JSON.parse(responseText);
-            let modifiedOverall = false;
-            const opDataArray = Array.isArray(data) ? data : [data];
+            data = JSON.parse(responseText);
+        } catch (e) {
+            logError('GQLModify', `Failed to parse GQL JSON response from ${url.substring(0, 100)}...`, e);
+            return responseText;
+        }
 
-            for (const opData of opDataArray) {
-                if (!opData || typeof opData !== 'object') continue;
+        let modifiedOverall = false;
+        const opDataArray = Array.isArray(data) ? data : [data];
 
-                const operationName = opData.extensions?.operationName || opData.operationName || 'UnknownGQLOp';
-                let currentOpModified = false;
+        for (const opData of opDataArray) {
+            if (!opData || typeof opData !== 'object' || !opData.data) continue;
 
-                if (GQL_OPERATIONS_TO_SKIP_MODIFICATION.has(operationName)) {
-                    logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Skipping GQL modification for whitelisted operation: ${operationName}`);
-                    continue;
-                }
+            const operationName = opData.extensions?.operationName || 'UnknownGQLOp';
 
-                if (operationName === 'AdFreeQuery') {
-                    if (opData.data?.viewerAdFreeConfig?.isAdFree === false) {
-                        opData.data.viewerAdFreeConfig.isAdFree = true;
-                        currentOpModified = true;
-                        logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Set AdFreeQuery.isAdFree to true for ${operationName}`);
-                    }
-                } else if (operationName === 'ClientSideAd') {
-                    let modified = false;
-                    if (opData.data) {
-                        if (opData.data.ads) { opData.data.ads = []; modified = true; }
-                        if (opData.data.clientAd) { opData.data.clientAd = null; modified = true; }
-                        if (opData.data.companionSlots) { opData.data.companionSlots = []; modified = true; }
-                        if (opData.data.playerAdParams) { opData.data.playerAdParams = null; modified = true; }
-                        if (modified) {
-                            currentOpModified = true;
-                            logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Cleared ad fields in ClientSideAd for ${operationName}`);
-                        }
-                    }
-                } else if (operationName === "Interstitials") {
-                    if (opData.data?.stream?.interstitials && Array.isArray(opData.data.stream.interstitials) && opData.data.stream.interstitials.length > 0) {
-                        opData.data.stream.interstitials = [];
-                        currentOpModified = true;
-                        logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Cleared stream.interstitials for ${operationName}`);
-                    }
-                }
+            if (GQL_OPERATIONS_TO_SKIP_MODIFICATION.has(operationName)) {
+                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Skipping GQL modification for whitelisted operation: ${operationName}`);
+                continue;
+            }
 
-                if (opData.data?.stream?.playbackAccessToken?.value && typeof opData.data.stream.playbackAccessToken.value === 'string') {
+            let currentOpModified = false;
+
+            const processPlaybackAccessToken = (tokenHolder) => {
+                if (tokenHolder?.value && typeof tokenHolder.value === 'string') {
                     try {
-                        const tokenValueStr = opData.data.stream.playbackAccessToken.value;
-                        const tokenValueJson = JSON.parse(tokenValueStr);
+                        const tokenValueJson = JSON.parse(tokenHolder.value);
                         let tokenModified = false;
 
                         if (tokenValueJson.hide_ads === false) { tokenValueJson.hide_ads = true; tokenModified = true; }
                         if (tokenValueJson.show_ads === true) { tokenValueJson.show_ads = false; tokenModified = true; }
-                        if (tokenValueJson.hasOwnProperty('ad_indicator')) { delete tokenValueJson.ad_indicator; tokenModified = true; }
-                        if (tokenValueJson.hasOwnProperty('ads_on_stream')) { tokenValueJson.ads_on_stream = 0; tokenModified = true; }
-                        if (tokenValueJson.hasOwnProperty('roll_type')) { delete tokenValueJson.roll_type; tokenModified = true; }
-                        if (tokenValueJson.hasOwnProperty('is_ad_enabled_on_stream')) { tokenValueJson.is_ad_enabled_on_stream = false; tokenModified = true; }
+                        if (tokenValueJson.ad_block_gate_overlay_enabled === true) { tokenValueJson.ad_block_gate_overlay_enabled = false; tokenModified = true; }
+                        if (tokenValueJson.is_ad_enabled_on_stream === true) { tokenValueJson.is_ad_enabled_on_stream = false; tokenModified = true; }
+                        if (tokenValueJson.is_reward_ad_on_cooldown === false) { tokenValueJson.is_reward_ad_on_cooldown = true; tokenModified = true; }
+
 
                         if (tokenModified) {
-                            opData.data.stream.playbackAccessToken.value = JSON.stringify(tokenValueJson);
-                            currentOpModified = true;
-                            logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Modified PlaybackAccessToken JSON value for ${operationName}`);
+                            tokenHolder.value = JSON.stringify(tokenValueJson);
+                            return true;
                         }
                     } catch (e) {
                         logWarn('GQLModify', `Failed to parse/modify PlaybackAccessToken JSON value for ${operationName}:`, e);
                     }
                 }
+                return false;
+            };
 
-                if (currentOpModified) modifiedOverall = true;
+            if (opData.data.streamPlaybackAccessToken) {
+                if (processPlaybackAccessToken(opData.data.streamPlaybackAccessToken)) {
+                    currentOpModified = true;
+                    logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Modified streamPlaybackAccessToken for ${operationName}`);
+                }
             }
 
-            if (modifiedOverall) {
-                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Modified GQL response for URL: ${url.substring(0,100)}...`);
-                return JSON.stringify(Array.isArray(data) ? opDataArray : opDataArray[0]);
+            if (opData.data.videoPlaybackAccessToken) {
+                if (processPlaybackAccessToken(opData.data.videoPlaybackAccessToken)) {
+                    currentOpModified = true;
+                    logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Modified videoPlaybackAccessToken for ${operationName}`);
+                }
             }
-        } catch (e) {
-            logError('GQLModify', `Error modifying GQL response for ${url.substring(0,100)}...:`, e, responseText.substring(0, 200) + "...");
+
+            if (opData.data.adSlots) {
+                opData.data.adSlots = [];
+                currentOpModified = true;
+                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Cleared adSlots for ${operationName}`);
+            }
+
+            if (opData.data.viewer?.adBlock?.isAdBlockActive === true) {
+                opData.data.viewer.adBlock.isAdBlockActive = false;
+                currentOpModified = true;
+                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Set viewer.adBlock.isAdBlockActive to false for ${operationName}`);
+            }
+
+            if (opData.data.user?.broadcastSettings?.isAdFree === false) {
+                opData.data.user.broadcastSettings.isAdFree = true;
+                currentOpModified = true;
+                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Set user.broadcastSettings.isAdFree to true for ${operationName}`);
+            }
+
+            if (currentOpModified) modifiedOverall = true;
         }
+
+        if (modifiedOverall) {
+            try {
+                const finalJsonString = JSON.stringify(Array.isArray(data) ? opDataArray : opDataArray[0]);
+                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Successfully modified GQL response for URL: ${url.substring(0, 100)}...`);
+                return finalJsonString;
+            } catch (e) {
+                logError('GQLModify', `Failed to re-stringify modified GQL data for ${url.substring(0, 100)}...`, e);
+                return responseText;
+            }
+        }
+
         return responseText;
     }
+
 
     async function fetchNewPlaybackAccessToken(channelName, deviceId) {
         logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'TokenSwap', `(1/3) Requesting ANONYMOUS PlaybackAccessToken for channel: ${channelName}, DeviceID: ${deviceId || 'N/A'}`);
