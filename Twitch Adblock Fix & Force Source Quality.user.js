@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      26.0.5
+// @version      26.0.9
 // @description  Комплексная блокировка рекламы Twitch с проактивной заменой токенов, восстановлением после мид-роллов, принудительным качеством, очисткой M3U8 и другими оптимизациями.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -27,8 +27,8 @@
 (function() {
     'use strict';
 
-    // --- НАСТРОЙКИ СКРИПТА (можно изменить через меню Tampermonkey) ---
-    const SCRIPT_VERSION = '26.0.5';
+    // --- НАСТРОЙКИ СКРИПТА ---
+    const SCRIPT_VERSION = '26.0.9';
     const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
     const ENABLE_MIDROLL_RECOVERY = GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true);
     const FORCE_MAX_QUALITY_IN_BACKGROUND = GM_getValue('TTV_AdBlock_ForceMaxQuality', true);
@@ -38,14 +38,14 @@
     const ATTEMPT_DOM_AD_REMOVAL = GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true);
     const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
 
-    // --- НАСТРОЙКИ ОТЛАДКИ (включите для диагностики проблем) ---
-    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', false);
-    const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', false);
-    const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', false);
-    const LOG_M3U8_CLEANING_DEBUG = GM_getValue('TTV_AdBlock_Debug_M3U8', false);
-    const LOG_GQL_MODIFY_DEBUG = GM_getValue('TTV_AdBlock_Debug_GQL', false);
-    const LOG_NETWORK_BLOCKING_DEBUG = GM_getValue('TTV_AdBlock_Debug_NetBlock', false);
-    const LOG_TOKEN_SWAP_DEBUG = GM_getValue('TTV_AdBlock_Debug_TokenSwap', false);
+    // --- НАСТРОЙКИ ОТЛАДКИ ---
+    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true);
+    const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', true);
+    const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', true);
+    const LOG_M3U8_CLEANING_DEBUG = GM_getValue('TTV_AdBlock_Debug_M3U8', true);
+    const LOG_GQL_MODIFY_DEBUG = GM_getValue('TTV_AdBlock_Debug_GQL', true);
+    const LOG_NETWORK_BLOCKING_DEBUG = GM_getValue('TTV_AdBlock_Debug_NetBlock', true);
+    const LOG_TOKEN_SWAP_DEBUG = GM_getValue('TTV_AdBlock_Debug_TokenSwap', true);
 
     // --- ПРОДВИНУТЫЕ НАСТРОЙКИ ---
     const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 20000);
@@ -66,11 +66,13 @@
         'nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com',
         'adservice.google.com', 'doubleclick.net', 'googlesyndication.com',
         'pubads.g.doubleclick.net', 'adnxs.com', 'amazon-adsystem.com', 'taboola.com',
-        'outbrain.com', 'taboolacdn.com', 'yieldmo.com', 'criteo.com', 'smartadserver.com',
+        'outbrain.com', 'taboolacdn.com', 'yieldmo.com', 'criteorumble.com',
         'rubiconproject.com', 'appier.net', 'inmobi.com', 'adform.net', 'ads.ttvnw.net',
         'adserver.ttvnw.net', 'beacon.ads.ttvnw.net', 'mraid.googleapis.com',
         'securepubads.g.doubleclick.net', 'googleads.g.doubleclick.net', 'twitchads.net',
-        'ad.twitch.tv', 'analytics.twitch.tv', 'beacon.twist.tv', 'sentry.io'
+        'ad.twitch.tv', 'analytics.twitch.tv', 'beacon.twist.tv', 'sentry.io',
+        'sprig.com', 'scorecardresearch.com', 'cast_sender.js', 'v6s.js',
+        'cloudfront.net', 'gstatic.com'
     ];
 
     const AD_OVERLAY_SELECTORS_CSS = [
@@ -89,7 +91,8 @@
         'div[data-test-id="ad-break-countdown"]', 'div[data-a-target="ad-break-skip-button"]',
         'div[data-test-id="ad-break-skip-button"]', '[data-a-target="ad-banner"]',
         '[data-test-id="ad-overlay"]', '.promoted-content-card', '[data-ad-placeholder="true"]',
-        '.video-ad-display__container', '[data-ad-overlay]'
+        '.video-ad-display__container', '[role="advertisement"]', '[data-ad-overlay]',
+        'div[class*="ad-overlay"]', 'div[class*="ad-container"]'
     ];
 
     const AD_SIGNIFIER_DATERANGE_ATTR = "Twitch-Ad-Signal";
@@ -105,21 +108,27 @@
         'div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]',
         'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]',
         'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay',
-        '.video-ad-display', 'div[data-ad-placeholder="true"]', '[data-a-target="video-ad-countdown-container"]',
-        'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]'
+        '.video-ad-display', 'div[data-ad-placeholder="true"]', 'div[data-a-target="video-ad-countdown-container"]',
+        'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]',
+        'div[class*="ad-module"]', 'div[data-test-selector="ad-module"]'
     ];
     if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push(COOKIE_BANNER_SELECTOR);
+
+    const PLAYER_CONTAINER_SELECTORS = [
+        '.video-player', '[data-a-target="video-player"]', '.player-container',
+        '[data-test-selector="video-player__video-container"]', 'div[class*="player-core"]'
+    ];
 
     const GQL_OPERATIONS_TO_SKIP_MODIFICATION = new Set([
         'PlaybackAccessToken', 'PlaybackAccessToken_Template', 'ChannelPointsContext', 'ViewerPoints',
         'CommunityPointsSettings', 'ClaimCommunityPoints', 'CreateCommunityPointsReward',
         'UpdateCommunityPointsReward', 'DeleteCommunityPointsReward', 'UpdateCommunityPointsSettings',
         'CustomRewardRedemption', 'RedeemCommunityPointsCustomReward', 'RewardCenter',
-        'ChannelPointsAutomaticRewards', 'predictions', 'polls', 'UserFollows', 'VideoComments',
-        'ChatHighlights', 'VideoPreviewCard__VideoHover', 'UseLive', 'UseBrowseQueries',
+        'ChannelPointsAutomaticRewards', 'ChannelRoot_AboutPanel', 'predictions', 'polls', 'UserFollows',
+        'VideoComments', 'ChatHighlights', 'VideoPreviewCard__VideoHover', 'UseLive', 'UseBrowseQueries',
         'ViewerCardModLogsMessagesBySender', 'ComscoreStreamingQuery', 'StreamTags', 'StreamMetadata',
         'VideoMetadata', 'ChannelPage_GetChannelStat', 'Chat_Userlookup', 'RealtimeStreamTagList_Tags',
-        'UserModStatus', 'FollowButton_FollowUser', 'FollowButton_UnfollowUser', 'Clips_Popular_ miesiąc',
+        'UserModStatus', 'FollowButton_FollowUser', 'FollowButton_UnfollowUser', 'Clips_Popular_month',
         'PersonalSections', 'RecommendedChannels', 'FrontPage', 'GetHomePageRecommendations',
         'VideoComments_SentMessage', 'UseUserReportModal', 'ReportUserModal_UserReport', 'UserLeaveSquad',
         'UserModal_GetFollowersForUser', 'UserModal_GetFollowedChannelsForUser', 'PlayerOverlaysContext',
@@ -137,7 +146,6 @@
         'VideoPlayer_VideoSourceManager', 'VideoPlayerStreamMetadata', 'VideoPlayerStatusOverlayChannel',
         'VideoPlayer_PlayerHeartbeat'
     ]);
-    const PLAYER_CONTAINER_SELECTORS = ['div[data-a-target="video-player"]', '.video-player', 'div[data-a-player-state]', 'main', '.persistent-player'];
 
     let hooksInstalledMain = false;
     let adRemovalObserver = null;
@@ -155,9 +163,18 @@
     let cachedQualityValue = null;
     let cachedCleanToken = null;
 
-    function logError(source, message, ...args) { if (SHOW_ERRORS_CONSOLE) console.error(`${LOG_PREFIX} [${source}] ERROR:`, message, ...args); }
-    function logWarn(source, message, ...args) { if (SHOW_ERRORS_CONSOLE) console.warn(`${LOG_PREFIX} [${source}] WARN:`, message, ...args); }
-    function logCoreDebug(source, message, ...args) { if (CORE_DEBUG_LOGGING) console.info(`${LOG_PREFIX} [${source}] DEBUG:`, message, ...args); }
+    function logError(source, message, ...args) {
+        if (SHOW_ERRORS_CONSOLE) console.error(`${LOG_PREFIX} [${source}] ERROR:`, message, ...args);
+    }
+
+    function logWarn(source, message, ...args) {
+        if (SHOW_ERRORS_CONSOLE) console.warn(`${LOG_PREFIX} [${source}] WARN:`, message, ...args);
+    }
+
+    function logCoreDebug(source, message, ...args) {
+        if (CORE_DEBUG_LOGGING) console.info(`${LOG_PREFIX} [${source}] DEBUG:`, message, ...args);
+    }
+
     function logModuleTrace(moduleFlag, source, message, ...args) {
         if (moduleFlag) console.debug(`${LOG_PREFIX} [${source}] TRACE:`, message, ...args.map(arg => typeof arg === 'string' && arg.length > 150 ? arg.substring(0, 150) + '...' : arg));
     }
@@ -168,7 +185,14 @@
         if (HIDE_COOKIE_BANNER && !AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.includes(COOKIE_BANNER_SELECTOR)) {
             cssToInject += `${COOKIE_BANNER_SELECTOR} { display: none !important; }\n`;
         }
-        if (cssToInject) try { GM_addStyle(cssToInject); } catch (e) { logError('CSSInject', 'CSS apply failed:', e); }
+        if (cssToInject) {
+            try {
+                GM_addStyle(cssToInject);
+                logCoreDebug('CSSInject', 'CSS styles applied successfully.');
+            } catch (e) {
+                logError('CSSInject', 'CSS apply failed:', e);
+            }
+        }
     }
 
     function forceMaxQuality() {
@@ -177,7 +201,9 @@
             Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
             document.addEventListener('visibilitychange', (e) => e.stopImmediatePropagation(), true);
             logCoreDebug('ForceQuality', 'Background quality forcing activated.');
-        } catch (e) { logError('ForceQuality', 'Failed to activate quality forcing:', e); }
+        } catch (e) {
+            logError('ForceQuality', 'Failed to activate quality forcing:', e);
+        }
     }
 
     function setQualitySettings(forceCheck = false) {
@@ -219,11 +245,12 @@
             };
             cachedQualityValue = originalLocalStorageGetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY);
             setQualitySettings(true);
-        } catch(e) {
+        } catch (e) {
             logError('QualitySet:Hook', 'localStorage.setItem hook error:', e);
-            if(originalLocalStorageSetItem) unsafeWindow.localStorage.setItem = originalLocalStorageSetItem;
+            if (originalLocalStorageSetItem) unsafeWindow.localStorage.setItem = originalLocalStorageSetItem;
         }
     }
+
     function parseAndCleanM3U8(m3u8Text, url = "N/A") {
         const urlShort = url.includes('?') ? url.substring(0, url.indexOf('?')) : url;
         const urlFilename = urlShort.substring(urlShort.lastIndexOf('/') + 1) || urlShort;
@@ -264,8 +291,7 @@
                 upperTrimmedLine.startsWith('#EXT-X-ASSET') ||
                 upperTrimmedLine.startsWith('#EXT-X-CUE-OUT') ||
                 upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-HIDE') ||
-                upperTrimmedLine.startsWith('#EXT-X-SCTE35')
-               ) {
+                upperTrimmedLine.startsWith('#EXT-X-SCTE35')) {
                 if (AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperTrimmedLine.includes(kw))) {
                     removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
                 }
@@ -318,6 +344,7 @@
 
         return { cleanedText: cleanedText, adsFound: adsFoundOverall, linesRemoved: linesRemovedCount, wasPotentiallyAd: potentialAdContent, errorDuringClean: false };
     }
+
     function modifyGqlResponse(responseText, url) {
         if (!MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || responseText.length === 0) return responseText;
 
@@ -355,7 +382,6 @@
                         if (tokenValueJson.ad_block_gate_overlay_enabled === true) { tokenValueJson.ad_block_gate_overlay_enabled = false; tokenModified = true; }
                         if (tokenValueJson.is_ad_enabled_on_stream === true) { tokenValueJson.is_ad_enabled_on_stream = false; tokenModified = true; }
                         if (tokenValueJson.is_reward_ad_on_cooldown === false) { tokenValueJson.is_reward_ad_on_cooldown = true; tokenModified = true; }
-
 
                         if (tokenModified) {
                             tokenHolder.value = JSON.stringify(tokenValueJson);
@@ -417,7 +443,6 @@
         return responseText;
     }
 
-
     async function fetchNewPlaybackAccessToken(channelName, deviceId) {
         logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'TokenSwap', `(1/3) Requesting ANONYMOUS PlaybackAccessToken for channel: ${channelName}, DeviceID: ${deviceId || 'N/A'}`);
         const requestPayload = {
@@ -430,7 +455,11 @@
 
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
-                method: 'POST', url: GQL_URL, headers, data: JSON.stringify(requestPayload), responseType: 'json',
+                method: 'POST',
+                url: GQL_URL,
+                headers,
+                data: JSON.stringify(requestPayload),
+                responseType: 'json',
                 onload: (response) => {
                     if (response.status >= 200 && response.status < 300 && response.response) {
                         const tokenData = response.response;
@@ -473,13 +502,15 @@
 
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
-                method: 'GET', url: url.href, responseType: 'text',
+                method: 'GET',
+                url: url.href,
+                responseType: 'text',
                 onload: (response) => {
                     if (response.status >= 200 && response.status < 300 && response.responseText) {
                         logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'MidrollRecovery', `(2/3) New M3U8 manifest for ${channelName} retrieved successfully.`);
                         resolve(response.responseText);
                     } else {
-                        logError('MidrollRecovery', `(2/3) New M3U8 request for ${channelName} failed. Status: ${response.status}. URL: ${url.href}`);
+                        logError('MidrollRecovery', `(2/3) New M3U8 request for ${channelName} failed. Status: ${response.status}. URL: ${url.href.substring(0, 100)}...`);
                         reject(`New M3U8 request error: status ${response.status}`);
                     }
                 },
@@ -519,7 +550,10 @@
 
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
-                    method: "GET", url: actualRequestUrl, headers: init?.headers ? Object.fromEntries(new Headers(init.headers).entries()) : undefined, responseType: "text",
+                    method: "GET",
+                    url: actualRequestUrl,
+                    headers: init?.headers ? Object.fromEntries(new Headers(init.headers).entries()) : undefined,
+                    responseType: "text",
                     onload: async function(response) {
                         if (response.status >= 200 && response.status < 300) {
                             let { cleanedText, adsFound, errorDuringClean } = parseAndCleanM3U8(response.responseText, actualRequestUrl);
@@ -556,7 +590,14 @@
                             }
 
                             const newHeaders = new Headers();
-                            if (response.responseHeaders) response.responseHeaders.trim().split(/[\r\n]+/).forEach(line => { const parts = line.split(': ', 2); if (parts.length === 2 && parts[0].toLowerCase() !== 'content-length') newHeaders.append(parts[0], parts[1]); });
+                            if (response.responseHeaders) {
+                                response.responseHeaders.trim().split(/[\r\n]+/).forEach(line => {
+                                    const parts = line.split(': ', 2);
+                                    if (parts.length === 2 && parts[0].toLowerCase() !== 'content-length') {
+                                        newHeaders.append(parts[0], parts[1]);
+                                    }
+                                });
+                            }
                             if (!newHeaders.has('Content-Type')) newHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
                             logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'FetchM3U8', `Processed M3U8 for ${urlShortForLog} (via GM_XHR in Fetch).`);
                             resolve(new Response(cleanedText, { status: response.status, statusText: response.statusText, headers: newHeaders }));
@@ -567,18 +608,27 @@
                     },
                     onerror: function(error) {
                         logError('FetchM3U8', `Network error for ${urlShortForLog} (GM_XHR in Fetch):`, error);
-                        reject(new TypeError('Network error for M3U8 fetch'));
+                        reject(new TypeError(`Network error for M3U8 fetch: ${error.error || 'Unknown network error'}`));
                     }
                 });
             });
         }
 
-        const originalResponse = await originalFetch(input, init);
+        const originalResponse = await originalFetch(input, init).catch(e => {
+            logError('FetchOverride', `Fetch failed for ${urlShortForLog}:`, e);
+            throw e;
+        });
 
         const isGqlRequest = lowerCaseUrl.startsWith(GQL_URL);
         if (isGqlRequest && method === 'POST' && originalResponse.ok && MODIFY_GQL_RESPONSE) {
             let responseText;
-            try { responseText = await originalResponse.clone().text(); if (!responseText) return originalResponse; } catch (e) { return originalResponse; }
+            try {
+                responseText = await originalResponse.clone().text();
+                if (!responseText) return originalResponse;
+            } catch (e) {
+                logError('FetchGQL', 'Failed to read GQL response text:', e);
+                return originalResponse;
+            }
 
             if (PROACTIVE_TOKEN_SWAP_ENABLED) {
                 try {
@@ -600,7 +650,9 @@
                             break;
                         }
                     }
-                } catch (e) { logWarn('TokenSwap', '(Proactive) Error parsing GQL for PlaybackAccessToken hook:', e); }
+                } catch (e) {
+                    logWarn('TokenSwap', '(Proactive) Error parsing GQL for PlaybackAccessToken hook:', e);
+                }
             }
 
             const modifiedText = modifyGqlResponse(responseText, requestUrl);
@@ -642,7 +694,9 @@
         if (isM3U8RequestToUsher) {
             const xhr = this;
             GM_xmlhttpRequest({
-                method: method, url: urlString, responseType: "text",
+                method: method,
+                url: urlString,
+                responseType: "text",
                 onload: function(response) {
                     let finalResponseText = response.responseText;
                     if (response.status >= 200 && response.status < 300) {
@@ -699,13 +753,21 @@
 
     function installHooks() {
         if (hooksInstalledMain) return;
-        try { unsafeWindow.fetch = fetchOverride; } catch (e) { logError('HookInstall', 'Failed to hook fetch:', e); }
+        try {
+            unsafeWindow.fetch = fetchOverride;
+            logCoreDebug('HookInstall', 'Fetch hook installed.');
+        } catch (e) {
+            logError('HookInstall', 'Failed to hook fetch:', e);
+        }
         try {
             unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride;
             unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride;
-        } catch (e) { logError('HookInstall', 'Failed to hook XHR:', e); }
+            logCoreDebug('HookInstall', 'XHR hooks installed.');
+        } catch (e) {
+            logError('HookInstall', 'Failed to hook XHR:', e);
+        }
         hooksInstalledMain = true;
-        logCoreDebug('HookInstall', 'Network hooks installed.');
+        logCoreDebug('HookInstall', 'All network hooks installed successfully.');
     }
 
     function removeDOMAdElements() {
@@ -719,17 +781,23 @@
             } else {
                 document.addEventListener('DOMContentLoaded', () => {
                     const target = document.body || document.documentElement;
-                    if(target) adRemovalObserver.observe(target, { childList: true, subtree: true });
+                    if (target) adRemovalObserver.observe(target, { childList: true, subtree: true });
                     logCoreDebug('DOMAdRemoval', 'MutationObserver for DOM ad removal started (DOMContentLoaded).');
                 }, { once: true });
             }
         }
         AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.forEach(selector => {
             try {
-                document.querySelectorAll(selector).forEach(el => {
-                    if (el.parentNode) el.remove();
+                const elements = document.querySelectorAll(selector);
+                elements.forEach(el => {
+                    if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
+                        el.parentNode.removeChild(el);
+                        logModuleTrace(CORE_DEBUG_LOGGING, 'DOMAdRemoval', `Removed element matching selector: ${selector}`);
+                    } else {
+                        logWarn('DOMAdRemoval', `Cannot remove element for selector "${selector}": invalid parentNode or removeChild method.`);
+                    }
                 });
-            } catch(e) {
+            } catch (e) {
                 logError('DOMAdRemoval', `Error removing elements for selector "${selector}":`, e);
             }
         });
@@ -737,6 +805,11 @@
 
     function setupVideoPlayerMonitor() {
         if (videoPlayerMutationObserver) return;
+
+        if (!PLAYER_CONTAINER_SELECTORS) {
+            logError('PlayerMonitor', 'PLAYER_CONTAINER_SELECTORS is not defined. Skipping video player monitor setup.');
+            return;
+        }
 
         PLAYER_CONTAINER_SELECTORS.forEach(selector => {
             if (videoElement) return;
@@ -752,7 +825,7 @@
         });
         if (!videoElement) {
             videoElement = document.querySelector('video');
-            if(videoElement) {
+            if (videoElement) {
                 logCoreDebug('PlayerMonitor', 'Found initial video element via direct query.');
                 attachVideoEventListeners(videoElement);
             }
