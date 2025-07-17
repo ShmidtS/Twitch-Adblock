@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      26.0.9
+// @version      26.1.0
 // @description  Комплексная блокировка рекламы Twitch с проактивной заменой токенов, восстановлением после мид-роллов, принудительным качеством, очисткой M3U8 и другими оптимизациями.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -27,40 +27,47 @@
 (function() {
     'use strict';
 
-    // --- НАСТРОЙКИ СКРИПТА ---
-    const SCRIPT_VERSION = '26.0.9';
-    const PROACTIVE_TOKEN_SWAP_ENABLED = GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true);
-    const ENABLE_MIDROLL_RECOVERY = GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true);
-    const FORCE_MAX_QUALITY_IN_BACKGROUND = GM_getValue('TTV_AdBlock_ForceMaxQuality', true);
-    const MODIFY_GQL_RESPONSE = GM_getValue('TTV_AdBlock_ModifyGQL', true);
-    const ENABLE_AUTO_RELOAD = GM_getValue('TTV_AdBlock_EnableAutoReload', true);
-    const HIDE_AD_OVERLAY_ELEMENTS = GM_getValue('TTV_AdBlock_HideAdOverlay', true);
-    const ATTEMPT_DOM_AD_REMOVAL = GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true);
-    const HIDE_COOKIE_BANNER = GM_getValue('TTV_AdBlock_HideCookieBanner', true);
+    // --- Script Configuration ---
+    const CONFIG = {
+        SCRIPT_VERSION: '26.1.0',
+        SETTINGS: {
+            PROACTIVE_TOKEN_SWAP: GM_getValue('TTV_AdBlock_ProactiveTokenSwap', true),
+            ENABLE_MIDROLL_RECOVERY: GM_getValue('TTV_AdBlock_EnableMidrollRecovery', true),
+            FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
+            MODIFY_GQL_RESPONSE: GM_getValue('TTV_AdBlock_ModifyGQL', true),
+            ENABLE_AUTO_RELOAD: GM_getValue('TTV_AdBlock_EnableAutoReload', true),
+            HIDE_AD_OVERLAY: GM_getValue('TTV_AdBlock_HideAdOverlay', true),
+            ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
+            HIDE_COOKIE_BANNER: GM_getValue('TTV_AdBlock_HideCookieBanner', true),
+        },
+        DEBUG: {
+            SHOW_ERRORS: GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true),
+            CORE: GM_getValue('TTV_AdBlock_Debug_Core', true),
+            PLAYER_MONITOR: GM_getValue('TTV_AdBlock_Debug_PlayerMon', true),
+            M3U8_CLEANING: GM_getValue('TTV_AdBlock_Debug_M3U8', true),
+            GQL_MODIFY: GM_getValue('TTV_AdBlock_Debug_GQL', true),
+            NETWORK_BLOCKING: GM_getValue('TTV_AdBlock_Debug_NetBlock', true),
+            TOKEN_SWAP: GM_getValue('TTV_AdBlock_Debug_TokenSwap', true),
+        },
+        ADVANCED: {
+            RELOAD_STALL_THRESHOLD_MS: GM_getValue('TTV_AdBlock_StallThresholdMs', 20000),
+            RELOAD_BUFFERING_THRESHOLD_MS: GM_getValue('TTV_AdBlock_BufferingThresholdMs', 45000),
+            RELOAD_COOLDOWN_MS: GM_getValue('TTV_AdBlock_ReloadCooldownMs', 15000),
+            VISIBILITY_RESUME_DELAY_MS: GM_getValue('TTV_AdBlock_VisResumeDelayMs', 1500),
+            MAX_RELOADS_PER_SESSION: GM_getValue('TTV_AdBlock_MaxReloadsPerSession', 5),
+            RELOAD_ON_ERROR_CODES: GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "0,2,3,4,9,10,403,1000,2000,3000,4000,5000,6001,500,502,503,504")
+                .split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
+            MAX_TOKEN_FETCH_RETRIES: 3,
+            TOKEN_FETCH_RETRY_DELAY_MS: 1000,
+        },
+    };
 
-    // --- НАСТРОЙКИ ОТЛАДКИ ---
-    const SHOW_ERRORS_CONSOLE = GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true);
-    const CORE_DEBUG_LOGGING = GM_getValue('TTV_AdBlock_Debug_Core', true);
-    const LOG_PLAYER_MONITOR_DEBUG = GM_getValue('TTV_AdBlock_Debug_PlayerMon', true);
-    const LOG_M3U8_CLEANING_DEBUG = GM_getValue('TTV_AdBlock_Debug_M3U8', true);
-    const LOG_GQL_MODIFY_DEBUG = GM_getValue('TTV_AdBlock_Debug_GQL', true);
-    const LOG_NETWORK_BLOCKING_DEBUG = GM_getValue('TTV_AdBlock_Debug_NetBlock', true);
-    const LOG_TOKEN_SWAP_DEBUG = GM_getValue('TTV_AdBlock_Debug_TokenSwap', true);
-
-    // --- ПРОДВИНУТЫЕ НАСТРОЙКИ ---
-    const RELOAD_STALL_THRESHOLD_MS = GM_getValue('TTV_AdBlock_StallThresholdMs', 20000);
-    const RELOAD_BUFFERING_THRESHOLD_MS = GM_getValue('TTV_AdBlock_BufferingThresholdMs', 45000);
-    const RELOAD_COOLDOWN_MS = GM_getValue('TTV_AdBlock_ReloadCooldownMs', 15000);
-    const VISIBILITY_RESUME_DELAY_MS = GM_getValue('TTV_AdBlock_VisResumeDelayMs', 1500);
-    const MAX_RELOADS_PER_SESSION = GM_getValue('TTV_AdBlock_MaxReloadsPerSession', 5);
-    const RELOAD_ON_ERROR_CODES_RAW = GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "0,2,3,4,9,10,403,1000,2000,3000,4000,5000,6001,500,502,503,504");
-
-    // --- КОНСТАНТЫ И ФИЛЬТРЫ ---
-    const LOG_PREFIX = `[TTV ADBLOCK ULT v${SCRIPT_VERSION}]`;
-    const LS_KEY_QUALITY = 'video-quality';
-    const TARGET_QUALITY_VALUE = '{"default":"chunked"}';
+    // --- Constants ---
+    const LOG_PREFIX = `[TTV ADBLOCK ULT v${CONFIG.SCRIPT_VERSION}]`;
     const GQL_URL = 'https://gql.twitch.tv/gql';
     const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
+    const LS_KEY_QUALITY = 'video-quality';
+    const TARGET_QUALITY_VALUE = '{"default":"chunked"}';
 
     const AD_URL_KEYWORDS_BLOCK = [
         'nat.min.js', 'twitchAdServer.js', 'player-ad-aws.js', 'assets.adobedtm.com',
@@ -72,10 +79,10 @@
         'securepubads.g.doubleclick.net', 'googleads.g.doubleclick.net', 'twitchads.net',
         'ad.twitch.tv', 'analytics.twitch.tv', 'beacon.twist.tv', 'sentry.io',
         'sprig.com', 'scorecardresearch.com', 'cast_sender.js', 'v6s.js',
-        'cloudfront.net', 'gstatic.com'
+        'cloudfront.net', 'gstatic.com', 'yandex.ru',
     ];
 
-    const AD_OVERLAY_SELECTORS_CSS = [
+    const AD_DOM_SELECTORS = [
         'div[data-a-target="request-ad-block-disable-modal"]', '.video-player__ad-info-container',
         'span[data-a-target="video-ad-label"]', 'span[data-a-target="video-ad-countdown"]',
         'button[aria-label*="feedback for this Ad"]', '.player-ad-notice', '.ad-interrupt-screen',
@@ -92,34 +99,26 @@
         'div[data-test-id="ad-break-skip-button"]', '[data-a-target="ad-banner"]',
         '[data-test-id="ad-overlay"]', '.promoted-content-card', '[data-ad-placeholder="true"]',
         '.video-ad-display__container', '[role="advertisement"]', '[data-ad-overlay]',
-        'div[class*="ad-overlay"]', 'div[class*="ad-container"]'
-    ];
-
-    const AD_SIGNIFIER_DATERANGE_ATTR = "Twitch-Ad-Signal";
-    const AD_DATERANGE_ATTRIBUTE_KEYWORDS = [
-        "AD-ID=", "CUE-OUT", "SCTE35", "Twitch-Ad-Signal", "Twitch-Prefetch",
-        "Twitch-Ad-Hide", "Twitch-Ads", "X-CUSTOM", "X-AD", "X-TWITCH-AD", "EXT-X-TWITCH-INFO"
-    ];
-
-    const COOKIE_BANNER_SELECTOR = '.consent-banner';
-
-    const AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST = [
-        ...AD_OVERLAY_SELECTORS_CSS,
-        'div[data-a-target="player-ad-overlay"]', 'div[data-test-selector="ad-interrupt-overlay__player-container"]',
-        'div[aria-label="Advertisement"]', 'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]',
-        'iframe[src*="imasdk.googleapis.com"]', '.player-overlay-ad', '.tw-player-ad-overlay',
-        '.video-ad-display', 'div[data-ad-placeholder="true"]', 'div[data-a-target="video-ad-countdown-container"]',
+        'div[class*="ad-overlay"]', 'div[class*="ad-container"]', 'div[data-a-target="player-ad-overlay"]',
+        'div[data-test-selector="ad-interrupt-overlay__player-container"]', 'div[aria-label="Advertisement"]',
+        'iframe[src*="amazon-adsystem.com"]', 'iframe[src*="doubleclick.net"]', 'iframe[src*="imasdk.googleapis.com"]',
+        '.player-overlay-ad', '.tw-player-ad-overlay', '.video-ad-display', 'div[data-a-target="video-ad-countdown-container"]',
         'div[class*="--ad-banner"]', 'div[data-ad-unit]', 'div[class*="player-ads"]', 'div[data-ad-boundary]',
-        'div[class*="ad-module"]', 'div[data-test-selector="ad-module"]'
+        'div[class*="ad-module"]', 'div[data-test-selector="ad-module"]',
+        ...(CONFIG.SETTINGS.HIDE_COOKIE_BANNER ? ['.consent-banner'] : []),
     ];
-    if (HIDE_COOKIE_BANNER) AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.push(COOKIE_BANNER_SELECTOR);
+
+    const AD_DATERANGE_KEYWORDS = [
+        'AD-ID=', 'CUE-OUT', 'SCTE35', 'Twitch-Ad-Signal', 'Twitch-Prefetch',
+        'Twitch-Ad-Hide', 'Twitch-Ads', 'X-CUSTOM', 'X-AD', 'X-TWITCH-AD', 'EXT-X-TWITCH-INFO'
+    ];
 
     const PLAYER_CONTAINER_SELECTORS = [
         '.video-player', '[data-a-target="video-player"]', '.player-container',
         '[data-test-selector="video-player__video-container"]', 'div[class*="player-core"]'
     ];
 
-    const GQL_OPERATIONS_TO_SKIP_MODIFICATION = new Set([
+    const GQL_OPERATIONS_TO_SKIP = new Set([
         'PlaybackAccessToken', 'PlaybackAccessToken_Template', 'ChannelPointsContext', 'ViewerPoints',
         'CommunityPointsSettings', 'ClaimCommunityPoints', 'CreateCommunityPointsReward',
         'UpdateCommunityPointsReward', 'DeleteCommunityPointsReward', 'UpdateCommunityPointsSettings',
@@ -147,66 +146,67 @@
         'VideoPlayer_PlayerHeartbeat'
     ]);
 
-    let hooksInstalledMain = false;
+    // --- State Variables ---
+    let hooksInstalled = false;
     let adRemovalObserver = null;
     let errorScreenObserver = null;
-    let videoPlayerMutationObserver = null;
-    const RELOAD_ON_ERROR_CODES = RELOAD_ON_ERROR_CODES_RAW.split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n));
-    const originalFetch = unsafeWindow.fetch;
-    const originalXhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
-    const originalXhrSend = unsafeWindow.XMLHttpRequest.prototype.send;
-    const originalLocalStorageSetItem = unsafeWindow.localStorage.setItem;
-    const originalLocalStorageGetItem = unsafeWindow.localStorage.getItem;
+    let videoPlayerObserver = null;
     let videoElement = null;
     let lastReloadTimestamp = 0;
     let reloadCount = 0;
     let cachedQualityValue = null;
     let cachedCleanToken = null;
+    const originalFetch = unsafeWindow.fetch;
+    const originalXhrOpen = unsafeWindow.XMLHttpRequest.prototype.open;
+    const originalXhrSend = unsafeWindow.XMLHttpRequest.prototype.send;
+    const originalLocalStorageSetItem = unsafeWindow.localStorage.setItem;
+    const originalLocalStorageGetItem = unsafeWindow.localStorage.getItem;
 
-    function logError(source, message, ...args) {
-        if (SHOW_ERRORS_CONSOLE) console.error(`${LOG_PREFIX} [${source}] ERROR:`, message, ...args);
-    }
+    // --- Logging Functions ---
+    const logError = (source, message, ...args) => {
+        if (CONFIG.DEBUG.SHOW_ERRORS) console.error(`${LOG_PREFIX} [${source}] ERROR:`, message, ...args);
+    };
 
-    function logWarn(source, message, ...args) {
-        if (SHOW_ERRORS_CONSOLE) console.warn(`${LOG_PREFIX} [${source}] WARN:`, message, ...args);
-    }
+    const logWarn = (source, message, ...args) => {
+        if (CONFIG.DEBUG.SHOW_ERRORS) console.warn(`${LOG_PREFIX} [${source}] WARN:`, message, ...args);
+    };
 
-    function logCoreDebug(source, message, ...args) {
-        if (CORE_DEBUG_LOGGING) console.info(`${LOG_PREFIX} [${source}] DEBUG:`, message, ...args);
-    }
+    const logDebug = (source, message, ...args) => {
+        if (CONFIG.DEBUG.CORE) console.info(`${LOG_PREFIX} [${source}] DEBUG:`, message, ...args);
+    };
 
-    function logModuleTrace(moduleFlag, source, message, ...args) {
-        if (moduleFlag) console.debug(`${LOG_PREFIX} [${source}] TRACE:`, message, ...args.map(arg => typeof arg === 'string' && arg.length > 150 ? arg.substring(0, 150) + '...' : arg));
-    }
+    const logTrace = (flag, source, message, ...args) => {
+        if (flag) console.debug(`${LOG_PREFIX} [${source}] TRACE:`, message, ...args.map(arg => typeof arg === 'string' && arg.length > 150 ? arg.substring(0, 150) + '...' : arg));
+    };
 
-    function injectCSS() {
-        let cssToInject = '';
-        if (HIDE_AD_OVERLAY_ELEMENTS) cssToInject += `${AD_OVERLAY_SELECTORS_CSS.join(',\n')} { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; z-index: -1 !important; }\n`;
-        if (HIDE_COOKIE_BANNER && !AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.includes(COOKIE_BANNER_SELECTOR)) {
-            cssToInject += `${COOKIE_BANNER_SELECTOR} { display: none !important; }\n`;
+    // --- Utility Functions ---
+    const injectCSS = () => {
+        let css = '';
+        if (CONFIG.SETTINGS.HIDE_AD_OVERLAY) {
+            css += `${AD_DOM_SELECTORS.join(',\n')} { display: none !important; visibility: hidden !important; opacity: 0 !important; pointer-events: none !important; z-index: -1 !important; }\n`;
         }
-        if (cssToInject) {
+        if (css) {
             try {
-                GM_addStyle(cssToInject);
-                logCoreDebug('CSSInject', 'CSS styles applied successfully.');
+                GM_addStyle(css);
+                logDebug('CSSInject', 'CSS styles applied successfully.');
             } catch (e) {
-                logError('CSSInject', 'CSS apply failed:', e);
+                logError('CSSInject', 'Failed to apply CSS:', e);
             }
         }
-    }
+    };
 
-    function forceMaxQuality() {
+    const forceMaxQuality = () => {
         try {
             Object.defineProperty(document, 'visibilityState', { get: () => 'visible', configurable: true });
             Object.defineProperty(document, 'hidden', { get: () => false, configurable: true });
-            document.addEventListener('visibilitychange', (e) => e.stopImmediatePropagation(), true);
-            logCoreDebug('ForceQuality', 'Background quality forcing activated.');
+            document.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
+            logDebug('ForceQuality', 'Background quality forcing activated.');
         } catch (e) {
-            logError('ForceQuality', 'Failed to activate quality forcing:', e);
+            logError('ForceQuality', 'Failed to force max quality:', e);
         }
-    }
+    };
 
-    function setQualitySettings(forceCheck = false) {
+    const setQualitySettings = (forceCheck = false) => {
         try {
             let currentValue = cachedQualityValue;
             if (currentValue === null || forceCheck) {
@@ -216,75 +216,72 @@
             if (currentValue !== TARGET_QUALITY_VALUE) {
                 originalLocalStorageSetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY, TARGET_QUALITY_VALUE);
                 cachedQualityValue = TARGET_QUALITY_VALUE;
-                logCoreDebug('QualitySet', `Forced video quality to "chunked". Previous: ${currentValue}`);
+                logDebug('QualitySet', `Forced video quality to "chunked". Previous: ${currentValue || 'none'}`);
             }
         } catch (e) {
-            logError('QualitySet', 'Set quality error:', e);
+            logError('QualitySet', 'Failed to set quality:', e);
             cachedQualityValue = null;
         }
-    }
+    };
 
-    function hookQualitySettings() {
+    const hookQualitySettings = () => {
         try {
             unsafeWindow.localStorage.setItem = function(key, value) {
                 let forcedValue = value;
                 if (key === LS_KEY_QUALITY && value !== TARGET_QUALITY_VALUE) {
-                    logModuleTrace(CORE_DEBUG_LOGGING, 'QualitySet:Hook', `Intercepted localStorage.setItem for '${key}'. Original: '${value}', Forcing: '${TARGET_QUALITY_VALUE}'`);
+                    logTrace(CONFIG.DEBUG.CORE, 'QualitySet:Hook', `Intercepted localStorage.setItem for '${key}'. Forcing: '${TARGET_QUALITY_VALUE}'`);
                     forcedValue = TARGET_QUALITY_VALUE;
                     cachedQualityValue = forcedValue;
                 }
                 try {
-                    const args = Array.from(arguments);
-                    args[1] = forcedValue;
-                    return originalLocalStorageSetItem.apply(unsafeWindow.localStorage, args);
+                    return originalLocalStorageSetItem.call(unsafeWindow.localStorage, key, forcedValue);
                 } catch (e) {
                     logError('QualitySet:Hook', `localStorage.setItem error for '${key}':`, e);
-                    if (key === LS_KEY_QUALITY) cachedQualityValue = null;
+                    cachedQualityValue = null;
                     throw e;
                 }
             };
             cachedQualityValue = originalLocalStorageGetItem.call(unsafeWindow.localStorage, LS_KEY_QUALITY);
             setQualitySettings(true);
         } catch (e) {
-            logError('QualitySet:Hook', 'localStorage.setItem hook error:', e);
-            if (originalLocalStorageSetItem) unsafeWindow.localStorage.setItem = originalLocalStorageSetItem;
+            logError('QualitySet:Hook', 'Failed to hook localStorage.setItem:', e);
+            unsafeWindow.localStorage.setItem = originalLocalStorageSetItem;
         }
-    }
+    };
 
-    function parseAndCleanM3U8(m3u8Text, url = "N/A") {
+    const parseAndCleanM3U8 = (m3u8Text, url = 'N/A') => {
         const urlShort = url.includes('?') ? url.substring(0, url.indexOf('?')) : url;
         const urlFilename = urlShort.substring(urlShort.lastIndexOf('/') + 1) || urlShort;
 
         if (!m3u8Text || typeof m3u8Text !== 'string') {
-            logError('M3U8Clean', `Invalid M3U8 content for ${urlFilename}. Content type: ${typeof m3u8Text}`);
+            logError('M3U8Clean', `Invalid M3U8 content for ${urlFilename}. Type: ${typeof m3u8Text}`);
             return { cleanedText: m3u8Text, adsFound: false, linesRemoved: 0, wasPotentiallyAd: false, errorDuringClean: true };
         }
 
         const upperM3U8Text = m3u8Text.toUpperCase();
         let potentialAdContent = false;
 
-        if (AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperM3U8Text.includes(kw))) {
+        if (AD_DATERANGE_KEYWORDS.some(kw => upperM3U8Text.includes(kw))) {
             potentialAdContent = true;
         }
 
         if (!potentialAdContent) {
-            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'M3U8Clean', `No ad markers detected in ${urlFilename}.`);
+            logTrace(CONFIG.DEBUG.M3U8_CLEANING, 'M3U8Clean', `No ad markers in ${urlFilename}.`);
             return { cleanedText: m3u8Text, adsFound: false, linesRemoved: 0, wasPotentiallyAd: false, errorDuringClean: false };
         }
 
         const lines = m3u8Text.split('\n');
         const cleanLines = [];
         let isAdSection = false;
-        let adsFoundOverall = false;
-        let linesRemovedCount = 0;
-        let discontinuityShouldBeRemoved = false;
+        let adsFound = false;
+        let linesRemoved = 0;
+        let discontinuityPending = false;
 
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
             const trimmedLine = line.trim();
             const upperTrimmedLine = trimmedLine.toUpperCase();
-            let removeThisLine = false;
-            let currentLineIsAdMarker = false;
+            let skipLine = false;
 
             if (upperTrimmedLine.startsWith('#EXT-X-DATERANGE') ||
                 upperTrimmedLine.startsWith('#EXT-X-TWITCH-INFO') ||
@@ -292,71 +289,72 @@
                 upperTrimmedLine.startsWith('#EXT-X-CUE-OUT') ||
                 upperTrimmedLine.startsWith('#EXT-X-TWITCH-AD-HIDE') ||
                 upperTrimmedLine.startsWith('#EXT-X-SCTE35')) {
-                if (AD_DATERANGE_ATTRIBUTE_KEYWORDS.some(kw => upperTrimmedLine.includes(kw))) {
-                    removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true; isAdSection = true; discontinuityShouldBeRemoved = true;
+                if (AD_DATERANGE_KEYWORDS.some(kw => upperTrimmedLine.includes(kw))) {
+                    skipLine = true;
+                    adsFound = true;
+                    isAdSection = true;
+                    discontinuityPending = true;
                 }
             } else if (upperTrimmedLine.startsWith('#EXT-X-TWITCH-PREFETCH')) {
-                removeThisLine = true; currentLineIsAdMarker = true; adsFoundOverall = true;
-                if (i + 1 < lines.length && !lines[i+1].trim().startsWith('#')) {
-                    lines[i+1] = '';
+                skipLine = true;
+                adsFound = true;
+                if (i + 1 < lines.length && !lines[i + 1].trim().startsWith('#')) {
+                    lines[i + 1] = '';
                 }
             } else if (isAdSection) {
                 if (upperTrimmedLine.startsWith('#EXT-X-CUE-IN')) {
-                    removeThisLine = true; currentLineIsAdMarker = true; isAdSection = false; discontinuityShouldBeRemoved = false;
+                    skipLine = true;
+                    isAdSection = false;
+                    discontinuityPending = false;
                 } else if (upperTrimmedLine.startsWith('#EXTINF')) {
-                    isAdSection = false; discontinuityShouldBeRemoved = false;
-                } else if (upperTrimmedLine.startsWith('#EXT-X-DISCONTINUITY')) {
-                    if (discontinuityShouldBeRemoved) {
-                        removeThisLine = true; currentLineIsAdMarker = true; discontinuityShouldBeRemoved = false;
-                    }
-                } else if (!trimmedLine.startsWith('#') && trimmedLine !== '') {
-                    removeThisLine = true;
+                    isAdSection = false;
+                    discontinuityPending = false;
+                } else if (upperTrimmedLine.startsWith('#EXT-X-DISCONTINUITY') && discontinuityPending) {
+                    skipLine = true;
+                    discontinuityPending = false;
+                } else if (!trimmedLine.startsWith('#') && trimmedLine) {
+                    skipLine = true;
                 }
             }
 
-            if (removeThisLine) {
-                linesRemovedCount++;
-                if (currentLineIsAdMarker) adsFoundOverall = true;
-            } else if (trimmedLine !== '') {
+            if (skipLine) {
+                linesRemoved++;
+            } else if (trimmedLine) {
                 cleanLines.push(line);
             }
         }
 
         const cleanedText = cleanLines.join('\n');
+        const segmentCount = cleanLines.filter(line => line.trim() && !line.trim().startsWith('#')).length;
 
-        let segmentCount = 0;
-        for (const line of cleanLines) {
-            if (line.trim().length > 0 && !line.trim().startsWith('#')) {
-                segmentCount++;
-            }
-        }
-
-        if (adsFoundOverall && segmentCount < 3 && !cleanedText.includes('#EXT-X-ENDLIST')) {
-            logWarn('M3U8Clean', `Insufficient segments (${segmentCount}) after cleaning ${urlFilename}, potentially problematic. Reverting to original. Lines removed: ${linesRemovedCount}`);
+        if (adsFound && segmentCount < 3 && !cleanedText.includes('#EXT-X-ENDLIST')) {
+            logWarn('M3U8Clean', `Insufficient segments (${segmentCount}) in ${urlFilename}. Reverting to original. Removed: ${linesRemoved}`);
             return { cleanedText: m3u8Text, adsFound: false, linesRemoved: 0, wasPotentiallyAd: true, errorDuringClean: true };
         }
 
-        if (adsFoundOverall) {
-            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'M3U8Clean', `Cleaned ${urlFilename}: ${linesRemovedCount} lines removed. Ads were present. ${segmentCount} segments remain.`);
+        if (adsFound) {
+            logTrace(CONFIG.DEBUG.M3U8_CLEANING, 'M3U8Clean', `Cleaned ${urlFilename}: ${linesRemoved} lines removed. ${segmentCount} segments remain.`);
         } else if (potentialAdContent) {
-            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'M3U8Clean', `Processed ${urlFilename}: Potential ad markers found, but no lines removed by current logic. Outputting original.`);
+            logTrace(CONFIG.DEBUG.M3U8_CLEANING, 'M3U8Clean', `Processed ${urlFilename}: Potential ad markers found, no lines removed.`);
         }
 
-        return { cleanedText: cleanedText, adsFound: adsFoundOverall, linesRemoved: linesRemovedCount, wasPotentiallyAd: potentialAdContent, errorDuringClean: false };
-    }
+        return { cleanedText, adsFound, linesRemoved, wasPotentiallyAd: potentialAdContent, errorDuringClean: false };
+    };
 
-    function modifyGqlResponse(responseText, url) {
-        if (!MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || responseText.length === 0) return responseText;
+    const modifyGqlResponse = (responseText, url) => {
+        if (!CONFIG.SETTINGS.MODIFY_GQL_RESPONSE || typeof responseText !== 'string' || !responseText) {
+            return responseText;
+        }
 
         let data;
         try {
             data = JSON.parse(responseText);
         } catch (e) {
-            logError('GQLModify', `Failed to parse GQL JSON response from ${url.substring(0, 100)}...`, e);
+            logError('GQLModify', `Failed to parse GQL JSON: ${url.slice(0, 100)}...`, e);
             return responseText;
         }
 
-        let modifiedOverall = false;
+        let modified = false;
         const opDataArray = Array.isArray(data) ? data : [data];
 
         for (const opData of opDataArray) {
@@ -364,138 +362,154 @@
 
             const operationName = opData.extensions?.operationName || 'UnknownGQLOp';
 
-            if (GQL_OPERATIONS_TO_SKIP_MODIFICATION.has(operationName)) {
-                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Skipping GQL modification for whitelisted operation: ${operationName}`);
+            if (GQL_OPERATIONS_TO_SKIP.has(operationName)) {
+                logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQLModify', `Skipping GQL operation: ${operationName}`);
                 continue;
             }
 
-            let currentOpModified = false;
+            const processToken = (tokenHolder) => {
+                if (!tokenHolder?.value || typeof tokenHolder.value !== 'string') return false;
+                try {
+                    const token = JSON.parse(tokenHolder.value);
+                    let changed = false;
 
-            const processPlaybackAccessToken = (tokenHolder) => {
-                if (tokenHolder?.value && typeof tokenHolder.value === 'string') {
-                    try {
-                        const tokenValueJson = JSON.parse(tokenHolder.value);
-                        let tokenModified = false;
+                    if (token.hide_ads === false) { token.hide_ads = true; changed = true; }
+                    if (token.show_ads === true) { token.show_ads = false; changed = true; }
+                    if (token.ad_block_gate_overlay_enabled === true) { token.ad_block_gate_overlay_enabled = false; changed = true; }
+                    if (token.is_ad_enabled_on_stream === true) { token.is_ad_enabled_on_stream = false; changed = true; }
+                    if (token.is_reward_ad_on_cooldown === false) { token.is_reward_ad_on_cooldown = true; changed = true; }
 
-                        if (tokenValueJson.hide_ads === false) { tokenValueJson.hide_ads = true; tokenModified = true; }
-                        if (tokenValueJson.show_ads === true) { tokenValueJson.show_ads = false; tokenModified = true; }
-                        if (tokenValueJson.ad_block_gate_overlay_enabled === true) { tokenValueJson.ad_block_gate_overlay_enabled = false; tokenModified = true; }
-                        if (tokenValueJson.is_ad_enabled_on_stream === true) { tokenValueJson.is_ad_enabled_on_stream = false; tokenModified = true; }
-                        if (tokenValueJson.is_reward_ad_on_cooldown === false) { tokenValueJson.is_reward_ad_on_cooldown = true; tokenModified = true; }
-
-                        if (tokenModified) {
-                            tokenHolder.value = JSON.stringify(tokenValueJson);
-                            return true;
-                        }
-                    } catch (e) {
-                        logWarn('GQLModify', `Failed to parse/modify PlaybackAccessToken JSON value for ${operationName}:`, e);
+                    if (changed) {
+                        tokenHolder.value = JSON.stringify(token);
+                        return true;
                     }
+                } catch (e) {
+                    logWarn('GQLModify', `Failed to modify token for ${operationName}:`, e);
                 }
                 return false;
             };
 
-            if (opData.data.streamPlaybackAccessToken) {
-                if (processPlaybackAccessToken(opData.data.streamPlaybackAccessToken)) {
-                    currentOpModified = true;
-                    logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Modified streamPlaybackAccessToken for ${operationName}`);
-                }
+            if (opData.data.streamPlaybackAccessToken && processToken(opData.data.streamPlaybackAccessToken)) {
+                modified = true;
+                logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQLModify', `Modified streamPlaybackAccessToken for ${operationName}`);
             }
 
-            if (opData.data.videoPlaybackAccessToken) {
-                if (processPlaybackAccessToken(opData.data.videoPlaybackAccessToken)) {
-                    currentOpModified = true;
-                    logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Modified videoPlaybackAccessToken for ${operationName}`);
-                }
+            if (opData.data.videoPlaybackAccessToken && processToken(opData.data.videoPlaybackAccessToken)) {
+                modified = true;
+                logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQLModify', `Modified videoPlaybackAccessToken for ${operationName}`);
             }
 
             if (opData.data.adSlots) {
                 opData.data.adSlots = [];
-                currentOpModified = true;
-                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Cleared adSlots for ${operationName}`);
+                modified = true;
+                logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQLModify', `Cleared adSlots for ${operationName}`);
             }
 
             if (opData.data.viewer?.adBlock?.isAdBlockActive === true) {
                 opData.data.viewer.adBlock.isAdBlockActive = false;
-                currentOpModified = true;
-                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Set viewer.adBlock.isAdBlockActive to false for ${operationName}`);
+                modified = true;
+                logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQLModify', `Set isAdBlockActive to false for ${operationName}`);
             }
 
             if (opData.data.user?.broadcastSettings?.isAdFree === false) {
                 opData.data.user.broadcastSettings.isAdFree = true;
-                currentOpModified = true;
-                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Set user.broadcastSettings.isAdFree to true for ${operationName}`);
+                modified = true;
+                logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQLModify', `Set isAdFree to true for ${operationName}`);
             }
-
-            if (currentOpModified) modifiedOverall = true;
         }
 
-        if (modifiedOverall) {
+        if (modified) {
             try {
-                const finalJsonString = JSON.stringify(Array.isArray(data) ? opDataArray : opDataArray[0]);
-                logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'GQLModify', `Successfully modified GQL response for URL: ${url.substring(0, 100)}...`);
-                return finalJsonString;
+                const result = JSON.stringify(Array.isArray(data) ? opDataArray : opDataArray[0]);
+                logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQLModify', `Modified GQL response: ${url.slice(0, 100)}...`);
+                return result;
             } catch (e) {
-                logError('GQLModify', `Failed to re-stringify modified GQL data for ${url.substring(0, 100)}...`, e);
-                return responseText;
+                logError('GQLModify', `Failed to stringify modified GQL: ${url.slice(0, 100)}...`, e);
             }
         }
 
         return responseText;
-    }
+    };
 
-    async function fetchNewPlaybackAccessToken(channelName, deviceId) {
-        logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'TokenSwap', `(1/3) Requesting ANONYMOUS PlaybackAccessToken for channel: ${channelName}, DeviceID: ${deviceId || 'N/A'}`);
-        const requestPayload = {
+    const fetchNewPlaybackAccessToken = async (channelName, deviceId, retryCount = 0) => {
+        logTrace(CONFIG.DEBUG.TOKEN_SWAP, 'TokenSwap', `(1/3) Requesting token for ${channelName}, DeviceID: ${deviceId || 'N/A'}, Attempt: ${retryCount + 1}`);
+        const payload = {
             operationName: 'PlaybackAccessToken_Template',
             query: 'query PlaybackAccessToken_Template($login: String!, $isLive: Boolean!, $vodID: ID!, $isVod: Boolean!, $playerType: String!) {\nstreamPlaybackAccessToken(channelName: $login, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isLive) {\nvalue\nsignature\nauthorization { isForbidden forbiddenReasonCode }\n__typename\n}\nvideoPlaybackAccessToken(id: $vodID, params: {platform: "web", playerBackend: "mediaplayer", playerType: $playerType}) @include(if: $isVod) {\nvalue\nsignature\n__typename\n}\n}',
             variables: { isLive: true, login: channelName, isVod: false, vodID: '', playerType: 'site' }
         };
-        const headers = { 'Content-Type': 'application/json', 'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko' };
-        if (deviceId) headers['Device-ID'] = deviceId;
+        const headers = {
+            'Content-Type': 'application/json',
+            'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko',
+            ...(deviceId && { 'Device-ID': deviceId }),
+        };
 
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'POST',
                 url: GQL_URL,
                 headers,
-                data: JSON.stringify(requestPayload),
+                data: JSON.stringify(payload),
                 responseType: 'json',
-                onload: (response) => {
+                onload: async (response) => {
                     if (response.status >= 200 && response.status < 300 && response.response) {
-                        const tokenData = response.response;
-                        const token = tokenData?.data?.streamPlaybackAccessToken;
-                        if (token && token.value && token.signature) {
+                        const token = response.response?.data?.streamPlaybackAccessToken;
+                        if (token?.value && token.signature) {
                             try {
-                                const parsedTokenValue = JSON.parse(token.value);
-                                if (parsedTokenValue.show_ads === true || parsedTokenValue.hide_ads === false) {
-                                    logWarn('TokenSwap', `(1/3) Anonymous token for ${channelName} still indicates ads. Proceeding, but may not be fully effective. Token: ${token.value.substring(0,50)}...`);
+                                const tokenValue = JSON.parse(token.value);
+                                if (tokenValue.show_ads || !tokenValue.hide_ads) {
+                                    if (retryCount < CONFIG.ADVANCED.MAX_TOKEN_FETCH_RETRIES - 1) {
+                                        logWarn('TokenSwap', `Token for ${channelName} contains ads. Retrying (${retryCount + 2}/${CONFIG.ADVANCED.MAX_TOKEN_FETCH_RETRIES})...`);
+                                        await new Promise(r => setTimeout(r, CONFIG.ADVANCED.TOKEN_FETCH_RETRY_DELAY_MS));
+                                        return fetchNewPlaybackAccessToken(channelName, deviceId, retryCount + 1)
+                                            .then(resolve)
+                                            .catch(reject);
+                                    }
+                                    logWarn('TokenSwap', `Token for ${channelName} still contains ads after retries.`);
                                 } else {
-                                    logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'TokenSwap', `(1/3) Anonymous token for ${channelName} retrieved successfully and appears clean.`);
+                                    logTrace(CONFIG.DEBUG.TOKEN_SWAP, 'TokenSwap', `Clean token for ${channelName} retrieved.`);
                                 }
-                            } catch (e) { /* ignore parsing error for logging */ }
-                            resolve(token);
+                                resolve(token);
+                            } catch (e) {
+                                logError('TokenSwap', `Failed to parse token for ${channelName}:`, e);
+                                reject(`Invalid token JSON: ${e.message}`);
+                            }
                         } else {
-                            logError('TokenSwap', `(1/3) Anonymous token not found or invalid in GQL response for ${channelName}. Response:`, response.responseText?.substring(0, 200));
-                            reject(`Anonymous token not found in GQL response for ${channelName}.`);
+                            logError('TokenSwap', `No valid token in response for ${channelName}.`);
+                            reject(`No valid token in response.`);
                         }
                     } else {
-                        logError('TokenSwap', `(1/3) GQL request for anonymous token failed for ${channelName}. Status: ${response.status}. Response:`, response.responseText?.substring(0, 200));
-                        reject(`GQL request error for anonymous token: status ${response.status}`);
+                        logError('TokenSwap', `GQL request failed for ${channelName}. Status: ${response.status}`);
+                        if (retryCount < CONFIG.ADVANCED.MAX_TOKEN_FETCH_RETRIES - 1) {
+                            await new Promise(r => setTimeout(r, CONFIG.ADVANCED.TOKEN_FETCH_RETRY_DELAY_MS));
+                            return fetchNewPlaybackAccessToken(channelName, deviceId, retryCount + 1)
+                                .then(resolve)
+                                .catch(reject);
+                        }
+                        reject(`GQL request failed: status ${response.status}`);
                     }
                 },
                 onerror: (error) => {
-                    logError('TokenSwap', `(1/3) Network error during GQL request for anonymous token for ${channelName}:`, error);
-                    reject(`Network error during GQL request for anonymous token: ${error.error || 'Unknown network error'}`);
+                    logError('TokenSwap', `Network error for ${channelName}:`, error);
+                    if (retryCount < CONFIG.ADVANCED.MAX_TOKEN_FETCH_RETRIES - 1) {
+                        setTimeout(() => {
+                            fetchNewPlaybackAccessToken(channelName, deviceId, retryCount + 1)
+                                .then(resolve)
+                                .catch(reject);
+                        }, CONFIG.ADVANCED.TOKEN_FETCH_RETRY_DELAY_MS);
+                    } else {
+                        reject(`Network error: ${error.error || 'Unknown'}`);
+                    }
                 }
             });
         });
-    }
+    };
 
-    async function fetchNewUsherM3U8(originalUsherUrl, newAccessToken, channelName) {
-        logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'MidrollRecovery', `(2/3) Requesting new M3U8 manifest for ${channelName} using swapped token.`);
-        const url = new URL(originalUsherUrl);
-        url.searchParams.set('token', newAccessToken.value);
-        url.searchParams.set('sig', newAccessToken.signature);
+    const fetchNewUsherM3U8 = async (originalUrl, token, channelName) => {
+        logTrace(CONFIG.DEBUG.TOKEN_SWAP, 'MidrollRecovery', `(2/3) Fetching M3U8 for ${channelName}.`);
+        const url = new URL(originalUrl);
+        url.searchParams.set('token', token.value);
+        url.searchParams.set('sig', token.signature);
         url.searchParams.set('player_version', '1.20.0');
         url.searchParams.set('allow_source', 'true');
         url.searchParams.set('allow_audio_only', 'true');
@@ -507,309 +521,360 @@
                 responseType: 'text',
                 onload: (response) => {
                     if (response.status >= 200 && response.status < 300 && response.responseText) {
-                        logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'MidrollRecovery', `(2/3) New M3U8 manifest for ${channelName} retrieved successfully.`);
+                        logTrace(CONFIG.DEBUG.TOKEN_SWAP, 'MidrollRecovery', `(2/3) M3U8 retrieved for ${channelName}.`);
                         resolve(response.responseText);
                     } else {
-                        logError('MidrollRecovery', `(2/3) New M3U8 request for ${channelName} failed. Status: ${response.status}. URL: ${url.href.substring(0, 100)}...`);
-                        reject(`New M3U8 request error: status ${response.status}`);
+                        logError('MidrollRecovery', `(2/3) M3U8 request failed for ${channelName}. Status: ${response.status}`);
+                        reject(`M3U8 request failed: status ${response.status}`);
                     }
                 },
                 onerror: (error) => {
-                    logError('MidrollRecovery', `(2/3) Network error during new M3U8 request for ${channelName}:`, error);
-                    reject(`Network error during new M3U8 request: ${error.error || 'Unknown network error'}`);
+                    logError('MidrollRecovery', `(2/3) Network error for ${channelName}:`, error);
+                    reject(`Network error: ${error.error || 'Unknown'}`);
                 }
             });
         });
-    }
+    };
 
-    async function fetchOverride(input, init) {
-        let requestUrl = (input instanceof Request) ? input.url : String(input);
-        let method = ((input instanceof Request) ? input.method : (init?.method || 'GET')).toUpperCase();
-        const lowerCaseUrl = requestUrl.toLowerCase();
-        const urlShortForLog = (requestUrl.includes('?') ? requestUrl.substring(0, requestUrl.indexOf('?')) : requestUrl).substring(0, 120);
+    const fetchOverride = async (input, init) => {
+        const requestUrl = input instanceof Request ? input.url : String(input);
+        const method = (input instanceof Request ? input.method : init?.method || 'GET').toUpperCase();
+        const lowerUrl = requestUrl.toLowerCase();
+        const urlShort = (requestUrl.includes('?') ? requestUrl.substring(0, requestUrl.indexOf('?')) : requestUrl).slice(0, 120);
 
         for (const keyword of AD_URL_KEYWORDS_BLOCK) {
-            if (lowerCaseUrl.includes(keyword.toLowerCase())) {
-                logModuleTrace(LOG_NETWORK_BLOCKING_DEBUG, 'FetchBlock', `Blocked fetch request to ${urlShortForLog} (Keyword: ${keyword})`);
-                return new Response(null, { status: 403, statusText: `Blocked by TTV AdBlock Ultimate (Keyword: ${keyword})` });
+            if (lowerUrl.includes(keyword.toLowerCase())) {
+                logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'FetchBlock', `Blocked fetch to ${urlShort} (Keyword: ${keyword})`);
+                return new Response(null, { status: 403, statusText: `Blocked by TTV AdBlock (Keyword: ${keyword})` });
             }
         }
 
-        const isM3U8RequestToUsher = method === 'GET' && TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl) && lowerCaseUrl.includes('usher.ttvnw.net');
+        const isM3U8Request = method === 'GET' && TWITCH_MANIFEST_PATH_REGEX.test(lowerUrl) && lowerUrl.includes('usher.ttvnw.net');
 
-        if (isM3U8RequestToUsher) {
-            let actualRequestUrl = requestUrl;
-            if (PROACTIVE_TOKEN_SWAP_ENABLED && cachedCleanToken) {
-                logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'TokenSwap', `(Proactive) Swapping token in URL for ${urlShortForLog}`);
-                const url = new URL(requestUrl);
-                url.searchParams.set('token', cachedCleanToken.value);
-                url.searchParams.set('sig', cachedCleanToken.signature);
-                actualRequestUrl = url.href;
+        if (isM3U8Request) {
+            let url = requestUrl;
+            if (CONFIG.SETTINGS.PROACTIVE_TOKEN_SWAP && cachedCleanToken) {
+                logTrace(CONFIG.DEBUG.TOKEN_SWAP, 'TokenSwap', `Swapping token for ${urlShort}`);
+                const newUrl = new URL(url);
+                newUrl.searchParams.set('token', cachedCleanToken.value);
+                newUrl.searchParams.set('sig', cachedCleanToken.signature);
+                url = newUrl.href;
                 cachedCleanToken = null;
             }
 
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
-                    method: "GET",
-                    url: actualRequestUrl,
+                    method: 'GET',
+                    url,
                     headers: init?.headers ? Object.fromEntries(new Headers(init.headers).entries()) : undefined,
-                    responseType: "text",
-                    onload: async function(response) {
+                    responseType: 'text',
+                    onload: async (response) => {
                         if (response.status >= 200 && response.status < 300) {
-                            let { cleanedText, adsFound, errorDuringClean } = parseAndCleanM3U8(response.responseText, actualRequestUrl);
+                            let { cleanedText, adsFound, errorDuringClean } = parseAndCleanM3U8(response.responseText, url);
 
-                            if (adsFound && ENABLE_MIDROLL_RECOVERY && !errorDuringClean) {
-                                logWarn('MidrollRecovery', `Ads detected in M3U8 for ${urlShortForLog}. Initiating mid-roll recovery...`);
+                            if (adsFound && CONFIG.SETTINGS.ENABLE_MIDROLL_RECOVERY && !errorDuringClean) {
+                                logWarn('MidrollRecovery', `Ads in M3U8 for ${urlShort}. Starting recovery...`);
                                 try {
-                                    const urlParams = new URL(actualRequestUrl).searchParams;
-                                    const channelName = urlParams.get('login') || urlParams.get('channel') || unsafeWindow.location.pathname.match(/\/([a-zA-Z0-9_]+)$/)?.[1];
+                                    const urlParams = new URL(url).searchParams;
+                                    const channelName = urlParams.get('login') || urlParams.get('channel') ||
+                                        unsafeWindow.location.pathname.match(/\/([a-zA-Z0-9_]+)$/)?.[1] || 'unknown';
+                                    const deviceId = init?.headers?.get('Device-ID') || unsafeWindow.localStorage.getItem('twilight.deviceID');
 
-                                    if (!channelName) {
-                                        logWarn('MidrollRecovery', 'Could not determine channel name from M3U8 URL or page URL for recovery.');
-                                        throw new Error('Could not determine channel name from URL.');
-                                    }
-                                    const deviceId = init?.headers ? new Headers(init.headers).get('Device-ID') : unsafeWindow.localStorage.getItem('twilight.deviceID');
+                                    const token = await fetchNewPlaybackAccessToken(channelName, deviceId);
+                                    const newM3U8 = await fetchNewUsherM3U8(url, token, channelName);
+                                    const result = parseAndCleanM3U8(newM3U8, `RECOVERY_${channelName}`);
 
-                                    const newAccessToken = await fetchNewPlaybackAccessToken(channelName, deviceId);
-                                    const newM3u8Text = await fetchNewUsherM3U8(actualRequestUrl, newAccessToken, channelName);
-                                    const finalCleanedResult = parseAndCleanM3U8(newM3u8Text, `RECOVERY_URL_FOR_${channelName}`);
-
-                                    if (!finalCleanedResult.adsFound || finalCleanedResult.errorDuringClean) {
-                                        logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'MidrollRecovery', `(3/3) Mid-roll recovery for ${channelName} successful. Using new manifest. Ads found in new: ${finalCleanedResult.adsFound}`);
-                                        cleanedText = finalCleanedResult.cleanedText;
+                                    if (!result.adsFound || result.errorDuringClean) {
+                                        logTrace(CONFIG.DEBUG.TOKEN_SWAP, 'MidrollRecovery', `(3/3) Recovery successful for ${channelName}. Ads: ${result.adsFound}`);
+                                        cleanedText = result.cleanedText;
                                     } else {
-                                        logWarn('MidrollRecovery', `(3/3) Mid-roll recovery for ${channelName} still resulted in an M3U8 with ads. Using this potentially ad-laden M3U8.`);
-                                        cleanedText = finalCleanedResult.cleanedText;
+                                        logWarn('MidrollRecovery', `(3/3) Recovery for ${channelName} still contains ads.`);
+                                        cleanedText = result.cleanedText;
                                     }
                                 } catch (e) {
-                                    logError('MidrollRecovery', `(3/3) Mid-roll recovery for ${urlShortForLog} failed. Reverting to initial cleaning. Reason: ${e}`);
+                                    logError('MidrollRecovery', `(3/3) Recovery failed for ${urlShort}: ${e}`);
                                 }
                             } else if (errorDuringClean) {
-                                logWarn('FetchM3U8', `Initial M3U8 cleaning for ${urlShortForLog} resulted in an error (e.g. too few segments). Using original M3U8.`);
+                                logWarn('FetchM3U8', `M3U8 cleaning error for ${urlShort}. Using original.`);
                                 cleanedText = response.responseText;
                             }
 
-                            const newHeaders = new Headers();
-                            if (response.responseHeaders) {
-                                response.responseHeaders.trim().split(/[\r\n]+/).forEach(line => {
-                                    const parts = line.split(': ', 2);
-                                    if (parts.length === 2 && parts[0].toLowerCase() !== 'content-length') {
-                                        newHeaders.append(parts[0], parts[1]);
-                                    }
-                                });
-                            }
-                            if (!newHeaders.has('Content-Type')) newHeaders.set('Content-Type', 'application/vnd.apple.mpegurl');
-                            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'FetchM3U8', `Processed M3U8 for ${urlShortForLog} (via GM_XHR in Fetch).`);
-                            resolve(new Response(cleanedText, { status: response.status, statusText: response.statusText, headers: newHeaders }));
+                            const headers = new Headers();
+                            response.responseHeaders?.trim().split(/[\r\n]+/).forEach(line => {
+                                const [key, value] = line.split(': ', 2);
+                                if (key.toLowerCase() !== 'content-length' && value) headers.append(key, value);
+                            });
+                            headers.set('Content-Type', 'application/vnd.apple.mpegurl');
+                            logTrace(CONFIG.DEBUG.M3U8_CLEANING, 'FetchM3U8', `Processed M3U8 for ${urlShort}.`);
+                            resolve(new Response(cleanedText, { status: response.status, statusText: response.statusText, headers }));
                         } else {
-                            logError('FetchM3U8', `GM_xmlhttpRequest failed for ${urlShortForLog}: ${response.statusText || response.status}`);
-                            reject(new TypeError(`GM_xmlhttpRequest failed for M3U8: ${response.statusText || response.status}`));
+                            logError('FetchM3U8', `Fetch failed for ${urlShort}: ${response.status}`);
+                            reject(new TypeError(`Fetch failed: ${response.status}`));
                         }
                     },
-                    onerror: function(error) {
-                        logError('FetchM3U8', `Network error for ${urlShortForLog} (GM_XHR in Fetch):`, error);
-                        reject(new TypeError(`Network error for M3U8 fetch: ${error.error || 'Unknown network error'}`));
+                    onerror: (error) => {
+                        logError('FetchM3U8', `Network error for ${urlShort}:`, error);
+                        reject(new TypeError(`Network error: ${error.error || 'Unknown'}`));
                     }
                 });
             });
         }
 
-        const originalResponse = await originalFetch(input, init).catch(e => {
-            logError('FetchOverride', `Fetch failed for ${urlShortForLog}:`, e);
+        const response = await originalFetch(input, init).catch(e => {
+            logError('FetchOverride', `Fetch failed for ${urlShort}:`, e);
             throw e;
         });
 
-        const isGqlRequest = lowerCaseUrl.startsWith(GQL_URL);
-        if (isGqlRequest && method === 'POST' && originalResponse.ok && MODIFY_GQL_RESPONSE) {
-            let responseText;
+        if (lowerUrl.startsWith(GQL_URL) && method === 'POST' && response.ok && CONFIG.SETTINGS.MODIFY_GQL_RESPONSE) {
+            let text;
             try {
-                responseText = await originalResponse.clone().text();
-                if (!responseText) return originalResponse;
+                text = await response.clone().text();
+                if (!text) return response;
             } catch (e) {
-                logError('FetchGQL', 'Failed to read GQL response text:', e);
-                return originalResponse;
+                logError('FetchGQL', 'Failed to read GQL response:', e);
+                return response;
             }
 
-            if (PROACTIVE_TOKEN_SWAP_ENABLED) {
+            if (CONFIG.SETTINGS.PROACTIVE_TOKEN_SWAP) {
                 try {
-                    const gqlData = JSON.parse(responseText);
-                    const operations = Array.isArray(gqlData) ? gqlData : [gqlData];
+                    const data = JSON.parse(text);
+                    const operations = Array.isArray(data) ? data : [data];
                     for (const op of operations) {
-                        const operationName = op.extensions?.operationName;
-                        if (operationName === 'PlaybackAccessToken' || operationName === 'PlaybackAccessToken_Template') {
-                            const channelName = op.data?.streamPlaybackAccessToken ? op.variables?.login : (op.data?.videoPlaybackAccessToken ? op.variables?.login : null);
+                        const opName = op.extensions?.operationName;
+                        if (opName === 'PlaybackAccessToken' || opName === 'PlaybackAccessToken_Template') {
+                            const channelName = op.data?.streamPlaybackAccessToken?.variables?.login ||
+                                op.data?.videoPlaybackAccessToken?.variables?.login;
                             if (channelName) {
-                                const deviceId = init?.headers ? new Headers(init.headers).get('Device-ID') : unsafeWindow.localStorage.getItem('twilight.deviceID');
+                                const deviceId = init?.headers?.get('Device-ID') || unsafeWindow.localStorage.getItem('twilight.deviceID');
                                 fetchNewPlaybackAccessToken(channelName, deviceId)
                                     .then(token => {
-                                    cachedCleanToken = token;
-                                    logModuleTrace(LOG_TOKEN_SWAP_DEBUG, 'TokenSwap', `(Proactive) Successfully fetched and cached new ANONYMOUS token for ${channelName}.`);
-                                })
-                                    .catch(e => logError('TokenSwap', `(Proactive) Failed to fetch ANONYMOUS token for ${channelName}:`, e));
+                                        cachedCleanToken = token;
+                                        logTrace(CONFIG.DEBUG.TOKEN_SWAP, 'TokenSwap', `Cached token for ${channelName}.`);
+                                    })
+                                    .catch(e => logError('TokenSwap', `Failed to fetch token for ${channelName}:`, e));
                             }
                             break;
                         }
                     }
                 } catch (e) {
-                    logWarn('TokenSwap', '(Proactive) Error parsing GQL for PlaybackAccessToken hook:', e);
+                    logWarn('TokenSwap', 'Error parsing GQL for token:', e);
                 }
             }
 
-            const modifiedText = modifyGqlResponse(responseText, requestUrl);
-            if (modifiedText !== responseText) {
-                const newHeaders = new Headers(originalResponse.headers);
-                newHeaders.delete('Content-Length');
-                return new Response(modifiedText, { status: originalResponse.status, statusText: originalResponse.statusText, headers: newHeaders });
+            const modifiedText = modifyGqlResponse(text, requestUrl);
+            if (modifiedText !== text) {
+                const headers = new Headers(response.headers);
+                headers.delete('Content-Length');
+                return new Response(modifiedText, { status: response.status, statusText: response.statusText, headers });
             }
         }
-        return originalResponse;
-    }
 
-    function xhrOpenOverride(method, url) {
+        return response;
+    };
+
+    const xhrOpenOverride = function(method, url, ...args) {
         this._hooked_url = String(url);
         this._hooked_method = method.toUpperCase();
-        originalXhrOpen.apply(this, arguments);
-    }
+        originalXhrOpen.apply(this, [method, url, ...args]);
+    };
 
-    function xhrSendOverride(data) {
-        const urlString = this._hooked_url;
+    const xhrSendOverride = function(data, ...args) {
+        const url = this._hooked_url;
         const method = this._hooked_method;
-        if (!urlString) {
-            originalXhrSend.apply(this, arguments);
-            return;
+        if (!url) {
+            return originalXhrSend.apply(this, [data, ...args]);
         }
-        const lowerCaseUrl = urlString.toLowerCase();
-        const urlShortForLog = (urlString.includes('?') ? urlString.substring(0, urlString.indexOf('?')) : urlString).substring(0, 120);
+        const lowerUrl = url.toLowerCase();
+        const urlShort = (url.includes('?') ? url.substring(0, url.indexOf('?')) : url).slice(0, 120);
 
         for (const keyword of AD_URL_KEYWORDS_BLOCK) {
-            if (lowerCaseUrl.includes(keyword.toLowerCase())) {
-                logModuleTrace(LOG_NETWORK_BLOCKING_DEBUG, 'XHRBlock', `Blocked XHR ${method} request to ${urlShortForLog} (Keyword: ${keyword})`);
+            if (lowerUrl.includes(keyword.toLowerCase())) {
+                logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'XHRBlock', `Blocked XHR ${method} to ${urlShort} (Keyword: ${keyword})`);
                 this.dispatchEvent(new Event('error'));
                 return;
             }
         }
 
-        const isM3U8RequestToUsher = method === 'GET' && TWITCH_MANIFEST_PATH_REGEX.test(lowerCaseUrl) && lowerCaseUrl.includes('usher.ttvnw.net');
+        const isM3U8Request = method === 'GET' && TWITCH_MANIFEST_PATH_REGEX.test(lowerUrl) && lowerUrl.includes('usher.ttvnw.net');
 
-        if (isM3U8RequestToUsher) {
-            const xhr = this;
+        if (isM3U8Request) {
             GM_xmlhttpRequest({
-                method: method,
-                url: urlString,
-                responseType: "text",
-                onload: function(response) {
-                    let finalResponseText = response.responseText;
+                method,
+                url,
+                responseType: 'text',
+                onload: (response) => {
+                    let responseText = response.responseText;
                     if (response.status >= 200 && response.status < 300) {
-                        const { cleanedText, adsFound, errorDuringClean } = parseAndCleanM3U8(response.responseText, urlString);
+                        const { cleanedText, adsFound, errorDuringClean } = parseAndCleanM3U8(responseText, url);
                         if (adsFound && !errorDuringClean) {
-                            finalResponseText = cleanedText;
-                            logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'XHR_M3U8', `Cleaned M3U8 for ${urlShortForLog}`);
+                            responseText = cleanedText;
+                            logTrace(CONFIG.DEBUG.M3U8_CLEANING, 'XHR_M3U8', `Cleaned M3U8 for ${urlShort}`);
                         } else if (errorDuringClean) {
-                            logWarn('XHR_M3U8', `M3U8 cleaning error for ${urlShortForLog}, using original.`);
+                            logWarn('XHR_M3U8', `M3U8 cleaning error for ${urlShort}. Using original.`);
                         }
                     }
-                    Object.defineProperties(xhr, {
-                        'responseText': { value: finalResponseText, configurable: true, writable: true },
-                        'response': { value: finalResponseText, configurable: true, writable: true },
-                        'status': { value: response.status, configurable: true },
-                        'statusText': { value: response.statusText, configurable: true },
-                        'readyState': { value: 4, configurable: true }
+                    Object.defineProperties(this, {
+                        responseText: { value: responseText, configurable: true, writable: true },
+                        response: { value: responseText, configurable: true, writable: true },
+                        status: { value: response.status, configurable: true },
+                        statusText: { value: response.statusText, configurable: true },
+                        readyState: { value: 4, configurable: true },
                     });
-                    logModuleTrace(LOG_M3U8_CLEANING_DEBUG, 'XHR_M3U8', `Processed M3U8 for ${urlShortForLog} (via GM_XHR in XHR Send). Status: ${response.status}`);
-                    xhr.dispatchEvent(new Event('load'));
-                    xhr.dispatchEvent(new Event('loadend'));
+                    logTrace(CONFIG.DEBUG.M3U8_CLEANING, 'XHR_M3U8', `Processed M3U8 for ${urlShort}. Status: ${response.status}`);
+                    this.dispatchEvent(new Event('load'));
+                    this.dispatchEvent(new Event('loadend'));
                 },
-                onerror: function(error) {
-                    logError('XHR_M3U8', `GM_xmlhttpRequest error for ${urlShortForLog}:`, error);
-                    Object.defineProperties(xhr, {
-                        'status': { value: 0, configurable: true },
-                        'readyState': { value: 4, configurable: true }
+                onerror: (error) => {
+                    logError('XHR_M3U8', `XHR error for ${urlShort}:`, error);
+                    Object.defineProperties(this, {
+                        status: { value: 0, configurable: true },
+                        readyState: { value: 4, configurable: true },
                     });
-                    xhr.dispatchEvent(new Event('error'));
-                    xhr.dispatchEvent(new Event('loadend'));
-                }
+                    this.dispatchEvent(new Event('error'));
+                    this.dispatchEvent(new Event('loadend'));
+                },
             });
             return;
         }
 
-        const isGqlRequest = lowerCaseUrl.startsWith(GQL_URL);
-        if (isGqlRequest && method === 'POST' && MODIFY_GQL_RESPONSE) {
-            this.addEventListener('load', function() {
-                if (this.readyState === 4 && this.status >= 200 && this.status < 300) {
-                    const originalResponseText = this.responseText;
-                    if (typeof originalResponseText === 'string') {
-                        const modifiedText = modifyGqlResponse(originalResponseText, this._hooked_url);
-                        if (modifiedText !== originalResponseText) {
-                            Object.defineProperty(this, 'responseText', { value: modifiedText, configurable: true, writable: true });
-                            Object.defineProperty(this, 'response', { value: modifiedText, configurable: true, writable: true });
-                            logModuleTrace(LOG_GQL_MODIFY_DEBUG, 'XHR_GQL', `Modified GQL for ${this._hooked_url.substring(0,100)}`);
-                        }
+        if (lowerUrl.startsWith(GQL_URL) && method === 'POST' && CONFIG.SETTINGS.MODIFY_GQL_RESPONSE) {
+            this.addEventListener('load', () => {
+                if (this.readyState === 4 && this.status >= 200 && this.status < 300 && typeof this.responseText === 'string') {
+                    const modifiedText = modifyGqlResponse(this.responseText, url);
+                    if (modifiedText !== this.responseText) {
+                        Object.defineProperties(this, {
+                            responseText: { value: modifiedText, configurable: true, writable: true },
+                            response: { value: modifiedText, configurable: true, writable: true },
+                        });
+                        logTrace(CONFIG.DEBUG.GQL_MODIFY, 'XHR_GQL', `Modified GQL for ${url.slice(0, 100)}`);
                     }
                 }
             }, { once: true });
         }
-        originalXhrSend.apply(this, arguments);
-    }
 
-    function installHooks() {
-        if (hooksInstalledMain) return;
+        originalXhrSend.apply(this, [data, ...args]);
+    };
+
+    const installHooks = () => {
+        if (hooksInstalled) return;
         try {
             unsafeWindow.fetch = fetchOverride;
-            logCoreDebug('HookInstall', 'Fetch hook installed.');
+            logDebug('HookInstall', 'Fetch hook installed.');
         } catch (e) {
             logError('HookInstall', 'Failed to hook fetch:', e);
         }
         try {
             unsafeWindow.XMLHttpRequest.prototype.open = xhrOpenOverride;
             unsafeWindow.XMLHttpRequest.prototype.send = xhrSendOverride;
-            logCoreDebug('HookInstall', 'XHR hooks installed.');
+            logDebug('HookInstall', 'XHR hooks installed.');
         } catch (e) {
             logError('HookInstall', 'Failed to hook XHR:', e);
         }
-        hooksInstalledMain = true;
-        logCoreDebug('HookInstall', 'All network hooks installed successfully.');
-    }
+        hooksInstalled = true;
+        logDebug('HookInstall', 'All network hooks installed.');
+    };
 
-    function removeDOMAdElements() {
-        if (!ATTEMPT_DOM_AD_REMOVAL) return;
+    const removeDOMAdElements = () => {
+        if (!CONFIG.SETTINGS.ATTEMPT_DOM_AD_REMOVAL) return;
         if (!adRemovalObserver) {
-            adRemovalObserver = new MutationObserver(() => removeDOMAdElements());
-            const observeTarget = document.body || document.documentElement;
-            if (observeTarget) {
-                adRemovalObserver.observe(observeTarget, { childList: true, subtree: true });
-                logCoreDebug('DOMAdRemoval', 'MutationObserver for DOM ad removal started.');
+            adRemovalObserver = new MutationObserver(removeDOMAdElements);
+            const target = document.body || document.documentElement;
+            if (target) {
+                adRemovalObserver.observe(target, { childList: true, subtree: true });
+                logDebug('DOMAdRemoval', 'MutationObserver for ad removal started.');
             } else {
                 document.addEventListener('DOMContentLoaded', () => {
                     const target = document.body || document.documentElement;
-                    if (target) adRemovalObserver.observe(target, { childList: true, subtree: true });
-                    logCoreDebug('DOMAdRemoval', 'MutationObserver for DOM ad removal started (DOMContentLoaded).');
+                    if (target) {
+                        adRemovalObserver.observe(target, { childList: true, subtree: true });
+                        logDebug('DOMAdRemoval', 'MutationObserver for ad removal started (DOMContentLoaded).');
+                    }
                 }, { once: true });
             }
         }
-        AD_DOM_ELEMENT_SELECTORS_TO_REMOVE_LIST.forEach(selector => {
+
+        AD_DOM_SELECTORS.forEach(selector => {
             try {
                 const elements = document.querySelectorAll(selector);
                 elements.forEach(el => {
-                    if (el && el.parentNode && typeof el.parentNode.removeChild === 'function') {
+                    if (el?.parentNode?.removeChild) {
                         el.parentNode.removeChild(el);
-                        logModuleTrace(CORE_DEBUG_LOGGING, 'DOMAdRemoval', `Removed element matching selector: ${selector}`);
+                        logTrace(CONFIG.DEBUG.CORE, 'DOMAdRemoval', `Removed element: ${selector}`);
                     } else {
-                        logWarn('DOMAdRemoval', `Cannot remove element for selector "${selector}": invalid parentNode or removeChild method.`);
+                        logWarn('DOMAdRemoval', `Cannot remove element for ${selector}: invalid parentNode.`);
                     }
                 });
             } catch (e) {
-                logError('DOMAdRemoval', `Error removing elements for selector "${selector}":`, e);
+                logError('DOMAdRemoval', `Error removing ${selector}:`, e);
             }
         });
-    }
+    };
 
-    function setupVideoPlayerMonitor() {
-        if (videoPlayerMutationObserver) return;
+    const setupVideoPlayerMonitor = () => {
+        if (videoPlayerObserver) return;
 
-        if (!PLAYER_CONTAINER_SELECTORS) {
-            logError('PlayerMonitor', 'PLAYER_CONTAINER_SELECTORS is not defined. Skipping video player monitor setup.');
-            return;
-        }
+        const attachListeners = (vid) => {
+            if (!vid || vid._adblock_listeners_attached) return;
+            logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'PlayerMonitor', 'Attaching listeners to video element:', vid);
+
+            const attemptPlay = () => {
+                if (vid.paused) {
+                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Autoplay', 'Attempting to play video.');
+                    vid.play().catch(e => {
+                        if (e.name !== 'NotAllowedError') {
+                            logWarn('Autoplay', `Autoplay failed: ${e.name} - ${e.message}`);
+                        }
+                    });
+                }
+            };
+
+            setTimeout(attemptPlay, CONFIG.ADVANCED.VISIBILITY_RESUME_DELAY_MS);
+            vid.addEventListener('canplay', attemptPlay, { once: true, passive: true });
+
+            let lastTimeUpdate = Date.now();
+            vid.addEventListener('timeupdate', () => {
+                lastTimeUpdate = Date.now();
+            }, { passive: true });
+
+            vid.addEventListener('error', (e) => {
+                const error = e.target?.error;
+                const code = error?.code;
+                logError('PlayerMonitor', `Player error. Code: ${code || 'N/A'}, Message: ${error?.message || 'N/A'}`);
+                if (code && CONFIG.ADVANCED.RELOAD_ON_ERROR_CODES.includes(code)) {
+                    logError('PlayerMonitor', `Error code ${code} requires reload.`);
+                    triggerReload(`Error code ${code}`);
+                }
+            }, { passive: true });
+
+            vid.addEventListener('waiting', () => {
+                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'PlayerMonitor', 'Video buffering.');
+                lastTimeUpdate = Date.now();
+                if (CONFIG.ADVANCED.RELOAD_BUFFERING_THRESHOLD_MS > 0) {
+                    setTimeout(() => {
+                        if (vid.paused || vid.seeking || vid.readyState >= 3) return;
+                        if (Date.now() - lastTimeUpdate > CONFIG.ADVANCED.RELOAD_BUFFERING_THRESHOLD_MS) {
+                            logWarn('PlayerMonitor', `Buffering timeout after ${CONFIG.ADVANCED.RELOAD_BUFFERING_THRESHOLD_MS / 1000}s. Reloading.`);
+                            triggerReload('Buffering timeout');
+                        }
+                    }, CONFIG.ADVANCED.RELOAD_BUFFERING_THRESHOLD_MS + 1000);
+                }
+            }, { passive: true });
+
+            vid.addEventListener('stalled', () => {
+                logWarn('PlayerMonitor', 'Video stalled.');
+                if (CONFIG.ADVANCED.RELOAD_STALL_THRESHOLD_MS > 0) {
+                    setTimeout(() => {
+                        if (vid.paused || vid.seeking || vid.readyState >= 3) return;
+                        if (Date.now() - lastTimeUpdate > CONFIG.ADVANCED.RELOAD_STALL_THRESHOLD_MS) {
+                            logWarn('PlayerMonitor', `Stalled for ${CONFIG.ADVANCED.RELOAD_STALL_THRESHOLD_MS / 1000}s. Reloading.`);
+                            triggerReload('Stall timeout');
+                        }
+                    }, CONFIG.ADVANCED.RELOAD_STALL_THRESHOLD_MS + 1000);
+                }
+            }, { passive: true });
+
+            vid._adblock_listeners_attached = true;
+        };
 
         PLAYER_CONTAINER_SELECTORS.forEach(selector => {
             if (videoElement) return;
@@ -818,32 +883,34 @@
                 const vid = container.querySelector('video');
                 if (vid) {
                     videoElement = vid;
-                    logCoreDebug('PlayerMonitor', 'Found initial video element in container:', selector);
-                    attachVideoEventListeners(videoElement);
+                    logDebug('PlayerMonitor', `Found video element in ${selector}`);
+                    attachListeners(videoElement);
                 }
             }
         });
+
         if (!videoElement) {
             videoElement = document.querySelector('video');
             if (videoElement) {
-                logCoreDebug('PlayerMonitor', 'Found initial video element via direct query.');
-                attachVideoEventListeners(videoElement);
+                logDebug('PlayerMonitor', 'Found video element via direct query.');
+                attachListeners(videoElement);
             }
         }
 
-        videoPlayerMutationObserver = new MutationObserver((mutationsList) => {
-            for (const mutation of mutationsList) {
-                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+        videoPlayerObserver = new MutationObserver(mutations => {
+            for (const mutation of mutations) {
+                if (mutation.type === 'childList' && mutation.addedNodes.length) {
                     for (const node of mutation.addedNodes) {
                         if (node.nodeType === Node.ELEMENT_NODE) {
-                            const newVideoElement = node.querySelector('video') || (node.tagName === 'VIDEO' ? node : null);
-                            if (newVideoElement && newVideoElement !== videoElement) {
-                                logCoreDebug('PlayerMonitor', 'New video element detected through mutation.');
+                            const newVideo = node.tagName === 'VIDEO' ? node : node.querySelector('video');
+                            if (newVideo && newVideo !== videoElement) {
+                                logDebug('PlayerMonitor', 'New video element detected.');
                                 if (videoElement) {
-                                    logCoreDebug('PlayerMonitor', 'Removing listeners from old video element.');
+                                    logDebug('PlayerMonitor', 'Removing listeners from old video.');
+                                    videoElement._adblock_listeners_attached = false;
                                 }
-                                videoElement = newVideoElement;
-                                attachVideoEventListeners(videoElement);
+                                videoElement = newVideo;
+                                attachListeners(videoElement);
                                 return;
                             }
                         }
@@ -852,156 +919,96 @@
             }
         });
 
-        const observeTarget = document.body || document.documentElement;
-        if (observeTarget) {
-            videoPlayerMutationObserver.observe(observeTarget, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-player-error'] });
-            logCoreDebug('PlayerMonitor', 'Video player mutation observer started.');
+        const target = document.body || document.documentElement;
+        if (target) {
+            videoPlayerObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-player-error'] });
+            logDebug('PlayerMonitor', 'Video player observer started.');
         } else {
             document.addEventListener('DOMContentLoaded', () => {
                 const target = document.body || document.documentElement;
-                if (target) videoPlayerMutationObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-player-error'] });
-                logCoreDebug('PlayerMonitor', 'Video player mutation observer started (DOMContentLoaded).');
+                if (target) {
+                    videoPlayerObserver.observe(target, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'data-player-error'] });
+                    logDebug('PlayerMonitor', 'Video player observer started (DOMContentLoaded).');
+                }
             }, { once: true });
         }
-    }
+    };
 
-    function attachVideoEventListeners(vidElement) {
-        if (!vidElement || vidElement._adblock_listeners_attached) return;
-
-        logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMonitor', 'Attaching event listeners to video element:', vidElement);
-
-        const attemptPlay = () => {
-            if (vidElement && vidElement.paused) {
-                logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'Autoplay', 'Proactively trying to play video element.');
-                vidElement.play().catch(e => {
-                    if (e.name !== 'NotAllowedError') {
-                        logWarn('Autoplay', `Failed to autoplay video: ${e.name} - ${e.message}. User interaction might be required.`);
-                    }
-                });
-            }
-        };
-
-        setTimeout(attemptPlay, VISIBILITY_RESUME_DELAY_MS);
-        vidElement.addEventListener('canplay', attemptPlay, { once: true, passive: true });
-
-        vidElement.addEventListener('error', (e) => {
-            const error = e?.target?.error;
-            const errorCode = error?.code;
-            const errorMessage = error?.message;
-            logError('PlayerMonitor', `Player error event. Code: ${errorCode || 'N/A'}, Message: "${errorMessage || 'N/A'}"`);
-            if (errorCode && RELOAD_ON_ERROR_CODES.includes(errorCode)) {
-                logError('PlayerMonitor', `Player error code ${errorCode} is in critical list. Triggering reload.`);
-                triggerReload(`Player error code ${errorCode}`);
-            }
-        }, { passive: true });
-
-        let lastTimeUpdate = Date.now();
-        vidElement.addEventListener('timeupdate', () => {
-            lastTimeUpdate = Date.now();
-        }, { passive: true });
-
-        vidElement.addEventListener('waiting', () => {
-            logModuleTrace(LOG_PLAYER_MONITOR_DEBUG, 'PlayerMonitor', 'Video event: waiting (buffering)');
-            lastTimeUpdate = Date.now();
-            if (RELOAD_BUFFERING_THRESHOLD_MS > 0) {
-                setTimeout(() => {
-                    if (vidElement.paused || vidElement.seeking || vidElement.readyState >= 3) return;
-                    if (Date.now() - lastTimeUpdate > RELOAD_BUFFERING_THRESHOLD_MS) {
-                        logWarn('PlayerMonitor', `Video appears stuck buffering for over ${RELOAD_BUFFERING_THRESHOLD_MS / 1000}s. Triggering reload.`);
-                        triggerReload('Video buffering timeout');
-                    }
-                }, RELOAD_BUFFERING_THRESHOLD_MS + 1000);
-            }
-        }, { passive: true });
-
-        vidElement.addEventListener('stalled', () => {
-            logWarn('PlayerMonitor', 'Video event: stalled (browser unable to fetch data).');
-            if (RELOAD_STALL_THRESHOLD_MS > 0) {
-                setTimeout(() => {
-                    if (vidElement.paused || vidElement.seeking || vidElement.readyState >= 3) return;
-                    if (Date.now() - lastTimeUpdate > RELOAD_STALL_THRESHOLD_MS) {
-                        logWarn('PlayerMonitor', `Video appears stalled for over ${RELOAD_STALL_THRESHOLD_MS / 1000}s. Triggering reload.`);
-                        triggerReload('Video stall timeout');
-                    }
-                }, RELOAD_STALL_THRESHOLD_MS + 1000);
-            }
-        }, { passive: true });
-
-        vidElement._adblock_listeners_attached = true;
-    }
-
-    function triggerReload(reason) {
-        if (!ENABLE_AUTO_RELOAD) {
-            logCoreDebug('ReloadTrigger', `Auto-reload disabled. Suppressing reload for: ${reason}`);
+    const triggerReload = (reason) => {
+        if (!CONFIG.SETTINGS.ENABLE_AUTO_RELOAD) {
+            logDebug('ReloadTrigger', `Auto-reload disabled: ${reason}`);
             return;
         }
         const now = Date.now();
-        if (reloadCount >= MAX_RELOADS_PER_SESSION) {
-            logWarn('ReloadTrigger', `Max reloads (${MAX_RELOADS_PER_SESSION}) reached for this session. Suppressing reload for: ${reason}`);
+        if (reloadCount >= CONFIG.ADVANCED.MAX_RELOADS_PER_SESSION) {
+            logWarn('ReloadTrigger', `Max reloads (${CONFIG.ADVANCED.MAX_RELOADS_PER_SESSION}) reached: ${reason}`);
             return;
         }
-        if (now - lastReloadTimestamp < RELOAD_COOLDOWN_MS) {
-            logWarn('ReloadTrigger', `Reload cooldown active. Suppressing reload for: ${reason}`);
+        if (now - lastReloadTimestamp < CONFIG.ADVANCED.RELOAD_COOLDOWN_MS) {
+            logWarn('ReloadTrigger', `Reload cooldown active: ${reason}`);
             return;
         }
 
         lastReloadTimestamp = now;
         reloadCount++;
-        logCoreDebug('ReloadTrigger', `Reloading page (Attempt ${reloadCount}/${MAX_RELOADS_PER_SESSION}). Reason: ${reason}`);
+        logDebug('ReloadTrigger', `Reloading (${reloadCount}/${CONFIG.ADVANCED.MAX_RELOADS_PER_SESSION}): ${reason}`);
         try {
             unsafeWindow.location.reload();
         } catch (e) {
-            logError('ReloadTrigger', 'Exception during location.reload():', e);
+            logError('ReloadTrigger', `Reload error:`, e);
         }
-    }
+    };
 
-    function startErrorScreenObserver() {
-        if (!ENABLE_AUTO_RELOAD || errorScreenObserver) return;
+    const startErrorScreenObserver = () => {
+        if (!CONFIG.SETTINGS.ENABLE_AUTO_RELOAD || errorScreenObserver) return;
 
-        const errorScreenSelectors = [
+        const selectors = [
             '[data-a-target="player-error-screen"]',
             '.content-overlay-gate__content',
             'div[data-test-selector="content-overlay-gate-text"]'
         ];
 
         errorScreenObserver = new MutationObserver(() => {
-            for (const selector of errorScreenSelectors) {
-                const errorScreenElement = document.querySelector(selector);
-                if (errorScreenElement && (errorScreenElement.offsetParent !== null || errorScreenElement.classList.contains('content-overlay-gate--active'))) {
-                    logError('ErrorScreenObserver', `Twitch error screen detected (selector: ${selector}). Triggering reload.`);
-                    triggerReload(`Detected player error screen: ${selector}`);
+            for (const selector of selectors) {
+                const element = document.querySelector(selector);
+                if (element && (element.offsetParent || element.classList.contains('content-overlay-gate--active'))) {
+                    logError('ErrorScreenObserver', `Error screen detected: ${selector}`);
+                    triggerReload(`Error screen: ${selector}`);
                     return;
                 }
             }
         });
-        const observeTarget = document.body || document.documentElement;
-        if (observeTarget) {
-            errorScreenObserver.observe(observeTarget, { childList: true, subtree: true });
-            logCoreDebug('ErrorScreenObserver', 'Observer for player error screens started.');
+
+        const target = document.body || document.documentElement;
+        if (target) {
+            errorScreenObserver.observe(target, { childList: true, subtree: true });
+            logDebug('ErrorScreenObserver', 'Error screen observer started.');
         } else {
             document.addEventListener('DOMContentLoaded', () => {
                 const target = document.body || document.documentElement;
-                if (target) errorScreenObserver.observe(target, { childList: true, subtree: true });
-                logCoreDebug('ErrorScreenObserver', 'Observer for player error screens started (DOMContentLoaded).');
+                if (target) {
+                    errorScreenObserver.observe(target, { childList: true, subtree: true });
+                    logDebug('ErrorScreenObserver', 'Error screen observer started (DOMContentLoaded).');
+                }
             }, { once: true });
         }
-    }
+    };
 
-    function initializeScript() {
-        logCoreDebug('Initialize', `Twitch Adblock Ultimate v${SCRIPT_VERSION} initializing...`);
+    const initialize = () => {
+        logDebug('Initialize', `Twitch Adblock Ultimate v${CONFIG.SCRIPT_VERSION} initializing...`);
         injectCSS();
-        if (FORCE_MAX_QUALITY_IN_BACKGROUND) forceMaxQuality();
+        if (CONFIG.SETTINGS.FORCE_MAX_QUALITY) forceMaxQuality();
         hookQualitySettings();
         installHooks();
         removeDOMAdElements();
         startErrorScreenObserver();
         setupVideoPlayerMonitor();
-        logCoreDebug('Initialize', 'Script initialized successfully.');
-    }
+        logDebug('Initialize', 'Script initialized.');
+    };
 
     if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', initializeScript, { once: true });
+        document.addEventListener('DOMContentLoaded', initialize, { once: true });
     } else {
-        initializeScript();
+        initialize();
     }
 })();
