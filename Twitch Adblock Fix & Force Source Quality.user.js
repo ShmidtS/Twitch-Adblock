@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      30.6.0
+// @version      30.6.1
 // @description  Twitch adblock with token substitution, PiP/overlay handling, and unmute playback
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -28,7 +28,7 @@
     'use strict';
 
     const CONFIG = {
-        SCRIPT_VERSION: '30.6.0',
+        SCRIPT_VERSION: '30.6.1',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -92,7 +92,6 @@
     let videoElement = null;
     let lastReloadTimestamp = 0;
     let reloadCount = 0;
-    let isPipMode = false;
     const originalFetch = unsafeWindow.fetch;
 
     const logError = (s,m,...a)=>CONFIG.DEBUG.SHOW_ERRORS&&console.error(`${LOG_PREFIX} [${s}] ERROR:`,m,...a);
@@ -107,25 +106,40 @@
             extensions:{persistedQuery:{version:1,sha256Hash:'0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712'}},
         };
         try{
-            const response=await originalFetch(GQL_URL,{method:'POST',headers:{'Client-ID':CLIENT_ID,'Client-Version':CLIENT_VERSION},body:JSON.stringify(operation)});
-            const data=await response.json();
-            const token=isVod?data.data.videoPlaybackAccessToken:data.data.streamPlaybackAccessToken;
-            if(token?.authorization?.isForbidden){
-                return{
-                    value:btoa(unescape(encodeURIComponent(JSON.stringify({adblock:false,platform:'web',playerType:'site'})))),
-                    signature:'fallback_signature',
-                    __typename:token.__typename
-                };
+            const response=await originalFetch(GQL_URL,{
+                method:'POST',
+                headers:{'Client-ID':CLIENT_ID,'Client-Version':CLIENT_VERSION,'Content-Type':'application/json'},
+                body:JSON.stringify(operation)
+            });
+            if(!response.ok) {
+                logWarn('FetchCleanToken','GQL token fetch failed status',response.status);
+                return null;
             }
+            const data=await response.json();
+            const token=isVod?data.data?.videoPlaybackAccessToken:data.data?.streamPlaybackAccessToken;
+            if(!token){
+                logWarn('FetchCleanToken','No token in response');
+                return null;
+            }
+            // If token indicates ad restrictions, but authorization allows playback, return it.
             return token;
-        }catch(e){logError('FetchCleanToken','Failed:',e);return null;}
+        }catch(e){
+            logError('FetchCleanToken','Failed:',e);
+            return null;
+        }
     }
 
     const fetchOverride=async(input,init)=>{
         const requestUrl=input instanceof Request?input.url:String(input);
-        if(AD_URL_KEYWORDS_BLOCK.some(k=>requestUrl.includes(k))){
+        const requestUrlLower = requestUrl.toLowerCase();
+
+        // Block obvious ad URLs (case-insensitive)
+        if(AD_URL_KEYWORDS_BLOCK.some(k=>requestUrlLower.includes(String(k).toLowerCase()))){
+            logTrace(CONFIG.DEBUG.NETWORK_BLOCKING,'Block URL',requestUrl);
             return new Response(null,{status:403,statusText:`Blocked by TTV AdBlock`});
         }
+
+        // Intercept GraphQL PlaybackAccessToken requests
         if(requestUrl===GQL_URL){
             let originalBodyText='';
             if(init&&init.body){
@@ -136,86 +150,157 @@
                 if(originalBody.operationName==='PlaybackAccessToken'){
                     const response=await originalFetch(input,init);
                     const responseClone=response.clone();
-                    const responseData=await responseClone.json();
+                    let responseData;
+                    try{ responseData = await responseClone.json(); } catch(e){ logWarn('fetchOverride','Failed parse GQL response JSON',e); return response; }
                     const isVod=originalBody.variables.isVod;
                     const tokenData=isVod?responseData.data?.videoPlaybackAccessToken:responseData.data?.streamPlaybackAccessToken;
-                    if(tokenData?.authorization?.isForbidden&&tokenData?.authorization?.forbiddenReasonCode==="STITCHED_AD"){
+
+                    // If Twitch marked it as forbidden due to stitched ads, try to get a clean token.
+                    if(tokenData?.authorization?.isForbidden && tokenData?.authorization?.forbiddenReasonCode === "STITCHED_AD"){
                         const channelName=originalBody.variables.login;
                         const vodId=originalBody.variables.vodID;
                         const cleanToken=await fetchCleanToken(channelName,isVod,vodId);
-                        if(cleanToken&&cleanToken.value&&cleanToken.signature){
-                            if(isVod){responseData.data.videoPlaybackAccessToken=cleanToken;}else{responseData.data.streamPlaybackAccessToken=cleanToken;}
-                            return new Response(JSON.stringify(responseData),{status:response.status,statusText:response.statusText,headers:response.headers});
+
+                        // Only replace if we got a clearly valid token object
+                        if(cleanToken && cleanToken.value && cleanToken.signature){
+                            if(isVod){
+                                responseData.data.videoPlaybackAccessToken = cleanToken;
+                            } else {
+                                responseData.data.streamPlaybackAccessToken = cleanToken;
+                            }
+                            logDebug('fetchOverride','Replaced forbidden token with clean token for',channelName||vodId);
+                            // Build headers for new Response: copy important headers but avoid content-length mismatch
+                            const newHeaders = new Headers(response.headers);
+                            newHeaders.delete('Content-Length');
+                            return new Response(JSON.stringify(responseData),{status:response.status,statusText:response.statusText,headers:newHeaders});
+                        } else {
+                            // --- CRITICAL: don't return a malformed "fallback" token (it breaks atob in player).
+                            // If we couldn't get a valid clean token, leave original response intact (safer).
+                            logWarn('fetchOverride','Could not obtain valid clean token; leaving original response to avoid breaking player.');
+                            return response;
                         }
                     }
+                    // nothing to change -> return original response
                     return response;
                 }
-            }catch(e){}
-        }
-        if(TWITCH_MANIFEST_PATH_REGEX.test(requestUrl)&&requestUrl.includes('usher.ttvnw.net')){
-            const response=await originalFetch(input,init);
-            if(response.ok){
-                const text=await response.text();
-                const {cleanedText}=parseAndCleanM3U8(text,requestUrl);
-                const headers=new Headers(response.headers);headers.delete('Content-Length');
-                return new Response(cleanedText,{status:response.status,statusText:response.statusText,headers});
+            }catch(e){
+                // if any parse error — don't break: return original fetch
+                logTrace(CONFIG.DEBUG.GQL_MODIFY,'GQL handling error',e);
             }
         }
+
+        // Intercept m3u8 manifests from usher and clean cue/daterange lines
+        if(TWITCH_MANIFEST_PATH_REGEX.test(requestUrl) && requestUrlLower.includes('usher.ttvnw.net')){
+            try{
+                const response=await originalFetch(input,init);
+                if(response && response.ok){
+                    const text=await response.text();
+                    const {cleanedText,adsFound} = parseAndCleanM3U8(text,requestUrl);
+                    if(adsFound){
+                        logDebug('fetchOverride','Cleaned m3u8 (ads removed):',requestUrl);
+                        const headers=new Headers(response.headers);
+                        headers.delete('Content-Length');
+                        return new Response(cleanedText,{status:response.status,statusText:response.statusText,headers});
+                    } else {
+                        return response;
+                    }
+                }
+            }catch(e){
+                logWarn('fetchOverride','Error fetching/cleaning m3u8',e);
+                return originalFetch(input,init);
+            }
+        }
+
         return originalFetch(input,init);
     };
 
     const injectCSS=()=>{
         const css=`${AD_DOM_SELECTORS.join(',\n')} {display:none!important;opacity:0!important;visibility:hidden!important;z-index:-1000!important;} video {display:block!important;width:100%!important;height:auto!important;}`;
-        try{GM_addStyle(css);}catch(e){}
+        try{GM_addStyle(css);}catch(e){logWarn('injectCSS','GM_addStyle failed',e);}
     };
 
     const forceMaxQuality=()=>{
         try{
             Object.defineProperties(document,{'visibilityState':{get:()=> 'visible',configurable:true},'hidden':{get:()=> false,configurable:true}});
             document.addEventListener('visibilitychange',e=>e.stopImmediatePropagation(),true);
-        }catch(e){}
+        }catch(e){logWarn('forceMaxQuality','Could not override visibilityState',e);}
     };
 
     const parseAndCleanM3U8=(m3u8Text,url='N/A')=>{
         if(!m3u8Text||typeof m3u8Text!=='string')return{cleanedText:m3u8Text,adsFound:false};
         let adsFound=false;
-        const cleanLines=m3u8Text.split('\n').filter(line=>{
-            const upper=line.trim().toUpperCase();
-            if(AD_DATERANGE_KEYWORDS.some(k=>upper.includes(k))){adsFound=true;return false;}
+        const keywordUpper = AD_DATERANGE_KEYWORDS.map(k => String(k).toUpperCase());
+
+        const lines = m3u8Text.split('\n');
+        const cleanLines = lines.filter(line => {
+            if(!line) return true;
+            const trimmed = line.trim();
+            const upper = trimmed.toUpperCase();
+
+            // Remove daterange/cue-out/twitch ad tags and other ad-related metadata lines
+            // Explicitly filter lines starting with known tags or containing keywords (case-insensitive)
+            if(upper.startsWith('#EXT-X-DATERANGE') || upper.startsWith('#EXT-X-CUE-OUT') || upper.startsWith('#EXT-X-CUE-IN') ){
+                adsFound = true;
+                return false;
+            }
+            if(keywordUpper.some(k => upper.includes(k))){
+                adsFound = true;
+                return false;
+            }
+            // Also remove special Twitch ad info tags
+            if(upper.startsWith('#EXT-X-TWITCH-INFO') || upper.startsWith('#EXT-X-TWITCH-AD') ){
+                adsFound = true;
+                return false;
+            }
             return true;
         });
-        return{cleanedText:adsFound?cleanLines.join('\n'):m3u8Text,adsFound};
+
+        return {cleanedText: adsFound ? cleanLines.join('\n') : m3u8Text, adsFound};
     };
 
     const removeDOMAdElements=()=>{
         if(!CONFIG.SETTINGS.ATTEMPT_DOM_AD_REMOVAL)return;
         if(adRemovalObserver)adRemovalObserver.disconnect();
-        adRemovalObserver=new MutationObserver(()=>{
-            let placeholderDetected=false;
-            AD_DOM_SELECTORS.forEach(sel=>{
-                try{document.querySelectorAll(sel).forEach(el=>el.remove());}catch(e){}
-            });
-            const elements=document.querySelectorAll('.video-player__overlay,.player-overlay');
-            elements.forEach(el=>{
-                if(el.textContent.includes(PLACEHOLDER_TEXT)){placeholderDetected=true;el.remove();}
-            });
-            if(placeholderDetected&&videoElement){
-                videoElement.muted=false;
-                videoElement.volume=1.0;
-                videoElement.play().catch(()=>{});
-                if(document.pictureInPictureElement){document.exitPictureInPicture().catch(()=>{});}
-                videoElement.style.width="100%";videoElement.style.height="100%";
+        adRemovalObserver=new MutationObserver(()=> {
+            try {
+                let placeholderDetected=false;
+                AD_DOM_SELECTORS.forEach(sel=>{
+                    try{document.querySelectorAll(sel).forEach(el=>el.remove());}catch(e){}
+                });
+                // Also remove by text content (case-insensitive)
+                const elements=document.querySelectorAll('div,span,p,section');
+                elements.forEach(el=>{
+                    try{
+                        const txt = (el.textContent||'').trim();
+                        if(!txt) return;
+                        if(txt.toLowerCase().includes(PLACEHOLDER_TEXT.toLowerCase())){
+                            placeholderDetected=true;
+                            el.remove();
+                        }
+                    }catch(e){}
+                });
+                if(placeholderDetected && videoElement){
+                    try{
+                        videoElement.muted=false;
+                        videoElement.volume=1.0;
+                        videoElement.play().catch(()=>{});
+                        if(document.pictureInPictureElement){document.exitPictureInPicture().catch(()=>{});}
+                        videoElement.style.width="100%";videoElement.style.height="100%";
+                    }catch(e){}
+                }
+            } catch(e) {
+                logTrace(CONFIG.DEBUG.PLAYER_MONITOR,'adRemovalObserver callback error',e);
             }
         });
         const target=document.body||document.documentElement;
-        if(target)adRemovalObserver.observe(target,{childList:true,subtree:true,attributes:true});
+        if(target) adRemovalObserver.observe(target,{childList:true,subtree:true,attributes:true});
     };
 
     const triggerReload=(reason)=>{
         if(!CONFIG.SETTINGS.ENABLE_AUTO_RELOAD)return;
         const now=Date.now();
         if(reloadCount>=CONFIG.ADVANCED.MAX_RELOADS_PER_SESSION||now-lastReloadTimestamp<CONFIG.ADVANCED.RELOAD_COOLDOWN_MS){return;}
-        lastReloadTimestamp=now;reloadCount++;unsafeWindow.location.reload();
+        lastReloadTimestamp=now;reloadCount++;logWarn('triggerReload','Reload triggered because',reason);unsafeWindow.location.reload();
     };
 
     const setupVideoPlayerMonitor=()=>{
@@ -227,34 +312,36 @@
                 if(stallTimer)clearTimeout(stallTimer);
                 stallTimer=setTimeout(()=>triggerReload('Stall timeout'),CONFIG.ADVANCED.RELOAD_STALL_THRESHOLD_MS);
                 document.querySelectorAll('.commercial-break-in-progress,[data-test-selector="commercial-break-in-progress"]').forEach(el=>el.remove());
-                vid.muted=false;vid.play().catch(()=>{});
+                try{ vid.muted=false; vid.play().catch(()=>{}); }catch(e){}
             });
-            vid.addEventListener('playing',()=>{if(stallTimer)clearTimeout(stallTimer);if(CONFIG.SETTINGS.FORCE_UNMUTE&&vid.muted){vid.muted=false;}});
-            vid.addEventListener('loadeddata',()=>{if(CONFIG.SETTINGS.FORCE_UNMUTE){vid.muted=false;}});
+            vid.addEventListener('playing',()=>{ if(stallTimer)clearTimeout(stallTimer); if(CONFIG.SETTINGS.FORCE_UNMUTE && vid.muted){ vid.muted=false; } });
+            vid.addEventListener('loadeddata',()=>{ if(CONFIG.SETTINGS.FORCE_UNMUTE){ vid.muted=false; } });
             vid.addEventListener('error',(e)=>{
-                const code=e.target?.error?.code;
-                if(code&&(CONFIG.ADVANCED.RELOAD_ON_ERROR_CODES.includes(code)||e.message?.includes('IVS')||e.message?.includes('InvalidCharacterError'))){
-                    if(ivsErrorTimer)clearTimeout(ivsErrorTimer);
-                    ivsErrorTimer=setTimeout(()=>triggerReload(`IVS/Player error code ${code}`),CONFIG.ADVANCED.IVS_ERROR_THRESHOLD);
-                }
+                try{
+                    const code=e.target?.error?.code;
+                    if(code && (CONFIG.ADVANCED.RELOAD_ON_ERROR_CODES.includes(code) || (e.message && (e.message.includes('IVS')||e.message.includes('InvalidCharacterError'))))){
+                        if(ivsErrorTimer)clearTimeout(ivsErrorTimer);
+                        ivsErrorTimer=setTimeout(()=>triggerReload(`IVS/Player error code ${code}`),CONFIG.ADVANCED.IVS_ERROR_THRESHOLD);
+                    }
+                }catch(err){}
                 document.querySelectorAll('.commercial-break-in-progress,[data-test-selector="commercial-break-in-progress"]').forEach(el=>el.remove());
-                vid.muted=false;vid.play().catch(()=>{});
+                try{ vid.muted=false; vid.play().catch(()=>{}); }catch(e){}
             });
-            vid.addEventListener('volumechange',()=>{if(CONFIG.SETTINGS.FORCE_UNMUTE&&(vid.volume===0||vid.muted)){vid.muted=false;vid.volume=1;}});
+            vid.addEventListener('volumechange',()=>{ if(CONFIG.SETTINGS.FORCE_UNMUTE && (vid.volume===0 || vid.muted)){ vid.muted=false; vid.volume=1; } });
             vid._adblock_listeners_attached=true;
         };
         const findAndAttach=()=>{
             const currentVideo=document.querySelector('video');
-            if(currentVideo&&currentVideo!==videoElement){videoElement=currentVideo;attachListeners(videoElement);}
+            if(currentVideo && currentVideo!==videoElement){ videoElement=currentVideo; attachListeners(videoElement); }
         };
         videoPlayerObserver=new MutationObserver(findAndAttach);
         const target=document.body||document.documentElement;
-        if(target){videoPlayerObserver.observe(target,{childList:true,subtree:true});findAndAttach();}
+        if(target){ videoPlayerObserver.observe(target,{childList:true,subtree:true}); findAndAttach(); }
     };
 
     function installHooks(){
         if(hooksInstalled)return;hooksInstalled=true;
-        try{unsafeWindow.fetch=fetchOverride;}catch(e){}
+        try{ unsafeWindow.fetch = fetchOverride; }catch(e){ logWarn('installHooks','Could not override fetch',e); }
     }
 
     const initialize=()=>{
