@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      30.6.1
-// @description  Twitch adblock with token substitution, PiP/overlay handling, and unmute playback
+// @version      30.6.2
+// @description  Twitch adblock that modifies network requests to prevent ads and player errors.
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -28,7 +28,7 @@
     'use strict';
 
     const CONFIG = {
-        SCRIPT_VERSION: '30.6.1',
+        SCRIPT_VERSION: '30.6.2',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -51,7 +51,7 @@
             RELOAD_COOLDOWN_MS: GM_getValue('TTV_AdBlock_ReloadCooldownMs', 20000),
             MAX_RELOADS_PER_SESSION: GM_getValue('TTV_AdBlock_MaxReloadsPerSession', 3),
             RELOAD_ON_ERROR_CODES: GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "1000,2000,3000,4000,5000")
-                .split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
+            .split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
             IVS_ERROR_THRESHOLD: 5000,
             PIP_RETRY_ATTEMPTS: 3,
             PIP_RETRY_DELAY_MS: 1000,
@@ -61,8 +61,6 @@
     const LOG_PREFIX = `[TTV ADBLOCK ULT v${CONFIG.SCRIPT_VERSION}]`;
     const GQL_URL = 'https://gql.twitch.tv/gql';
     const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
-    const CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
-    const CLIENT_VERSION = '93e9b9a4-6556-4299-a65c-839e92415d48';
     const AD_URL_KEYWORDS_BLOCK = [
         'edge.ads.twitch.tv','nat.min.js','twitchAdServer.js','player-ad-aws.js',
         'googlesyndication.com','doubleclick.net','adnxs.com','amazon-adsystem.com',
@@ -99,120 +97,66 @@
     const logDebug = (s,m,...a)=>CONFIG.DEBUG.CORE&&console.info(`${LOG_PREFIX} [${s}] DEBUG:`,m,...a);
     const logTrace = (f,s,m,...a)=>f&&console.debug(`${LOG_PREFIX} [${s}] TRACE:`,m,...a);
 
-    async function fetchCleanToken(channelName,isVod,vodId){
-        const operation={
-            operationName:'PlaybackAccessToken',
-            variables:{isLive:!isVod,login:channelName||'',isVod:isVod,vodID:vodId||'',playerType:'site'},
-            extensions:{persistedQuery:{version:1,sha256Hash:'0828119ded1c13477966434e15800ff57ddacf13ba1911c129dc2200705b0712'}},
-        };
-        try{
-            const response=await originalFetch(GQL_URL,{
-                method:'POST',
-                headers:{'Client-ID':CLIENT_ID,'Client-Version':CLIENT_VERSION,'Content-Type':'application/json'},
-                body:JSON.stringify(operation)
-            });
-            if(!response.ok) {
-                logWarn('FetchCleanToken','GQL token fetch failed status',response.status);
-                return null;
-            }
-            const data=await response.json();
-            const token=isVod?data.data?.videoPlaybackAccessToken:data.data?.streamPlaybackAccessToken;
-            if(!token){
-                logWarn('FetchCleanToken','No token in response');
-                return null;
-            }
-            // If token indicates ad restrictions, but authorization allows playback, return it.
-            return token;
-        }catch(e){
-            logError('FetchCleanToken','Failed:',e);
-            return null;
-        }
-    }
-
-    const fetchOverride=async(input,init)=>{
-        const requestUrl=input instanceof Request?input.url:String(input);
+    // This is the new, more stable fetch override. It modifies the GQL request
+    // to ask for an ad-free stream, rather than trying to replace the token.
+    // This avoids player errors (like 'atob' failures) and is more reliable.
+    const fetchOverride = async (input, init) => {
+        const requestUrl = input instanceof Request ? input.url : String(input);
         const requestUrlLower = requestUrl.toLowerCase();
 
-        // Block obvious ad URLs (case-insensitive)
-        if(AD_URL_KEYWORDS_BLOCK.some(k=>requestUrlLower.includes(String(k).toLowerCase()))){
-            logTrace(CONFIG.DEBUG.NETWORK_BLOCKING,'Block URL',requestUrl);
-            return new Response(null,{status:403,statusText:`Blocked by TTV AdBlock`});
+        // 1. Block known ad-related URLs
+        if (AD_URL_KEYWORDS_BLOCK.some(k => requestUrlLower.includes(String(k).toLowerCase()))) {
+            logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'Block URL', requestUrl);
+            return new Response(null, { status: 403, statusText: `Blocked by TTV AdBlock` });
         }
 
-        // Intercept GraphQL PlaybackAccessToken requests
-        if(requestUrl===GQL_URL){
-            let originalBodyText='';
-            if(init&&init.body){
-                originalBodyText=typeof init.body==='string'?init.body:await(new Request(input,init)).text();
-            }
-            try{
-                const originalBody=JSON.parse(originalBodyText);
-                if(originalBody.operationName==='PlaybackAccessToken'){
-                    const response=await originalFetch(input,init);
-                    const responseClone=response.clone();
-                    let responseData;
-                    try{ responseData = await responseClone.json(); } catch(e){ logWarn('fetchOverride','Failed parse GQL response JSON',e); return response; }
-                    const isVod=originalBody.variables.isVod;
-                    const tokenData=isVod?responseData.data?.videoPlaybackAccessToken:responseData.data?.streamPlaybackAccessToken;
+        // 2. Intercept and modify GraphQL requests for video access tokens
+        if (requestUrl === GQL_URL) {
+            try {
+                if (init && init.body) {
+                    const originalBodyText = typeof init.body === 'string' ? init.body : await (new Request(input, init)).text();
+                    const originalBody = JSON.parse(originalBodyText);
 
-                    // If Twitch marked it as forbidden due to stitched ads, try to get a clean token.
-                    if(tokenData?.authorization?.isForbidden && tokenData?.authorization?.forbiddenReasonCode === "STITCHED_AD"){
-                        const channelName=originalBody.variables.login;
-                        const vodId=originalBody.variables.vodID;
-                        const cleanToken=await fetchCleanToken(channelName,isVod,vodId);
+                    if (originalBody.operationName === 'PlaybackAccessToken') {
+                        logDebug('fetchOverride', 'Intercepting PlaybackAccessToken, setting playerType to "mobile" to request an ad-free stream.');
+                        originalBody.variables.playerType = 'mobile'; // Using 'mobile' can result in ad-free streams
 
-                        // Only replace if we got a clearly valid token object
-                        if(cleanToken && cleanToken.value && cleanToken.signature){
-                            if(isVod){
-                                responseData.data.videoPlaybackAccessToken = cleanToken;
-                            } else {
-                                responseData.data.streamPlaybackAccessToken = cleanToken;
-                            }
-                            logDebug('fetchOverride','Replaced forbidden token with clean token for',channelName||vodId);
-                            // Build headers for new Response: copy important headers but avoid content-length mismatch
-                            const newHeaders = new Headers(response.headers);
-                            newHeaders.delete('Content-Length');
-                            return new Response(JSON.stringify(responseData),{status:response.status,statusText:response.statusText,headers:newHeaders});
-                        } else {
-                            // --- CRITICAL: don't return a malformed "fallback" token (it breaks atob in player).
-                            // If we couldn't get a valid clean token, leave original response intact (safer).
-                            logWarn('fetchOverride','Could not obtain valid clean token; leaving original response to avoid breaking player.');
-                            return response;
-                        }
-                    }
-                    // nothing to change -> return original response
-                    return response;
-                }
-            }catch(e){
-                // if any parse error — don't break: return original fetch
-                logTrace(CONFIG.DEBUG.GQL_MODIFY,'GQL handling error',e);
-            }
-        }
-
-        // Intercept m3u8 manifests from usher and clean cue/daterange lines
-        if(TWITCH_MANIFEST_PATH_REGEX.test(requestUrl) && requestUrlLower.includes('usher.ttvnw.net')){
-            try{
-                const response=await originalFetch(input,init);
-                if(response && response.ok){
-                    const text=await response.text();
-                    const {cleanedText,adsFound} = parseAndCleanM3U8(text,requestUrl);
-                    if(adsFound){
-                        logDebug('fetchOverride','Cleaned m3u8 (ads removed):',requestUrl);
-                        const headers=new Headers(response.headers);
-                        headers.delete('Content-Length');
-                        return new Response(cleanedText,{status:response.status,statusText:response.statusText,headers});
-                    } else {
-                        return response;
+                        const newInit = { ...init, body: JSON.stringify(originalBody) };
+                        return originalFetch(input, newInit);
                     }
                 }
-            }catch(e){
-                logWarn('fetchOverride','Error fetching/cleaning m3u8',e);
-                return originalFetch(input,init);
+            } catch (e) {
+                logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQL request modification failed, proceeding with original.', e);
             }
         }
 
-        return originalFetch(input,init);
+        // 3. Intercept and clean M3U8 playlists as a fallback
+        if (TWITCH_MANIFEST_PATH_REGEX.test(requestUrl) && requestUrlLower.includes('usher.ttvnw.net')) {
+            try {
+                const response = await originalFetch(input, init);
+                if (response && response.ok) {
+                    const manifestText = await response.text();
+                    const { cleanedText, adsFound } = parseAndCleanM3U8(manifestText, requestUrl);
+
+                    if (adsFound) {
+                        logDebug('fetchOverride', 'Cleaned m3u8 playlist (ads removed):', requestUrl);
+                        const newHeaders = new Headers(response.headers);
+                        newHeaders.delete('Content-Length');
+                        return new Response(cleanedText, { status: response.status, statusText: response.statusText, headers: newHeaders });
+                    }
+
+                    // If no ads found, return a new response with the original text as the body has been consumed
+                    return new Response(manifestText, { status: response.status, statusText: response.statusText, headers: response.headers });
+                }
+                return response; // Return original response if not OK
+            } catch (e) {
+                logWarn('fetchOverride', 'Error fetching/cleaning m3u8, falling back to original fetch.', e);
+            }
+        }
+
+        return originalFetch(input, init);
     };
+
 
     const injectCSS=()=>{
         const css=`${AD_DOM_SELECTORS.join(',\n')} {display:none!important;opacity:0!important;visibility:hidden!important;z-index:-1000!important;} video {display:block!important;width:100%!important;height:auto!important;}`;
@@ -237,8 +181,6 @@
             const trimmed = line.trim();
             const upper = trimmed.toUpperCase();
 
-            // Remove daterange/cue-out/twitch ad tags and other ad-related metadata lines
-            // Explicitly filter lines starting with known tags or containing keywords (case-insensitive)
             if(upper.startsWith('#EXT-X-DATERANGE') || upper.startsWith('#EXT-X-CUE-OUT') || upper.startsWith('#EXT-X-CUE-IN') ){
                 adsFound = true;
                 return false;
@@ -247,7 +189,6 @@
                 adsFound = true;
                 return false;
             }
-            // Also remove special Twitch ad info tags
             if(upper.startsWith('#EXT-X-TWITCH-INFO') || upper.startsWith('#EXT-X-TWITCH-AD') ){
                 adsFound = true;
                 return false;
@@ -267,7 +208,6 @@
                 AD_DOM_SELECTORS.forEach(sel=>{
                     try{document.querySelectorAll(sel).forEach(el=>el.remove());}catch(e){}
                 });
-                // Also remove by text content (case-insensitive)
                 const elements=document.querySelectorAll('div,span,p,section');
                 elements.forEach(el=>{
                     try{
