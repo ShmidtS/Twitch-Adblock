@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Twitch Adblock Ultimate
+// @name         Twitch Adblock Ultimate Enhanced
 // @namespace    TwitchAdblockUltimate
-// @version      31.1.2
-// @description  Twitch ad-blocking with injected ad protection, and performance optimizations
+// @version      31.2.0
+// @description  Advanced Twitch ad-blocking with smart controls, performance optimizations, and comprehensive ad suppression
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -30,7 +30,7 @@
     const defaultForceUnmute = GM_getValue('TTV_AdBlock_ForceUnmute', true);
 
     const CONFIG = {
-        SCRIPT_VERSION: '31.1.2',
+        SCRIPT_VERSION: '31.2.0',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -41,6 +41,7 @@
             RESPECT_USER_MUTE: GM_getValue('TTV_AdBlock_RespectUserMute', true),
             REMOVE_AD_PLACEHOLDER: GM_getValue('TTV_AdBlock_RemoveAdPlaceholder', true),
             AGGRESSIVE_AD_BLOCK: GM_getValue('TTV_AdBlock_AggressiveBlock', true),
+            REQUEST_DEDUPLICATION: GM_getValue('TTV_AdBlock_RequestDedup', true),
         },
         DEBUG: {
             SHOW_ERRORS: GM_getValue('TTV_AdBlock_ShowErrorsInConsole', false),
@@ -56,11 +57,13 @@
             RELOAD_COOLDOWN_MS: GM_getValue('TTV_AdBlock_ReloadCooldownMs', 20000),
             MAX_RELOADS_PER_SESSION: GM_getValue('TTV_AdBlock_MaxReloadsPerSession', 2),
             RELOAD_ON_ERROR_CODES: GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "3000,4000,5000")
-            .split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
+                .split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
             IVS_ERROR_THRESHOLD: 5000,
             PIP_RETRY_ATTEMPTS: 3,
             PIP_RETRY_DELAY_MS: 1000,
             OBSERVER_THROTTLE_MS: 450,
+            DOM_CLEANUP_BATCH_SIZE: 50,
+            REQUEST_CACHE_TTL_MS: 60000,
         },
     };
 
@@ -92,6 +95,9 @@
         'ads-api.twitch.tv',
         'gql.twitch.tv/?op=streamdisplayad',
         'stream-display-ad',
+        'pubads.g.doubleclick.net',
+        'imasdk.googleapis.com',
+        'amazon-adsystem.com',
     ];
 
     const AD_DOM_SELECTORS = [
@@ -146,6 +152,10 @@
         '.stream-display-ad__frame_squeezeback',
         '#stream-lowerthird',
         '.squeezeback-accessibility-frame',
+        'div[data-ad-placeholder="true"]',
+        'iframe[src*="amazon-adsystem.com"]',
+        'iframe[src*="doubleclick.net"]',
+        'iframe[src*="imasdk.googleapis.com"]',
         ...(CONFIG.SETTINGS.HIDE_COOKIE_BANNER ? ['.consent-banner'] : []),
     ];
 
@@ -176,6 +186,8 @@
         'AD-SERVER',
         'AD-MANIFEST',
         'AD-URL',
+        'TWITCH-PREFETCH',
+        'AD-INSERTION',
     ];
 
     const PLACEHOLDER_TEXTS = [
@@ -186,6 +198,9 @@
         'Реклама',
         'Рекламная вставка',
         'Werbeunterbrechung',
+        'Publicidad',
+        'Publicité',
+        '広告',
     ];
 
     const GQL_BLOCKED_OPERATIONS = new Set([
@@ -201,6 +216,8 @@
         'CommercialBreakRequest',
         'CommercialBreakStatus',
         'AdRequestSurface',
+        'VideoAdMetadata',
+        'VideoAdSegment',
     ]);
 
     const shouldBlockGqlOperation = (operationName) => {
@@ -215,7 +232,8 @@
             name.includes('sda') ||
             name.includes('commercialbreak') ||
             name.includes('adrequest') ||
-            name.includes('admetadata');
+            name.includes('admetadata') ||
+            name.includes('videoad');
     };
 
     const createEmptyGqlResponse = () => ({ data: {}, errors: [] });
@@ -233,8 +251,10 @@
     let lastKnownVolume = 0.5;
     let scriptAdjustingVolume = false;
     const USER_VOLUME_CHANGE_COOLDOWN_MS = 4000;
-    const PREFERRED_SUPPORTED_CODECS = ['av1', 'h265', 'h264'];
+    const PREFERRED_SUPPORTED_CODECS = ['av1', 'h265', 'h264', 'vp9'];
     const originalFetch = unsafeWindow.fetch;
+    const requestCache = new Map();
+    const processedElements = new WeakSet();
 
     const logError = (s, m, ...a) => CONFIG.DEBUG.SHOW_ERRORS && console.error(`${LOG_PREFIX} [${s}] ERROR:`, m, ...a);
     const logWarn = (s, m, ...a) => CONFIG.DEBUG.SHOW_ERRORS && console.warn(`${LOG_PREFIX} [${s}] WARN:`, m, ...a);
@@ -313,10 +333,9 @@
 
     const normalizeSupportedCodecs = (existing) => {
         const codecs = Array.isArray(existing)
-        ? existing.filter(codec => typeof codec === 'string' && codec.trim())
-        : [];
-        const unique = new Set();
-        codecs.forEach(codec => unique.add(codec));
+            ? existing.filter(codec => typeof codec === 'string' && codec.trim())
+            : [];
+        const unique = new Set(codecs);
         PREFERRED_SUPPORTED_CODECS.forEach(codec => unique.add(codec));
         return Array.from(unique);
     };
@@ -357,7 +376,41 @@
             updated = true;
         }
 
+        if (Object.prototype.hasOwnProperty.call(variables, 'adsEnabled')) {
+            delete variables.adsEnabled;
+            updated = true;
+        }
+
         return updated;
+    };
+
+    const getCacheKey = (url, method = 'GET') => `${method}:${url}`;
+
+    const getCachedResponse = (cacheKey) => {
+        if (!CONFIG.SETTINGS.REQUEST_DEDUPLICATION) return null;
+        
+        const cached = requestCache.get(cacheKey);
+        if (cached && Date.now() - cached.timestamp < CONFIG.ADVANCED.REQUEST_CACHE_TTL_MS) {
+            return cached.response;
+        }
+        if (cached) {
+            requestCache.delete(cacheKey);
+        }
+        return null;
+    };
+
+    const cacheResponse = (cacheKey, response) => {
+        if (!CONFIG.SETTINGS.REQUEST_DEDUPLICATION) return;
+        
+        requestCache.set(cacheKey, {
+            response: response.clone(),
+            timestamp: Date.now()
+        });
+
+        if (requestCache.size > 100) {
+            const oldestKey = requestCache.keys().next().value;
+            requestCache.delete(oldestKey);
+        }
     };
 
     const fetchOverride = async (input, init) => {
@@ -458,6 +511,14 @@
         }
 
         if (TWITCH_MANIFEST_PATH_REGEX.test(requestUrl) && requestUrlLower.includes('usher.ttvnw.net')) {
+            const method = (input instanceof Request ? input.method : init?.method || 'GET').toUpperCase();
+            const cacheKey = getCacheKey(requestUrl, method);
+            const cachedResponse = getCachedResponse(cacheKey);
+            if (cachedResponse) {
+                logTrace(CONFIG.DEBUG.M3U8_CLEANING, 'M3U8', 'Using cached response');
+                return cachedResponse.clone();
+            }
+
             try {
                 const response = await originalFetch(input, init);
                 if (response && response.ok) {
@@ -472,18 +533,22 @@
                         newHeaders.delete('Content-Length');
                         newHeaders.set('X-Adblock-Cleaned', 'true');
 
-                        return new Response(cleanedText, {
+                        const cleanedResponse = new Response(cleanedText, {
                             status: response.status,
                             statusText: response.statusText,
                             headers: newHeaders
                         });
+                        cacheResponse(cacheKey, cleanedResponse);
+                        return cleanedResponse;
                     }
 
-                    return new Response(manifestText, {
+                    const finalResponse = new Response(manifestText, {
                         status: response.status,
                         statusText: response.statusText,
                         headers: response.headers
                     });
+                    cacheResponse(cacheKey, finalResponse);
+                    return finalResponse;
                 }
 
                 return response;
@@ -506,6 +571,7 @@ ${AD_DOM_SELECTORS.join(',\n')} {
     width: 0 !important;
     height: 0 !important;
     pointer-events: none !important;
+    overflow: hidden !important;
 }
 
 .video-player__container {
@@ -523,7 +589,6 @@ video {
     object-fit: contain !important;
 }
 
-/* Ensure player controls remain interactive */
 [data-a-target*="player-controls"],
 [data-a-target*="player-overlay-click-handler"],
 .player-controls,
@@ -536,9 +601,11 @@ button[data-a-target*="player"],
 [class*="player-overlay-background"],
 .video-player__overlay-background {
     pointer-events: auto !important;
+    display: block !important;
+    opacity: 1 !important;
+    visibility: visible !important;
 }
 
-/* Optimize rendering */
 .video-player__container,
 .video-player {
     will-change: transform !important;
@@ -564,6 +631,7 @@ button[data-a-target*="player"],
                 msHidden: { get: () => false, configurable: true },
             });
             document.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
+            document.addEventListener('webkitvisibilitychange', e => e.stopImmediatePropagation(), true);
             logTrace(CONFIG.DEBUG.CORE, 'Init', 'Page visibility overridden for quality');
         } catch (e) {
             logWarn('Init', 'Unable to override visibility API', e);
@@ -582,6 +650,7 @@ button[data-a-target*="player"],
         const cleanLines = [];
         let skipNextSegment = false;
         let inAdBlock = false;
+        let adBlockDepth = 0;
 
         for (let i = 0; i < lines.length; i++) {
             const line = lines[i];
@@ -603,21 +672,28 @@ button[data-a-target*="player"],
                 if (keywordUpper.some(k => upper.includes(k))) {
                     adsFound = true;
                     inAdBlock = true;
+                    adBlockDepth++;
                     continue;
                 }
             }
 
-            if (upper.startsWith('#EXT-X-CUE-OUT') || (upper.startsWith('#EXTINF') && inAdBlock)) {
+            if (upper.startsWith('#EXT-X-CUE-OUT')) {
                 adsFound = true;
-                if (upper.startsWith('#EXTINF')) {
-                    skipNextSegment = true;
-                }
+                inAdBlock = true;
+                adBlockDepth++;
                 continue;
             }
 
             if (upper.startsWith('#EXT-X-CUE-IN')) {
                 adsFound = true;
                 inAdBlock = false;
+                adBlockDepth = Math.max(0, adBlockDepth - 1);
+                continue;
+            }
+
+            if (inAdBlock && upper.startsWith('#EXTINF')) {
+                adsFound = true;
+                skipNextSegment = true;
                 continue;
             }
 
@@ -629,7 +705,9 @@ button[data-a-target*="player"],
                 continue;
             }
 
-            cleanLines.push(line);
+            if (!inAdBlock) {
+                cleanLines.push(line);
+            }
         }
 
         return {
@@ -649,43 +727,59 @@ button[data-a-target*="player"],
             let removedElements = 0;
             let placeholderDetected = false;
             let removedStreamDisplayAd = false;
+            const elementsToRemove = [];
 
             AD_DOM_SELECTORS.forEach(selector => {
                 try {
                     const matches = root.querySelectorAll(selector);
-                    if (matches.length) {
-                        matches.forEach(el => {
-                            if (el && el.parentNode && !el.closest('[data-a-target*="player-controls"]')) {
-                                if (!removedStreamDisplayAd) {
-                                    removedStreamDisplayAd = el.matches('[data-test-selector^="sda"]') ||
-                                        el.matches('[class*="stream-display-ad"]') ||
-                                        el.matches('[class*="squeezeback"]') ||
-                                        el.id === 'stream-lowerthird';
-                                }
-                                el.remove();
-                                removedElements++;
+                    matches.forEach(el => {
+                        if (el && el.parentNode && !el.closest('[data-a-target*="player-controls"]') && !processedElements.has(el)) {
+                            if (!removedStreamDisplayAd) {
+                                removedStreamDisplayAd = el.matches('[data-test-selector^="sda"]') ||
+                                    el.matches('[class*="stream-display-ad"]') ||
+                                    el.matches('[class*="squeezeback"]') ||
+                                    el.id === 'stream-lowerthird';
                             }
-                        });
-                    }
-                } catch (e) { /* ignore CSS errors */ }
+                            elementsToRemove.push(el);
+                            processedElements.add(el);
+                        }
+                    });
+                } catch (e) {
+                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'DOM', `Selector error: ${selector}`, e);
+                }
             });
 
             if (CONFIG.SETTINGS.REMOVE_AD_PLACEHOLDER) {
                 const textContainers = root.querySelectorAll('div, span, p, section, article');
-                textContainers.forEach(node => {
-                    if (!node || !node.textContent) return;
-                    if (node.closest('[data-a-target*="player-controls"]')) return;
+                for (const node of textContainers) {
+                    if (!node || !node.textContent || processedElements.has(node)) continue;
+                    if (node.closest('[data-a-target*="player-controls"]')) continue;
+                    
                     const text = node.textContent.trim().toLowerCase();
-                    if (!text) return;
+                    if (!text) continue;
+                    
                     if (PLACEHOLDER_TEXTS.some(ph => text.includes(ph.toLowerCase()))) {
                         placeholderDetected = true;
                         if (node.parentNode) {
-                            node.remove();
-                            removedElements++;
+                            elementsToRemove.push(node);
+                            processedElements.add(node);
                         }
                     }
-                });
+
+                    if (elementsToRemove.length >= CONFIG.ADVANCED.DOM_CLEANUP_BATCH_SIZE) {
+                        break;
+                    }
+                }
             }
+
+            elementsToRemove.forEach(el => {
+                try {
+                    el.remove();
+                    removedElements++;
+                } catch (e) {
+                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'DOM', 'Failed to remove element', e);
+                }
+            });
 
             if (removedStreamDisplayAd) {
                 restoreVideoFromAd('stream display ad cleanup');
@@ -752,19 +846,23 @@ button[data-a-target*="player"],
         if (originalVideoParent && videoElement.parentElement !== originalVideoParent) {
             try {
                 originalVideoParent.appendChild(videoElement);
-            } catch (e) {}
+            } catch (e) {
+                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Failed to restore video parent', e);
+            }
         }
 
         videoElement.style.removeProperty('display');
         videoElement.style.removeProperty('opacity');
         videoElement.style.removeProperty('width');
         videoElement.style.removeProperty('height');
+        videoElement.style.removeProperty('transform');
 
         const videoContainer = videoElement.closest('.video-player__container');
         if (videoContainer) {
             videoContainer.style.removeProperty('transform');
             videoContainer.style.removeProperty('max-height');
             videoContainer.style.removeProperty('min-height');
+            videoContainer.style.removeProperty('height');
         }
 
         const persistentPlayer = videoElement.closest('.persistent-player');
@@ -812,7 +910,6 @@ button[data-a-target*="player"],
                 lastKnownVolume = vid.volume;
             }
 
-
             if (!vid._ttvInitialState) {
                 vid._ttvInitialState = true;
                 if (CONFIG.SETTINGS.FORCE_UNMUTE && CONFIG.SETTINGS.SMART_UNMUTE) {
@@ -845,7 +942,7 @@ button[data-a-target*="player"],
                 }
 
                 const isMuted = vid.muted || vid.volume <= 0.001;
-                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `User volume change: muted=${isMuted}, volume=${vid.volume}`);
+                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `User volume change: muted=${isMuted}, volume=${vid.volume.toFixed(2)}`);
 
                 if (isMuted) {
                     userMutedManually = true;
@@ -972,6 +1069,15 @@ button[data-a-target*="player"],
                     attemptAutoUnmute('periodic check');
                 }
             }
+
+            if (requestCache.size > 50) {
+                const now = Date.now();
+                for (const [key, value] of requestCache.entries()) {
+                    if (now - value.timestamp > CONFIG.ADVANCED.REQUEST_CACHE_TTL_MS) {
+                        requestCache.delete(key);
+                    }
+                }
+            }
         }, 2000);
     };
 
@@ -981,5 +1087,6 @@ button[data-a-target*="player"],
         initialize();
     }
 
-    console.info(`${LOG_PREFIX} Ready! Enhanced ad blocking, Smart unmute: ${CONFIG.SETTINGS.SMART_UNMUTE}, respect user mute: ${CONFIG.SETTINGS.RESPECT_USER_MUTE}, aggressive blocking: ${CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK}`);
+    console.info(`${LOG_PREFIX} Ready! Enhanced ad blocking enabled`);
+    console.info(`${LOG_PREFIX} Config: Smart unmute=${CONFIG.SETTINGS.SMART_UNMUTE}, Respect mute=${CONFIG.SETTINGS.RESPECT_USER_MUTE}, Aggressive=${CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK}`);
 })();
