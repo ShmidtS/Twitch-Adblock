@@ -368,5 +368,5 @@
         initialize();
     }
 
-    console.info(`${LOG_PREFIX} Ready! Smart unmute: ${CONFIG.SETTINGS.SMART_UNMUTE}; respect user mute: ${CONFIG.SETTINGS.RESPECT_USER_MUTE}; aggressive blocking: ${CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK}`);
+    console.info(`${LOG_PREFIX} Ready! Enhanced ad blocking, Smart unmute: ${CONFIG.SETTINGS.SMART_UNMUTE}, respect user mute: ${CONFIG.SETTINGS.RESPECT_USER_MUTE}, aggressive blocking: ${CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK}`);
 })();
