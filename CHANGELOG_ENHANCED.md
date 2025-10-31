@@ -1,4 +1,57 @@
-# Twitch Adblock Ultimate Enhanced - Changelog v31.0.0
+# Twitch Adblock Ultimate Enhanced - Changelog
+
+## Version 31.1.2 (Latest) 🚀
+**Release Date:** January 2025
+
+### 🎯 Critical Ad Blocking Fix
+**Problem Solved:** New "squeezeback" style ads were bypassing the blocker due to updated Twitch ad delivery mechanism.
+
+**Changes:**
+- **Enhanced DOM Selectors**: Added comprehensive blocking for new ad types:
+  - Stream Display Ads (SDA) with squeezeback format
+  - `[data-test-selector="sda-wrapper"]`, `[data-test-selector="sda-container"]`
+  - All `[class*="stream-display-ad"]` and `[class*="squeezeback"]` patterns
+  - `#stream-lowerthird` ad overlay frame
+  - `.squeezeback-accessibility-frame` elements
+
+- **Improved Network Blocking**: Added new ad server domains:
+  - `api.sprig.com` and `sprig.com/sdk` (analytics/surveys)
+  - `ads-api.twitch.tv`
+  - `stream-display-ad` related URLs
+
+- **Advanced GQL Operation Blocking**: New comprehensive GraphQL query filtering:
+  - Blocks `StreamDisplayAd*` operations
+  - Blocks `SDA*` (Stream Display Ad) operations
+  - Blocks `CommercialBreak*` requests
+  - Blocks `AdIntegrityBanner` and related ad metadata queries
+  - Smart pattern matching for ad-related operation names
+
+- **Enhanced M3U8 Manifest Cleaning**: Added new ad marker keywords:
+  - `Twitch-Ad-Url`, `Twitch-Ad-Pod`
+  - `EXT-X-TWITCH-AD`, `EXT-X-TWITCH-CM`
+  - `STREAM-DISPLAY-AD`, `SQUEEZEBACK`
+  - `AD-MANIFEST`, `AD-URL`
+
+- **Improved DOM Cleanup Logic**:
+  - Removed `.persistent-player` exclusion to allow cleaning ads within player
+  - Added `data-test-selector` attribute monitoring
+  - Enhanced video container style restoration
+  - Aggressive removal of ad-injected transform/height styles
+
+### 🐛 Bug Fixes
+- Fixed ads showing in persistent player container
+- Fixed video player shrinking during squeezeback ads
+- Improved DOM mutation observer to catch attribute changes on ad elements
+- Better cleanup of ad-related CSS transforms and sizing
+
+### 📝 Technical Details
+- Updated from v31.1.1 to v31.1.2
+- All changes maintain backward compatibility
+- No configuration changes required
+
+---
+
+## Version 31.0.0 - 31.1.1
 
 ## 🎯 Major Improvements & Features
 
