@@ -1,6 +1,38 @@
 # Twitch Adblock Ultimate Enhanced - Changelog
 
-## Version 31.1.2 (Latest) 🚀
+## Version 31.2.0 (Latest) 🚀
+**Release Date:** February 2025
+
+### 🚀 Key Upgrades
+- **Request Deduplication Cache**: Prevents repeated manifest downloads and re-processing, reducing bandwidth and CPU usage.
+- **Expanded Ad Detection**: Adds more network endpoints, DOM selectors, and placeholder strings (multi-language) to defeat Twitch's latest ad delivery variants.
+- **Smarter Manifest Cleaning**: Introduces depth-aware state tracking and broader keyword coverage for IVS/SDA ad markers.
+- **DOM Cleanup Optimizations**: Batch-removes ad elements, tracks processed nodes with `WeakSet`, and restores video layout more aggressively.
+- **Audio Guard Enhancements**: Extends codec normalization and playback payload sanitization (removes `adsEnabled` flag) to minimize ad-serving backends.
+- **Quality Guard**: Extends visibility API overrides to WebKit variants to guarantee source-quality playback.
+
+### ⚙️ Technical Highlights
+- New settings:
+  - `REQUEST_DEDUPLICATION` (default: `true`)
+- New advanced tunables:
+  - `DOM_CLEANUP_BATCH_SIZE` (default: `50`)
+  - `REQUEST_CACHE_TTL_MS` (default: `60000`)
+- M3U8 cleaning now caches responses (configurable TTL) and counts ad segments with nested block awareness.
+- Added VP9 codec to preferred list while maintaining AV1/H265/H264 priority.
+- Enriched GraphQL blocklist with `VideoAd*` operations and automatic pattern detection.
+
+### 🐞 Fixes & Stability
+- Prevents repeated removal attempts on the same DOM nodes.
+- Ensures player controls always remain interactive after CSS injection.
+- Cleans Picture-in-Picture fallback states and ad-injected transforms reliably.
+
+### 🔊 Logging & Monitoring
+- Startup logs now summarize active audio/ad protection settings.
+- Optional debug traces for DOM selector errors and cached manifest usage.
+
+---
+
+## Version 31.1.2 🚀
 **Release Date:** January 2025
 
 ### 🎯 Critical Ad Blocking Fix
