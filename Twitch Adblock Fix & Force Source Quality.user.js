@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate Enhanced
 // @namespace    TwitchAdblockUltimate
-// @version      31.1.0
+// @version      31.1.1
 // @description  Enhanced Twitch ad-blocking with smart auto-unmute, injected ad protection, and performance optimizations
 // @author       ShmidtS (Enhanced)
 // @match        https://www.twitch.tv/*
@@ -30,7 +30,7 @@
     const defaultForceUnmute = GM_getValue('TTV_AdBlock_ForceUnmute', true);
 
     const CONFIG = {
-        SCRIPT_VERSION: '31.1.0',
+        SCRIPT_VERSION: '31.1.1',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -194,7 +194,7 @@
         } finally {
             setTimeout(() => {
                 scriptAdjustingVolume = false;
-            }, 100);
+            }, 200);
         }
     };
 
@@ -229,7 +229,11 @@
             }
             return;
         }
+        
         const targetVolume = lastKnownVolume > 0.05 ? lastKnownVolume : 0.5;
+        const wasMuted = videoElement.muted;
+        const wasLowVolume = videoElement.volume <= 0.001;
+        
         withVolumeGuard(() => {
             if (videoElement.muted) {
                 videoElement.muted = false;
@@ -238,8 +242,11 @@
                 videoElement.volume = targetVolume;
             }
         });
-        lastKnownVolume = videoElement.volume > 0.05 ? videoElement.volume : targetVolume;
-        logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `Auto-unmuted (${reason})`);
+        
+        if (wasMuted || wasLowVolume) {
+            lastKnownVolume = videoElement.volume > 0.05 ? videoElement.volume : targetVolume;
+            logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `Auto-unmuted (${reason}) to volume ${lastKnownVolume.toFixed(2)}`);
+        }
     };
 
     const normalizeSupportedCodecs = (existing) => {
@@ -419,7 +426,7 @@ ${AD_DOM_SELECTORS.join(',\n')} {
     position: relative !important;
 }
 
-.video-player__overlay[data-test-selector*="ad"] {
+.video-player__overlay[data-test-selector*="ad"]:not([data-a-target*="player-controls"]) {
     pointer-events: none !important;
 }
 
@@ -428,8 +435,28 @@ video {
     width: 100% !important;
     height: 100% !important;
     object-fit: contain !important;
-    position: relative !important;
-    z-index: 1 !important;
+}
+
+/* Ensure player controls remain interactive */
+[data-a-target*="player-controls"],
+[data-a-target*="player-overlay-click-handler"],
+.player-controls,
+.player-controls__left-control-group,
+.player-controls__right-control-group,
+button[data-a-target*="player"],
+.player-button,
+[class*="player-controls"],
+[class*="PlayerControls"],
+[class*="player-overlay-background"],
+.video-player__overlay-background {
+    pointer-events: auto !important;
+}
+
+/* Optimize rendering */
+.video-player__container,
+.video-player {
+    will-change: transform !important;
+    transform: translateZ(0);
 }
         `;
 
@@ -541,7 +568,7 @@ video {
                     const matches = root.querySelectorAll(selector);
                     if (matches.length) {
                         matches.forEach(el => {
-                            if (el && el.parentNode && !el.closest('.persistent-player')) {
+                            if (el && el.parentNode && !el.closest('.persistent-player') && !el.closest('[data-a-target*="player-controls"]')) {
                                 el.remove();
                                 removedElements++;
                             }
@@ -554,6 +581,7 @@ video {
                 const textContainers = root.querySelectorAll('div, span, p, section, article');
                 textContainers.forEach(node => {
                     if (!node || !node.textContent) return;
+                    if (node.closest('[data-a-target*="player-controls"]')) return;
                     const text = node.textContent.trim().toLowerCase();
                     if (!text) return;
                     if (PLACEHOLDER_TEXTS.some(ph => text.includes(ph.toLowerCase()))) {
@@ -581,7 +609,23 @@ video {
             adRemovalObserver.disconnect();
         }
 
-        adRemovalObserver = new MutationObserver(() => debouncedCleanup());
+        adRemovalObserver = new MutationObserver((mutations) => {
+            // Only process if we actually see relevant changes
+            let shouldClean = false;
+            for (const mutation of mutations) {
+                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                    shouldClean = true;
+                    break;
+                }
+                if (mutation.type === 'attributes' && ['class', 'data-a-target', 'style'].includes(mutation.attributeName)) {
+                    shouldClean = true;
+                    break;
+                }
+            }
+            if (shouldClean) {
+                debouncedCleanup();
+            }
+        });
 
         const target = document.body || document.documentElement;
         if (target) {
@@ -651,10 +695,25 @@ video {
                 lastKnownVolume = vid.volume;
             }
 
-            const initiallyMuted = vid.muted || vid.volume <= 0.001;
-            userMutedManually = initiallyMuted;
-            if (initiallyMuted) {
-                lastUserVolumeChange = Date.now();
+            // Don't treat initial autoplay mute as user action
+            // Only set userMutedManually if user actually interacts
+            if (!vid._ttvInitialState) {
+                vid._ttvInitialState = true;
+                if (CONFIG.SETTINGS.FORCE_UNMUTE && CONFIG.SETTINGS.SMART_UNMUTE) {
+                    // Give browser/Twitch time to set up the video, then try auto-unmute
+                    // Use multiple attempts to ensure unmute happens
+                    setTimeout(() => {
+                        if (videoElement === vid && !userMutedManually) {
+                            attemptAutoUnmute('initial setup');
+                        }
+                    }, 1000);
+                    
+                    setTimeout(() => {
+                        if (videoElement === vid && !userMutedManually && (vid.muted || vid.volume <= 0.001)) {
+                            attemptAutoUnmute('initial setup retry');
+                        }
+                    }, 2500);
+                }
             }
 
             let stallTimer = null;
@@ -667,17 +726,23 @@ video {
                     if (vid.volume > 0.05) {
                         lastKnownVolume = vid.volume;
                     }
+                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', 'Volume changed by script');
                     return;
                 }
 
-                const wasMuted = vid.muted || vid.volume <= 0.001;
-                if (wasMuted) {
+                // Real user volume change detected
+                const isMuted = vid.muted || vid.volume <= 0.001;
+                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `User volume change: muted=${isMuted}, volume=${vid.volume}`);
+                
+                if (isMuted) {
                     userMutedManually = true;
+                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', 'User manually muted');
                 } else {
                     userMutedManually = false;
                     if (vid.volume > 0.05) {
                         lastKnownVolume = vid.volume;
                     }
+                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', 'User manually unmuted');
                 }
                 lastUserVolumeChange = now;
             }, { passive: true });
@@ -699,7 +764,7 @@ video {
                     attemptAutoUnmute('playing');
                     adDetected = false;
                 }
-                if (vid.volume > 0.05) {
+                if (vid.volume > 0.05 && !scriptAdjustingVolume) {
                     lastKnownVolume = vid.volume;
                 }
             }, { passive: true });
@@ -787,6 +852,13 @@ video {
         setInterval(() => {
             if (adDetected && videoElement && CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK) {
                 restoreVideoFromAd('periodic watchdog');
+            }
+            
+            // Periodic unmute check for persistent ad muting
+            if (videoElement && CONFIG.SETTINGS.FORCE_UNMUTE && CONFIG.SETTINGS.SMART_UNMUTE && !userMutedManually) {
+                if (videoElement.muted || videoElement.volume <= 0.001) {
+                    attemptAutoUnmute('periodic check');
+                }
             }
         }, 2000);
     };
