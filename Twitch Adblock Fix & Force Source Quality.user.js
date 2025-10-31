@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      31.1.1
+// @version      31.1.2
 // @description  Twitch ad-blocking with injected ad protection, and performance optimizations
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -30,7 +30,7 @@
     const defaultForceUnmute = GM_getValue('TTV_AdBlock_ForceUnmute', true);
 
     const CONFIG = {
-        SCRIPT_VERSION: '31.1.1',
+        SCRIPT_VERSION: '31.1.2',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -87,6 +87,11 @@
         'ad-beacon',
         'ad-insertion',
         'ad-decisioning',
+        'api.sprig.com',
+        'sprig.com/sdk',
+        'ads-api.twitch.tv',
+        'gql.twitch.tv/?op=streamdisplayad',
+        'stream-display-ad',
     ];
 
     const AD_DOM_SELECTORS = [
@@ -97,6 +102,7 @@
         '.persistent-player__ad-container',
         '[data-a-target="advertisement-notice"]',
         'div[data-a-target="ax-overlay"]',
+        '[data-a-target="outstream-ax-overlay"]',
         '[data-test-selector*="sad-overlay"]',
         'div[data-a-target*="ad-block-nag"]',
         '.ad-break-ui-container',
@@ -124,6 +130,22 @@
         '[class*="ad-banner"]',
         '[class*="ad-container"]',
         '.video-player__stream-info-overlay',
+        '[data-test-selector="sda-wrapper"]',
+        '[data-test-selector="sda-container"]',
+        '[data-test-selector="sda-transform"]',
+        '[data-test-selector="sda-frame"]',
+        '.stream-display-ad__wrapper',
+        '.stream-display-ad__container',
+        '.stream-display-ad__transform-container',
+        '.stream-display-ad__frame',
+        '[class*="stream-display-ad"]',
+        '[class*="squeezeback"]',
+        '.stream-display-ad__wrapper_squeezeback',
+        '.stream-display-ad__container_squeezeback',
+        '.stream-display-ad__transform-container_squeezeback',
+        '.stream-display-ad__frame_squeezeback',
+        '#stream-lowerthird',
+        '.squeezeback-accessibility-frame',
         ...(CONFIG.SETTINGS.HIDE_COOKIE_BANNER ? ['.consent-banner'] : []),
     ];
 
@@ -135,10 +157,16 @@
         'Twitch-Ad-Signal',
         'Twitch-Prefetch',
         'Twitch-Ads',
+        'Twitch-Ad-Url',
+        'Twitch-Ad-Pod',
         'X-TWITCH-AD',
         'EXT-X-TWITCH-INFO',
         'EXT-X-ASSET',
         'EXT-X-IVS-AD',
+        'EXT-X-TWITCH-AD',
+        'EXT-X-TWITCH-CM',
+        'STREAM-DISPLAY-AD',
+        'SQUEEZEBACK',
         'IVS-AD-MARKER',
         'TWITCH-AD-ROLL',
         'ADVERTISEMENT',
@@ -146,6 +174,8 @@
         'PREROLL',
         'MIDROLL',
         'AD-SERVER',
+        'AD-MANIFEST',
+        'AD-URL',
     ];
 
     const PLACEHOLDER_TEXTS = [
@@ -157,6 +187,38 @@
         'Рекламная вставка',
         'Werbeunterbrechung',
     ];
+
+    const GQL_BLOCKED_OPERATIONS = new Set([
+        'StreamDisplayAd',
+        'StreamDisplayAdMetadata',
+        'StreamDisplayAdEvent',
+        'SDAAdMetadata',
+        'SDAAdRequest',
+        'SDARegulationBanner',
+        'SDARegisterDisplayAd',
+        'PersistentStreamDisplayAdContext',
+        'AdIntegrityBanner',
+        'CommercialBreakRequest',
+        'CommercialBreakStatus',
+        'AdRequestSurface',
+    ]);
+
+    const shouldBlockGqlOperation = (operationName) => {
+        if (!operationName || typeof operationName !== 'string') {
+            return false;
+        }
+        if (GQL_BLOCKED_OPERATIONS.has(operationName)) {
+            return true;
+        }
+        const name = operationName.toLowerCase();
+        return name.includes('streamdisplayad') ||
+            name.includes('sda') ||
+            name.includes('commercialbreak') ||
+            name.includes('adrequest') ||
+            name.includes('admetadata');
+    };
+
+    const createEmptyGqlResponse = () => ({ data: {}, errors: [] });
 
     let hooksInstalled = false;
     let adRemovalObserver = null;
@@ -335,19 +397,43 @@
 
                     if (Array.isArray(originalBody)) {
                         let modified = false;
+                        let blockedCount = 0;
+
                         originalBody.forEach(payload => {
-                            if (payload?.operationName === 'PlaybackAccessToken' && adjustPlayback(payload)) {
-                                modified = true;
+                            if (payload?.operationName) {
+                                if (shouldBlockGqlOperation(payload.operationName)) {
+                                    blockedCount++;
+                                }
+                                if (payload.operationName === 'PlaybackAccessToken' && adjustPlayback(payload)) {
+                                    modified = true;
+                                }
                             }
                         });
+
+                        if (blockedCount === originalBody.length && blockedCount > 0) {
+                            logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQL', 'Blocked ad-related GQL batch operation');
+                            const stub = originalBody.map(() => createEmptyGqlResponse());
+                            return new Response(JSON.stringify(stub), {
+                                status: 200,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
 
                         if (modified) {
                             const newInit = { ...(init || {}), body: JSON.stringify(originalBody) };
                             return originalFetch(input, newInit);
                         }
                     } else if (originalBody && typeof originalBody === 'object') {
+                        if (originalBody.operationName && shouldBlockGqlOperation(originalBody.operationName)) {
+                            logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQL', `Blocked ad-related GQL operation: ${originalBody.operationName}`);
+                            return new Response(JSON.stringify(createEmptyGqlResponse()), {
+                                status: 200,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+
                         if (originalBody.operationName === 'ShoutoutHighlightServiceQuery') {
-                            return new Response(JSON.stringify({ data: {}, errors: [] }), {
+                            return new Response(JSON.stringify(createEmptyGqlResponse()), {
                                 status: 200,
                                 headers: { 'Content-Type': 'application/json' }
                             });
@@ -562,13 +648,20 @@ button[data-a-target*="player"],
 
             let removedElements = 0;
             let placeholderDetected = false;
+            let removedStreamDisplayAd = false;
 
             AD_DOM_SELECTORS.forEach(selector => {
                 try {
                     const matches = root.querySelectorAll(selector);
                     if (matches.length) {
                         matches.forEach(el => {
-                            if (el && el.parentNode && !el.closest('.persistent-player') && !el.closest('[data-a-target*="player-controls"]')) {
+                            if (el && el.parentNode && !el.closest('[data-a-target*="player-controls"]')) {
+                                if (!removedStreamDisplayAd) {
+                                    removedStreamDisplayAd = el.matches('[data-test-selector^="sda"]') ||
+                                        el.matches('[class*="stream-display-ad"]') ||
+                                        el.matches('[class*="squeezeback"]') ||
+                                        el.id === 'stream-lowerthird';
+                                }
                                 el.remove();
                                 removedElements++;
                             }
@@ -594,6 +687,10 @@ button[data-a-target*="player"],
                 });
             }
 
+            if (removedStreamDisplayAd) {
+                restoreVideoFromAd('stream display ad cleanup');
+            }
+
             if (placeholderDetected) {
                 restoreVideoFromAd('placeholder cleanup');
             }
@@ -616,7 +713,7 @@ button[data-a-target*="player"],
                     shouldClean = true;
                     break;
                 }
-                if (mutation.type === 'attributes' && ['class', 'data-a-target', 'style'].includes(mutation.attributeName)) {
+                if (mutation.type === 'attributes' && ['class', 'data-a-target', 'data-test-selector', 'style'].includes(mutation.attributeName)) {
                     shouldClean = true;
                     break;
                 }
@@ -632,7 +729,7 @@ button[data-a-target*="player"],
                 childList: true,
                 subtree: true,
                 attributes: true,
-                attributeFilter: ['style', 'class', 'data-a-target'],
+                attributeFilter: ['style', 'class', 'data-a-target', 'data-test-selector'],
             });
         }
 
@@ -662,6 +759,27 @@ button[data-a-target*="player"],
         videoElement.style.removeProperty('opacity');
         videoElement.style.removeProperty('width');
         videoElement.style.removeProperty('height');
+
+        const videoContainer = videoElement.closest('.video-player__container');
+        if (videoContainer) {
+            videoContainer.style.removeProperty('transform');
+            videoContainer.style.removeProperty('max-height');
+            videoContainer.style.removeProperty('min-height');
+        }
+
+        const persistentPlayer = videoElement.closest('.persistent-player');
+        if (persistentPlayer) {
+            persistentPlayer.style.removeProperty('transform');
+            persistentPlayer.style.removeProperty('max-height');
+            persistentPlayer.style.removeProperty('height');
+        }
+
+        const videoLayout = videoElement.closest('[data-test-selector="video-player__video-layout"]');
+        if (videoLayout) {
+            videoLayout.style.removeProperty('transform');
+            videoLayout.style.removeProperty('max-height');
+            videoLayout.style.removeProperty('min-height');
+        }
 
         adDetected = false;
     };
@@ -863,5 +981,5 @@ button[data-a-target*="player"],
         initialize();
     }
 
-    console.info(`${LOG_PREFIX} Ready! Smart unmute: ${CONFIG.SETTINGS.SMART_UNMUTE}; respect user mute: ${CONFIG.SETTINGS.RESPECT_USER_MUTE}; aggressive blocking: ${CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK}`);
+    console.info(`${LOG_PREFIX} Ready! Enhanced ad blocking, Smart unmute: ${CONFIG.SETTINGS.SMART_UNMUTE}, respect user mute: ${CONFIG.SETTINGS.RESPECT_USER_MUTE}, aggressive blocking: ${CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK}`);
 })();
