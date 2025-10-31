@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate Enhanced
 // @namespace    TwitchAdblockUltimate
-// @version      31.2.0
+// @version      31.3.0
 // @description  Advanced Twitch ad-blocking with smart controls, performance optimizations, and comprehensive ad suppression
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -30,7 +30,7 @@
     const defaultForceUnmute = GM_getValue('TTV_AdBlock_ForceUnmute', true);
 
     const CONFIG = {
-        SCRIPT_VERSION: '31.2.0',
+        SCRIPT_VERSION: '31.3.0',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -254,7 +254,10 @@
     const PREFERRED_SUPPORTED_CODECS = ['av1', 'h265', 'h264', 'vp9'];
     const originalFetch = unsafeWindow.fetch;
     const requestCache = new Map();
-    const processedElements = new WeakSet();
+    const videoListenerState = new WeakMap();
+    const HIDDEN_ATTRIBUTE = 'data-ttv-adblock-hidden';
+    const PLACEHOLDER_ATTRIBUTE = 'data-ttv-adblock-placeholder';
+    const HIDDEN_CLASS = 'ttv-adblock-hidden';
 
     const logError = (s, m, ...a) => CONFIG.DEBUG.SHOW_ERRORS && console.error(`${LOG_PREFIX} [${s}] ERROR:`, m, ...a);
     const logWarn = (s, m, ...a) => CONFIG.DEBUG.SHOW_ERRORS && console.warn(`${LOG_PREFIX} [${s}] WARN:`, m, ...a);
@@ -574,6 +577,19 @@ ${AD_DOM_SELECTORS.join(',\n')} {
     overflow: hidden !important;
 }
 
+.${HIDDEN_CLASS},
+[${HIDDEN_ATTRIBUTE}="true"] {
+    display: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+    z-index: -9999 !important;
+    position: absolute !important;
+    width: 0 !important;
+    height: 0 !important;
+    pointer-events: none !important;
+    overflow: hidden !important;
+}
+
 .video-player__container {
     position: relative !important;
 }
@@ -724,25 +740,37 @@ button[data-a-target*="player"],
             const root = videoElement?.closest('.video-player__container') || document.body || document.documentElement;
             if (!root) return;
 
-            let removedElements = 0;
+            let hiddenElements = 0;
             let placeholderDetected = false;
             let removedStreamDisplayAd = false;
-            const elementsToRemove = [];
 
             AD_DOM_SELECTORS.forEach(selector => {
                 try {
                     const matches = root.querySelectorAll(selector);
                     matches.forEach(el => {
-                        if (el && el.parentNode && !el.closest('[data-a-target*="player-controls"]') && !processedElements.has(el)) {
-                            if (!removedStreamDisplayAd) {
-                                removedStreamDisplayAd = el.matches('[data-test-selector^="sda"]') ||
-                                    el.matches('[class*="stream-display-ad"]') ||
-                                    el.matches('[class*="squeezeback"]') ||
-                                    el.id === 'stream-lowerthird';
-                            }
-                            elementsToRemove.push(el);
-                            processedElements.add(el);
+                        if (!el || !el.parentNode) return;
+                        if (el.closest('[data-a-target*="player-controls"]')) return;
+                        if (el.hasAttribute(HIDDEN_ATTRIBUTE)) return;
+                        
+                        if (!removedStreamDisplayAd) {
+                            removedStreamDisplayAd = el.matches('[data-test-selector^="sda"]') ||
+                                el.matches('[class*="stream-display-ad"]') ||
+                                el.matches('[class*="squeezeback"]') ||
+                                el.id === 'stream-lowerthird';
                         }
+                        
+                        // Hide with CSS instead of removing to avoid React errors
+                        el.style.setProperty('display', 'none', 'important');
+                        el.style.setProperty('opacity', '0', 'important');
+                        el.style.setProperty('visibility', 'hidden', 'important');
+                        el.style.setProperty('pointer-events', 'none', 'important');
+                        el.style.setProperty('position', 'absolute', 'important');
+                        el.style.setProperty('width', '0', 'important');
+                        el.style.setProperty('height', '0', 'important');
+                        el.style.setProperty('z-index', '-9999', 'important');
+                        el.setAttribute(HIDDEN_ATTRIBUTE, 'true');
+                        el.classList.add(HIDDEN_CLASS);
+                        hiddenElements++;
                     });
                 } catch (e) {
                     logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'DOM', `Selector error: ${selector}`, e);
@@ -751,35 +779,40 @@ button[data-a-target*="player"],
 
             if (CONFIG.SETTINGS.REMOVE_AD_PLACEHOLDER) {
                 const textContainers = root.querySelectorAll('div, span, p, section, article');
+                let checkedCount = 0;
                 for (const node of textContainers) {
-                    if (!node || !node.textContent || processedElements.has(node)) continue;
+                    if (checkedCount >= CONFIG.ADVANCED.DOM_CLEANUP_BATCH_SIZE) break;
+                    if (!node || !node.textContent) continue;
                     if (node.closest('[data-a-target*="player-controls"]')) continue;
                     
                     const text = node.textContent.trim().toLowerCase();
                     if (!text) continue;
                     
-                    if (PLACEHOLDER_TEXTS.some(ph => text.includes(ph.toLowerCase()))) {
+                    checkedCount++;
+                    const isPlaceholderText = PLACEHOLDER_TEXTS.some(ph => text.includes(ph.toLowerCase()));
+                    const alreadyHidden = node.hasAttribute(PLACEHOLDER_ATTRIBUTE);
+                    
+                    if (isPlaceholderText) {
                         placeholderDetected = true;
-                        if (node.parentNode) {
-                            elementsToRemove.push(node);
-                            processedElements.add(node);
+                        if (!alreadyHidden) {
+                            node.style.setProperty('display', 'none', 'important');
+                            node.style.setProperty('opacity', '0', 'important');
+                            node.style.setProperty('visibility', 'hidden', 'important');
+                            node.setAttribute(HIDDEN_ATTRIBUTE, 'true');
+                            node.setAttribute(PLACEHOLDER_ATTRIBUTE, 'true');
+                            node.classList.add(HIDDEN_CLASS);
+                            hiddenElements++;
                         }
-                    }
-
-                    if (elementsToRemove.length >= CONFIG.ADVANCED.DOM_CLEANUP_BATCH_SIZE) {
-                        break;
+                    } else if (alreadyHidden) {
+                        node.removeAttribute(PLACEHOLDER_ATTRIBUTE);
+                        node.removeAttribute(HIDDEN_ATTRIBUTE);
+                        node.classList.remove(HIDDEN_CLASS);
+                        node.style.removeProperty('display');
+                        node.style.removeProperty('opacity');
+                        node.style.removeProperty('visibility');
                     }
                 }
             }
-
-            elementsToRemove.forEach(el => {
-                try {
-                    el.remove();
-                    removedElements++;
-                } catch (e) {
-                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'DOM', 'Failed to remove element', e);
-                }
-            });
 
             if (removedStreamDisplayAd) {
                 restoreVideoFromAd('stream display ad cleanup');
@@ -789,8 +822,8 @@ button[data-a-target*="player"],
                 restoreVideoFromAd('placeholder cleanup');
             }
 
-            if (removedElements && CONFIG.DEBUG.PLAYER_MONITOR) {
-                logTrace(true, 'DOM', `Removed ${removedElements} ad elements`);
+            if (hiddenElements && CONFIG.DEBUG.PLAYER_MONITOR) {
+                logTrace(true, 'DOM', `Hidden ${hiddenElements} ad elements`);
             }
         };
 
@@ -828,6 +861,58 @@ button[data-a-target*="player"],
         }
 
         runCleanup();
+    };
+
+    const safelyHideElement = (el) => {
+        if (!el || !el.style) return;
+        try {
+            el.style.setProperty('display', 'none', 'important');
+            el.style.setProperty('opacity', '0', 'important');
+            el.style.setProperty('visibility', 'hidden', 'important');
+            el.style.setProperty('pointer-events', 'none', 'important');
+            el.style.setProperty('position', 'absolute', 'important');
+            el.style.setProperty('width', '0', 'important');
+            el.style.setProperty('height', '0', 'important');
+            el.style.setProperty('z-index', '-9999', 'important');
+            el.style.setProperty('overflow', 'hidden', 'important');
+            if (typeof el.setAttribute === 'function') {
+                el.setAttribute(HIDDEN_ATTRIBUTE, 'true');
+            }
+            if (el.classList && !el.classList.contains(HIDDEN_CLASS)) {
+                el.classList.add(HIDDEN_CLASS);
+            } else if (typeof el.getAttribute === 'function') {
+                const existing = el.getAttribute('class') || '';
+                if (!existing.includes(HIDDEN_CLASS)) {
+                    el.setAttribute('class', `${existing} ${HIDDEN_CLASS}`.trim());
+                }
+            }
+        } catch (e) {
+            // Ignore errors
+        }
+    };
+
+    const cleanupOldVideoElement = (vid) => {
+        if (!vid || !vid.pause) return;
+        
+        try {
+            // Stop playback
+            vid.pause();
+            
+            // Mute to prevent audio bleed
+            vid.muted = true;
+            vid.volume = 0;
+            
+            // Clear sources
+            vid.src = '';
+            vid.srcObject = null;
+            
+            // Try to unload
+            vid.load();
+            
+            logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Cleaned up old video element');
+        } catch (e) {
+            logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Error cleaning up old video element', e);
+        }
     };
 
     const restoreVideoFromAd = (reason = 'ad cleanup') => {
@@ -903,35 +988,25 @@ button[data-a-target*="player"],
         }
 
         const attachListeners = (vid) => {
-            if (!vid || vid._ttvAdblockListeners) return;
+            if (!vid || videoListenerState.has(vid)) return;
 
             originalVideoParent = vid.parentElement;
             if (vid.volume > 0.05) {
                 lastKnownVolume = vid.volume;
             }
 
-            if (!vid._ttvInitialState) {
-                vid._ttvInitialState = true;
-                if (CONFIG.SETTINGS.FORCE_UNMUTE && CONFIG.SETTINGS.SMART_UNMUTE) {
-                    setTimeout(() => {
-                        if (videoElement === vid && !userMutedManually) {
-                            attemptAutoUnmute('initial setup');
-                        }
-                    }, 1000);
+            const timers = {
+                stallTimer: null,
+                ivsErrorTimer: null,
+                waitingTimer: null,
+                initialUnmute1: null,
+                initialUnmute2: null,
+                handlers: {}
+            };
 
-                    setTimeout(() => {
-                        if (videoElement === vid && !userMutedManually && (vid.muted || vid.volume <= 0.001)) {
-                            attemptAutoUnmute('initial setup retry');
-                        }
-                    }, 2500);
-                }
-            }
+            const handlers = timers.handlers;
 
-            let stallTimer = null;
-            let ivsErrorTimer = null;
-            let waitingTimer = null;
-
-            vid.addEventListener('volumechange', () => {
+            const onVolumeChange = () => {
                 const now = Date.now();
                 if (scriptAdjustingVolume) {
                     if (vid.volume > 0.05) {
@@ -955,21 +1030,27 @@ button[data-a-target*="player"],
                     logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', 'User manually unmuted');
                 }
                 lastUserVolumeChange = now;
-            }, { passive: true });
+            };
 
-            vid.addEventListener('stalled', () => {
+            const onStalled = () => {
                 logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Playback stalled');
-                if (stallTimer) clearTimeout(stallTimer);
-                stallTimer = setTimeout(() => triggerReload('stall timeout'), CONFIG.ADVANCED.RELOAD_STALL_THRESHOLD_MS);
-                document.querySelectorAll('.commercial-break-in-progress,[data-test-selector="commercial-break-in-progress"]').forEach(el => el.remove());
+                if (timers.stallTimer) clearTimeout(timers.stallTimer);
+                timers.stallTimer = setTimeout(() => triggerReload('stall timeout'), CONFIG.ADVANCED.RELOAD_STALL_THRESHOLD_MS);
+                document.querySelectorAll('.commercial-break-in-progress,[data-test-selector="commercial-break-in-progress"]').forEach(safelyHideElement);
                 if (vid.paused) {
                     vid.play().catch(() => {});
                 }
-            }, { passive: true });
+            };
 
-            vid.addEventListener('playing', () => {
-                if (stallTimer) clearTimeout(stallTimer);
-                if (waitingTimer) clearTimeout(waitingTimer);
+            const onPlaying = () => {
+                if (timers.stallTimer) {
+                    clearTimeout(timers.stallTimer);
+                    timers.stallTimer = null;
+                }
+                if (timers.waitingTimer) {
+                    clearTimeout(timers.waitingTimer);
+                    timers.waitingTimer = null;
+                }
                 if (adDetected) {
                     attemptAutoUnmute('playing');
                     adDetected = false;
@@ -977,54 +1058,144 @@ button[data-a-target*="player"],
                 if (vid.volume > 0.05 && !scriptAdjustingVolume) {
                     lastKnownVolume = vid.volume;
                 }
-            }, { passive: true });
+            };
 
-            vid.addEventListener('loadeddata', () => {
+            const onLoadedData = () => {
                 if (adDetected) {
                     attemptAutoUnmute('loadeddata');
                     adDetected = false;
                 }
-            }, { passive: true });
+            };
 
-            vid.addEventListener('error', (e) => {
+            const onError = (e) => {
                 const code = e?.target?.error?.code;
                 const message = e?.target?.error?.message || '';
                 logError('Video', `Player error (code=${code}, message=${message})`);
                 if (code && (CONFIG.ADVANCED.RELOAD_ON_ERROR_CODES.includes(code) || message.includes('IVS') || message.includes('InvalidCharacter'))) {
-                    if (ivsErrorTimer) clearTimeout(ivsErrorTimer);
-                    ivsErrorTimer = setTimeout(() => triggerReload(`error ${code}`), CONFIG.ADVANCED.IVS_ERROR_THRESHOLD);
+                    if (timers.ivsErrorTimer) clearTimeout(timers.ivsErrorTimer);
+                    timers.ivsErrorTimer = setTimeout(() => triggerReload(`error ${code}`), CONFIG.ADVANCED.IVS_ERROR_THRESHOLD);
                 }
-                document.querySelectorAll('.commercial-break-in-progress,[data-test-selector="commercial-break-in-progress"]').forEach(el => el.remove());
-            });
+                document.querySelectorAll('.commercial-break-in-progress,[data-test-selector="commercial-break-in-progress"]').forEach(safelyHideElement);
+            };
 
-            vid.addEventListener('waiting', () => {
+            const onWaiting = () => {
                 logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Buffering...');
-                if (waitingTimer) clearTimeout(waitingTimer);
-                waitingTimer = setTimeout(() => {
+                if (timers.waitingTimer) clearTimeout(timers.waitingTimer);
+                timers.waitingTimer = setTimeout(() => {
                     if (vid.readyState < 3) {
                         vid.play().catch(() => {});
                     }
                 }, CONFIG.ADVANCED.RELOAD_BUFFERING_THRESHOLD_MS);
-            }, { passive: true });
+            };
 
-            vid.addEventListener('canplay', () => {
-                if (waitingTimer) clearTimeout(waitingTimer);
-            }, { passive: true });
+            const onCanPlay = () => {
+                if (timers.waitingTimer) {
+                    clearTimeout(timers.waitingTimer);
+                    timers.waitingTimer = null;
+                }
+            };
 
-            vid.addEventListener('seeking', () => {
-                if (stallTimer) clearTimeout(stallTimer);
-            }, { passive: true });
+            const onSeeking = () => {
+                if (timers.stallTimer) {
+                    clearTimeout(timers.stallTimer);
+                    timers.stallTimer = null;
+                }
+            };
 
-            vid._ttvAdblockListeners = true;
+            handlers.volumechange = onVolumeChange;
+            handlers.stalled = onStalled;
+            handlers.playing = onPlaying;
+            handlers.loadeddata = onLoadedData;
+            handlers.error = onError;
+            handlers.waiting = onWaiting;
+            handlers.canplay = onCanPlay;
+            handlers.seeking = onSeeking;
+
+            vid.addEventListener('volumechange', onVolumeChange, { passive: true });
+            vid.addEventListener('stalled', onStalled, { passive: true });
+            vid.addEventListener('playing', onPlaying, { passive: true });
+            vid.addEventListener('loadeddata', onLoadedData, { passive: true });
+            vid.addEventListener('error', onError);
+            vid.addEventListener('waiting', onWaiting, { passive: true });
+            vid.addEventListener('canplay', onCanPlay, { passive: true });
+            vid.addEventListener('seeking', onSeeking, { passive: true });
+
+            videoListenerState.set(vid, timers);
+
+            if (!vid._ttvInitialState) {
+                vid._ttvInitialState = true;
+                if (CONFIG.SETTINGS.FORCE_UNMUTE && CONFIG.SETTINGS.SMART_UNMUTE) {
+                    timers.initialUnmute1 = setTimeout(() => {
+                        if (videoElement === vid && !userMutedManually) {
+                            attemptAutoUnmute('initial setup');
+                        }
+                    }, 1000);
+
+                    timers.initialUnmute2 = setTimeout(() => {
+                        if (videoElement === vid && !userMutedManually && (vid.muted || vid.volume <= 0.001)) {
+                            attemptAutoUnmute('initial setup retry');
+                        }
+                    }, 2500);
+                }
+            }
+        };
+
+        const cleanupAllTimers = (vid) => {
+            const timers = videoListenerState.get(vid);
+            if (timers) {
+                // Clear all timers
+                ['stallTimer', 'ivsErrorTimer', 'waitingTimer', 'initialUnmute1', 'initialUnmute2'].forEach(key => {
+                    if (timers[key]) {
+                        clearTimeout(timers[key]);
+                    }
+                });
+                
+                // Remove event listeners
+                if (timers.handlers) {
+                    Object.entries(timers.handlers).forEach(([eventName, handler]) => {
+                        if (handler) {
+                            vid.removeEventListener(eventName, handler);
+                        }
+                    });
+                }
+                
+                videoListenerState.delete(vid);
+            }
         };
 
         const debouncedAttach = debounce(() => {
-            const currentVideo = document.querySelector('video');
-            if (currentVideo && currentVideo !== videoElement) {
+            const allVideos = Array.from(document.querySelectorAll('video'));
+            const currentVideo = allVideos.find(vid => vid.offsetParent !== null && vid.readyState > 0 && !vid.ended) || allVideos[allVideos.length - 1];
+
+            if (currentVideo) {
+                if (videoElement && videoElement !== currentVideo) {
+                    cleanupAllTimers(videoElement);
+                    cleanupOldVideoElement(videoElement);
+                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Switched from old video element');
+                }
+
                 videoElement = currentVideo;
-                attachListeners(videoElement);
-                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Attached to new video element');
+
+                if (!videoListenerState.has(videoElement)) {
+                    attachListeners(videoElement);
+                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Attached to new video element');
+                }
+            } else if (videoElement) {
+                cleanupAllTimers(videoElement);
+                cleanupOldVideoElement(videoElement);
+                videoElement = null;
             }
+
+            allVideos.forEach(vid => {
+                if (vid && vid !== videoElement) {
+                    const isActive = !vid.paused && !vid.ended;
+                    const isVisible = vid.offsetParent !== null;
+                    if (isActive || !isVisible) {
+                        cleanupAllTimers(vid);
+                        cleanupOldVideoElement(vid);
+                    }
+                }
+            });
         }, 250);
 
         videoPlayerObserver = new MutationObserver(() => debouncedAttach());
