@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate Enhanced
 // @namespace    TwitchAdblockUltimate
-// @version      31.0.0
+// @version      31.1.0
 // @description  Enhanced Twitch ad-blocking with smart auto-unmute, injected ad protection, and performance optimizations
 // @author       ShmidtS (Enhanced)
 // @match        https://www.twitch.tv/*
@@ -30,7 +30,7 @@
     const defaultForceUnmute = GM_getValue('TTV_AdBlock_ForceUnmute', true);
 
     const CONFIG = {
-        SCRIPT_VERSION: '31.0.0',
+        SCRIPT_VERSION: '31.1.0',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -170,6 +170,8 @@
     let originalVideoParent = null;
     let lastKnownVolume = 0.5;
     let scriptAdjustingVolume = false;
+    const USER_VOLUME_CHANGE_COOLDOWN_MS = 4000;
+    const PREFERRED_SUPPORTED_CODECS = ['av1', 'h265', 'h264'];
     const originalFetch = unsafeWindow.fetch;
 
     const logError = (s, m, ...a) => CONFIG.DEBUG.SHOW_ERRORS && console.error(`${LOG_PREFIX} [${s}] ERROR:`, m, ...a);
@@ -192,20 +194,38 @@
         } finally {
             setTimeout(() => {
                 scriptAdjustingVolume = false;
-            }, 0);
+            }, 100);
         }
     };
 
-    const shouldAutoUnmute = () => (
-        CONFIG.SETTINGS.FORCE_UNMUTE &&
-        CONFIG.SETTINGS.SMART_UNMUTE &&
-        (!CONFIG.SETTINGS.RESPECT_USER_MUTE || !userMutedManually)
+    const hasRecentUserVolumeChange = () => (
+        !!(lastUserVolumeChange && (Date.now() - lastUserVolumeChange) < USER_VOLUME_CHANGE_COOLDOWN_MS)
     );
+
+    const shouldAutoUnmute = () => {
+        if (!CONFIG.SETTINGS.FORCE_UNMUTE || !CONFIG.SETTINGS.SMART_UNMUTE) {
+            return false;
+        }
+
+        if (CONFIG.SETTINGS.RESPECT_USER_MUTE && userMutedManually) {
+            return false;
+        }
+
+        if (hasRecentUserVolumeChange()) {
+            return false;
+        }
+
+        return true;
+    };
 
     const attemptAutoUnmute = (reason) => {
         if (!videoElement || !shouldAutoUnmute()) {
-            if (CONFIG.DEBUG.PLAYER_MONITOR && userMutedManually) {
-                logTrace(true, 'AudioGuard', `Skipping auto-unmute (${reason}) due to user mute`);
+            if (CONFIG.DEBUG.PLAYER_MONITOR) {
+                if (userMutedManually) {
+                    logTrace(true, 'AudioGuard', `Skipping auto-unmute (${reason}) due to user mute`);
+                } else if (hasRecentUserVolumeChange()) {
+                    logTrace(true, 'AudioGuard', `Skipping auto-unmute (${reason}) due to recent user volume change`);
+                }
             }
             return;
         }
@@ -222,6 +242,55 @@
         logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `Auto-unmuted (${reason})`);
     };
 
+    const normalizeSupportedCodecs = (existing) => {
+        const codecs = Array.isArray(existing)
+            ? existing.filter(codec => typeof codec === 'string' && codec.trim())
+            : [];
+        const unique = new Set();
+        codecs.forEach(codec => unique.add(codec));
+        PREFERRED_SUPPORTED_CODECS.forEach(codec => unique.add(codec));
+        return Array.from(unique);
+    };
+
+    const adjustPlaybackAccessTokenPayload = (payload) => {
+        if (!payload || typeof payload !== 'object' || !payload.variables || typeof payload.variables !== 'object') {
+            return false;
+        }
+
+        const { variables } = payload;
+        let updated = false;
+
+        if (variables.playerType !== 'embed') {
+            variables.playerType = 'embed';
+            updated = true;
+        }
+
+        if (!variables.platform || variables.platform !== 'web') {
+            variables.platform = 'web';
+            updated = true;
+        }
+
+        const normalizedCodecs = normalizeSupportedCodecs(variables.supportedCodecs);
+        if (!Array.isArray(variables.supportedCodecs) ||
+            variables.supportedCodecs.length !== normalizedCodecs.length ||
+            variables.supportedCodecs.some((codec, index) => normalizedCodecs[index] !== codec)) {
+            variables.supportedCodecs = normalizedCodecs;
+            updated = true;
+        }
+
+        if (variables.isVod === false && variables.playerBackend !== 'mediaplayer') {
+            variables.playerBackend = 'mediaplayer';
+            updated = true;
+        }
+
+        if (Object.prototype.hasOwnProperty.call(variables, 'adblock')) {
+            delete variables.adblock;
+            updated = true;
+        }
+
+        return updated;
+    };
+
     const fetchOverride = async (input, init) => {
         const requestUrl = input instanceof Request ? input.url : String(input);
         const requestUrlLower = requestUrl.toLowerCase();
@@ -233,36 +302,61 @@
 
         if (requestUrl === GQL_URL) {
             try {
-                if (init && init.body) {
-                    const originalBodyText = typeof init.body === 'string' ? init.body : await (new Request(input, init)).text();
+                let originalBodyText = null;
+
+                if (typeof init?.body === 'string') {
+                    originalBodyText = init.body;
+                } else if (input instanceof Request) {
+                    originalBodyText = await input.clone().text();
+                } else if (init && init.body) {
+                    originalBodyText = await (new Request(requestUrl, init)).text();
+                }
+
+                if (originalBodyText) {
                     const originalBody = JSON.parse(originalBodyText);
 
-                    if (originalBody.operationName === 'PlaybackAccessToken') {
-                        logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQL', 'Adjusting PlaybackAccessToken payload');
-                        originalBody.variables.playerType = 'embed';
-                        originalBody.variables.platform = 'web';
-                        originalBody.variables.supportedCodecs = 'av1,h265,h264';
-                        if (originalBody.variables.isVod === false) {
-                            originalBody.variables.playerBackend = 'mediaplayer';
+                    const adjustPlayback = (payload) => {
+                        if (!payload || typeof payload !== 'object') {
+                            return false;
                         }
-                        delete originalBody.variables.adblock;
+                        const updated = adjustPlaybackAccessTokenPayload(payload);
+                        if (updated) {
+                            logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQL', 'Adjusted PlaybackAccessToken payload');
+                        }
+                        return updated;
+                    };
 
-                        const newInit = { ...init, body: JSON.stringify(originalBody) };
-                        return originalFetch(input, newInit);
-                    }
-
-                    if (originalBody.operationName === 'ShoutoutHighlightServiceQuery') {
-                        return new Response(JSON.stringify({ data: {}, errors: [] }), {
-                            status: 200,
-                            headers: { 'Content-Type': 'application/json' }
+                    if (Array.isArray(originalBody)) {
+                        let modified = false;
+                        originalBody.forEach(payload => {
+                            if (payload?.operationName === 'PlaybackAccessToken' && adjustPlayback(payload)) {
+                                modified = true;
+                            }
                         });
-                    }
 
-                    if (originalBody.operationName === 'VideoPlayerStreamInfoOverlayChannel') {
-                        return new Response(JSON.stringify({ data: { user: null }, errors: [] }), {
-                            status: 200,
-                            headers: { 'Content-Type': 'application/json' }
-                        });
+                        if (modified) {
+                            const newInit = { ...(init || {}), body: JSON.stringify(originalBody) };
+                            return originalFetch(input, newInit);
+                        }
+                    } else if (originalBody && typeof originalBody === 'object') {
+                        if (originalBody.operationName === 'ShoutoutHighlightServiceQuery') {
+                            return new Response(JSON.stringify({ data: {}, errors: [] }), {
+                                status: 200,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+
+                        if (originalBody.operationName === 'VideoPlayerStreamInfoOverlayChannel') {
+                            return new Response(JSON.stringify({ data: { user: null }, errors: [] }), {
+                                status: 200,
+                                headers: { 'Content-Type': 'application/json' }
+                            });
+                        }
+
+                        if (originalBody.operationName === 'PlaybackAccessToken' && adjustPlayback(originalBody)) {
+                            const newInit = { ...(init || {}), body: JSON.stringify(originalBody) };
+                            return originalFetch(input, newInit);
+                        }
                     }
                 }
             } catch (e) {
@@ -325,7 +419,7 @@ ${AD_DOM_SELECTORS.join(',\n')} {
     position: relative !important;
 }
 
-.video-player__overlay {
+.video-player__overlay[data-test-selector*="ad"] {
     pointer-events: none !important;
 }
 
@@ -553,8 +647,15 @@ video {
             if (!vid || vid._ttvAdblockListeners) return;
 
             originalVideoParent = vid.parentElement;
-            lastKnownVolume = vid.volume > 0.05 ? vid.volume : lastKnownVolume;
-            userMutedManually = vid.muted || vid.volume <= 0.001;
+            if (vid.volume > 0.05) {
+                lastKnownVolume = vid.volume;
+            }
+
+            const initiallyMuted = vid.muted || vid.volume <= 0.001;
+            userMutedManually = initiallyMuted;
+            if (initiallyMuted) {
+                lastUserVolumeChange = Date.now();
+            }
 
             let stallTimer = null;
             let ivsErrorTimer = null;
@@ -563,15 +664,20 @@ video {
             vid.addEventListener('volumechange', () => {
                 const now = Date.now();
                 if (scriptAdjustingVolume) {
-                    lastKnownVolume = vid.volume > 0.05 ? vid.volume : lastKnownVolume;
-                    lastUserVolumeChange = now;
+                    if (vid.volume > 0.05) {
+                        lastKnownVolume = vid.volume;
+                    }
                     return;
                 }
 
-                const muted = vid.muted || vid.volume <= 0.001;
-                userMutedManually = muted;
-                if (!muted && vid.volume > 0.001) {
-                    lastKnownVolume = vid.volume;
+                const wasMuted = vid.muted || vid.volume <= 0.001;
+                if (wasMuted) {
+                    userMutedManually = true;
+                } else {
+                    userMutedManually = false;
+                    if (vid.volume > 0.05) {
+                        lastKnownVolume = vid.volume;
+                    }
                 }
                 lastUserVolumeChange = now;
             }, { passive: true });
