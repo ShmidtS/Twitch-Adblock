@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         Twitch Adblock Ultimate Enhanced
+// @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
 // @version      31.1.1
-// @description  Enhanced Twitch ad-blocking with smart auto-unmute, injected ad protection, and performance optimizations
-// @author       ShmidtS (Enhanced)
+// @description  Twitch ad-blocking with injected ad protection, and performance optimizations
+// @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
 // @match        https://player.twitch.tv/*
@@ -56,7 +56,7 @@
             RELOAD_COOLDOWN_MS: GM_getValue('TTV_AdBlock_ReloadCooldownMs', 20000),
             MAX_RELOADS_PER_SESSION: GM_getValue('TTV_AdBlock_MaxReloadsPerSession', 2),
             RELOAD_ON_ERROR_CODES: GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "3000,4000,5000")
-                .split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
+            .split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
             IVS_ERROR_THRESHOLD: 5000,
             PIP_RETRY_ATTEMPTS: 3,
             PIP_RETRY_DELAY_MS: 1000,
@@ -229,11 +229,11 @@
             }
             return;
         }
-        
+
         const targetVolume = lastKnownVolume > 0.05 ? lastKnownVolume : 0.5;
         const wasMuted = videoElement.muted;
         const wasLowVolume = videoElement.volume <= 0.001;
-        
+
         withVolumeGuard(() => {
             if (videoElement.muted) {
                 videoElement.muted = false;
@@ -242,7 +242,7 @@
                 videoElement.volume = targetVolume;
             }
         });
-        
+
         if (wasMuted || wasLowVolume) {
             lastKnownVolume = videoElement.volume > 0.05 ? videoElement.volume : targetVolume;
             logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `Auto-unmuted (${reason}) to volume ${lastKnownVolume.toFixed(2)}`);
@@ -251,8 +251,8 @@
 
     const normalizeSupportedCodecs = (existing) => {
         const codecs = Array.isArray(existing)
-            ? existing.filter(codec => typeof codec === 'string' && codec.trim())
-            : [];
+        ? existing.filter(codec => typeof codec === 'string' && codec.trim())
+        : [];
         const unique = new Set();
         codecs.forEach(codec => unique.add(codec));
         PREFERRED_SUPPORTED_CODECS.forEach(codec => unique.add(codec));
@@ -610,7 +610,6 @@ button[data-a-target*="player"],
         }
 
         adRemovalObserver = new MutationObserver((mutations) => {
-            // Only process if we actually see relevant changes
             let shouldClean = false;
             for (const mutation of mutations) {
                 if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
@@ -695,19 +694,16 @@ button[data-a-target*="player"],
                 lastKnownVolume = vid.volume;
             }
 
-            // Don't treat initial autoplay mute as user action
-            // Only set userMutedManually if user actually interacts
+
             if (!vid._ttvInitialState) {
                 vid._ttvInitialState = true;
                 if (CONFIG.SETTINGS.FORCE_UNMUTE && CONFIG.SETTINGS.SMART_UNMUTE) {
-                    // Give browser/Twitch time to set up the video, then try auto-unmute
-                    // Use multiple attempts to ensure unmute happens
                     setTimeout(() => {
                         if (videoElement === vid && !userMutedManually) {
                             attemptAutoUnmute('initial setup');
                         }
                     }, 1000);
-                    
+
                     setTimeout(() => {
                         if (videoElement === vid && !userMutedManually && (vid.muted || vid.volume <= 0.001)) {
                             attemptAutoUnmute('initial setup retry');
@@ -730,10 +726,9 @@ button[data-a-target*="player"],
                     return;
                 }
 
-                // Real user volume change detected
                 const isMuted = vid.muted || vid.volume <= 0.001;
                 logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `User volume change: muted=${isMuted}, volume=${vid.volume}`);
-                
+
                 if (isMuted) {
                     userMutedManually = true;
                     logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', 'User manually muted');
@@ -853,8 +848,7 @@ button[data-a-target*="player"],
             if (adDetected && videoElement && CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK) {
                 restoreVideoFromAd('periodic watchdog');
             }
-            
-            // Periodic unmute check for persistent ad muting
+
             if (videoElement && CONFIG.SETTINGS.FORCE_UNMUTE && CONFIG.SETTINGS.SMART_UNMUTE && !userMutedManually) {
                 if (videoElement.muted || videoElement.volume <= 0.001) {
                     attemptAutoUnmute('periodic check');
