@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate Enhanced
 // @namespace    TwitchAdblockUltimate
-// @version      31.3.0
+// @version      31.4.0
 // @description  Advanced Twitch ad-blocking with smart controls, performance optimizations, and comprehensive ad suppression
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -30,7 +30,7 @@
     const defaultForceUnmute = GM_getValue('TTV_AdBlock_ForceUnmute', true);
 
     const CONFIG = {
-        SCRIPT_VERSION: '31.3.0',
+        SCRIPT_VERSION: '31.4.0',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -341,6 +341,22 @@
         const unique = new Set(codecs);
         PREFERRED_SUPPORTED_CODECS.forEach(codec => unique.add(codec));
         return Array.from(unique);
+    };
+
+    const isElementConnected = (el) => {
+        if (!el) return false;
+        if (typeof el.isConnected === 'boolean') {
+            return el.isConnected;
+        }
+        return document.contains(el);
+    };
+
+    const hasUsableSource = (vid) => {
+        if (!vid) return false;
+        if (vid.srcObject) return true;
+        if (typeof vid.currentSrc === 'string' && vid.currentSrc.trim()) return true;
+        if (typeof vid.src === 'string' && vid.src.trim()) return true;
+        return false;
     };
 
     const adjustPlaybackAccessTokenPayload = (payload) => {
@@ -891,27 +907,58 @@ button[data-a-target*="player"],
         }
     };
 
-    const cleanupOldVideoElement = (vid) => {
-        if (!vid || !vid.pause) return;
-        
+    const cleanupOldVideoElement = (vid, reason) => {
+        if (!vid || typeof vid.pause !== 'function') return;
+
+        const isConnected = isElementConnected(vid);
+
+        if (isConnected) {
+            if (vid.offsetParent !== null) {
+                return;
+            }
+            if (vid.readyState > 0 || hasUsableSource(vid)) {
+                return;
+            }
+        }
+
+        let cleaned = false;
+
         try {
-            // Stop playback
-            vid.pause();
-            
-            // Mute to prevent audio bleed
-            vid.muted = true;
-            vid.volume = 0;
-            
-            // Clear sources
-            vid.src = '';
-            vid.srcObject = null;
-            
-            // Try to unload
-            vid.load();
-            
-            logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Cleaned up old video element');
+            if (!vid.paused) {
+                vid.pause();
+                cleaned = true;
+            }
         } catch (e) {
-            logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Error cleaning up old video element', e);
+            // ignore
+        }
+
+        try {
+            if (!vid.muted) {
+                vid.muted = true;
+                cleaned = true;
+            }
+            if (vid.volume !== 0) {
+                vid.volume = 0;
+                cleaned = true;
+            }
+        } catch (e) {
+            // ignore
+        }
+
+        if (!isConnected) {
+            try {
+                if (vid.srcObject) {
+                    vid.srcObject = null;
+                    cleaned = true;
+                }
+            } catch (e) {
+                // ignore
+            }
+        }
+
+        if (cleaned) {
+            const msg = reason ? `Cleaned up old video element (${reason})` : 'Cleaned up old video element';
+            logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', msg);
         }
     };
 
@@ -1165,35 +1212,58 @@ button[data-a-target*="player"],
 
         const debouncedAttach = debounce(() => {
             const allVideos = Array.from(document.querySelectorAll('video'));
-            const currentVideo = allVideos.find(vid => vid.offsetParent !== null && vid.readyState > 0 && !vid.ended) || allVideos[allVideos.length - 1];
 
-            if (currentVideo) {
-                if (videoElement && videoElement !== currentVideo) {
+            if (allVideos.length === 0) {
+                if (videoElement) {
                     cleanupAllTimers(videoElement);
-                    cleanupOldVideoElement(videoElement);
-                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Switched from old video element');
+                    cleanupOldVideoElement(videoElement, 'no video elements');
+                    videoElement = null;
                 }
-
-                videoElement = currentVideo;
-
-                if (!videoListenerState.has(videoElement)) {
-                    attachListeners(videoElement);
-                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Attached to new video element');
-                }
-            } else if (videoElement) {
-                cleanupAllTimers(videoElement);
-                cleanupOldVideoElement(videoElement);
-                videoElement = null;
+                return;
             }
 
-            allVideos.forEach(vid => {
-                if (vid && vid !== videoElement) {
-                    const isActive = !vid.paused && !vid.ended;
-                    const isVisible = vid.offsetParent !== null;
-                    if (isActive || !isVisible) {
-                        cleanupAllTimers(vid);
-                        cleanupOldVideoElement(vid);
-                    }
+            const connectedVideos = allVideos.filter(isElementConnected);
+            const candidates = connectedVideos.length > 0 ? connectedVideos : allVideos;
+
+            let currentVideo = null;
+
+            if (videoElement && isElementConnected(videoElement) && candidates.includes(videoElement)) {
+                currentVideo = videoElement;
+            } else {
+                currentVideo = candidates.find(vid => hasUsableSource(vid) && vid.offsetParent !== null && vid.readyState >= 2 && !vid.ended)
+                    || candidates.find(vid => hasUsableSource(vid) && vid.readyState >= 2 && !vid.ended)
+                    || candidates.find(hasUsableSource)
+                    || candidates[candidates.length - 1];
+            }
+
+            if (currentVideo && currentVideo !== videoElement) {
+                if (videoElement) {
+                    cleanupAllTimers(videoElement);
+                    cleanupOldVideoElement(videoElement, 'switching video');
+                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Switched from old video element');
+                }
+                videoElement = currentVideo;
+            } else if (!currentVideo) {
+                if (videoElement) {
+                    cleanupAllTimers(videoElement);
+                    cleanupOldVideoElement(videoElement, 'no primary video');
+                    videoElement = null;
+                }
+                return;
+            }
+
+            if (videoElement && !videoListenerState.has(videoElement)) {
+                attachListeners(videoElement);
+                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Attached to new video element');
+            }
+
+            candidates.forEach(vid => {
+                if (!vid || vid === videoElement) {
+                    return;
+                }
+                if (!isElementConnected(vid)) {
+                    cleanupAllTimers(vid);
+                    cleanupOldVideoElement(vid, 'detached video');
                 }
             });
         }, 250);
