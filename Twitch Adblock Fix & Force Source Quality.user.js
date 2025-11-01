@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate Enhanced
 // @namespace    TwitchAdblockUltimate
-// @version      31.4.0
+// @version      32.0.0
 // @description  Advanced Twitch ad-blocking with smart controls, performance optimizations, and comprehensive ad suppression
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -30,7 +30,7 @@
     const defaultForceUnmute = GM_getValue('TTV_AdBlock_ForceUnmute', true);
 
     const CONFIG = {
-        SCRIPT_VERSION: '31.4.0',
+        SCRIPT_VERSION: '32.0.0',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -61,15 +61,19 @@
             IVS_ERROR_THRESHOLD: 5000,
             PIP_RETRY_ATTEMPTS: 3,
             PIP_RETRY_DELAY_MS: 1000,
-            OBSERVER_THROTTLE_MS: 450,
-            DOM_CLEANUP_BATCH_SIZE: 50,
+            OBSERVER_THROTTLE_MS: 650,
+            DOM_CLEANUP_BATCH_SIZE: 35,
             REQUEST_CACHE_TTL_MS: 60000,
+            VIDEO_ATTACH_DEBOUNCE_MS: 600,
+            VIDEO_DETACH_GRACE_MS: 1500,
+            VIDEO_CLEANUP_DELAY_MS: 2500,
         },
     };
 
     const LOG_PREFIX = `[TTV ADBLOCK ENH v${CONFIG.SCRIPT_VERSION}]`;
     const GQL_URL = 'https://gql.twitch.tv/gql';
     const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
+    const AD_VIDEO_SOURCE_PATTERN = /(?:\/ads?[\/_]|ads?\.|ad-delivery|doubleclick|amazon-adsystem|stitched|midroll|prefetch)/i;
 
     const AD_URL_KEYWORDS_BLOCK = [
         'edge.ads.twitch.tv',
@@ -98,6 +102,8 @@
         'pubads.g.doubleclick.net',
         'imasdk.googleapis.com',
         'amazon-adsystem.com',
+        'hermes.twitch.tv/b/v1',
+        'stitched-ad',
     ];
 
     const AD_DOM_SELECTORS = [
@@ -188,6 +194,9 @@
         'AD-URL',
         'TWITCH-PREFETCH',
         'AD-INSERTION',
+        'TWITCH-COMMERCIAL',
+        'AMAZON-ADS',
+        'TWITCH-STITCHED',
     ];
 
     const PLACEHOLDER_TEXTS = [
@@ -242,6 +251,8 @@
     let adRemovalObserver = null;
     let videoPlayerObserver = null;
     let videoElement = null;
+    let videoElementAttachTime = 0;
+    let videoElementDetachedAt = 0;
     let lastReloadTimestamp = 0;
     let reloadCount = 0;
     let userMutedManually = false;
@@ -255,6 +266,7 @@
     const originalFetch = unsafeWindow.fetch;
     const requestCache = new Map();
     const videoListenerState = new WeakMap();
+    const videoDisconnectTimestamps = new WeakMap();
     const HIDDEN_ATTRIBUTE = 'data-ttv-adblock-hidden';
     const PLACEHOLDER_ATTRIBUTE = 'data-ttv-adblock-placeholder';
     const HIDDEN_CLASS = 'ttv-adblock-hidden';
@@ -359,6 +371,83 @@
         return false;
     };
 
+    const isVideoSourceAd = (vid) => {
+        if (!vid) return false;
+        const src = vid.currentSrc || vid.src || '';
+        return AD_VIDEO_SOURCE_PATTERN.test(src);
+    };
+
+    const isVideoHealthy = (vid) => {
+        if (!vid) return false;
+        if (!isElementConnected(vid)) return false;
+        if (!hasUsableSource(vid)) return false;
+        if (isVideoSourceAd(vid)) return false;
+        if (vid.ended) return false;
+        if (vid.error) return false;
+        return true;
+    };
+
+    const scoreVideoCandidate = (vid) => {
+        if (!vid || !hasUsableSource(vid)) {
+            return Number.NEGATIVE_INFINITY;
+        }
+
+        let score = 0;
+
+        if (isElementConnected(vid)) score += 8;
+        if (vid.readyState >= 3) score += 5;
+        else if (vid.readyState >= 2) score += 3;
+        if (vid.offsetParent !== null) score += 4;
+        if (!vid.paused) score += 2;
+        if (vid.volume > 0.01 && !vid.muted) score += 1;
+
+        const dataTarget = (vid.dataset && vid.dataset.aTarget) || (typeof vid.getAttribute === 'function' ? vid.getAttribute('data-a-target') : '');
+        if (dataTarget && dataTarget.includes('player-video')) {
+            score += 6;
+        } else if (dataTarget && dataTarget.includes('player-pip')) {
+            score -= 4;
+        }
+
+        if (typeof vid.closest === 'function') {
+            if (vid.closest('.persistent-player, .video-player__container')) {
+                score += 3;
+            }
+            if (vid.closest('[data-test-selector="video-player__video-layout"]')) {
+                score += 3;
+            }
+        }
+
+        if (isVideoSourceAd(vid)) {
+            score -= 12;
+        }
+
+        return score;
+    };
+
+    const shouldKeepCurrentVideo = () => {
+        if (!videoElement) {
+            videoElementDetachedAt = 0;
+            return false;
+        }
+
+        if (!hasUsableSource(videoElement) || isVideoSourceAd(videoElement)) {
+            return false;
+        }
+
+        if (isElementConnected(videoElement)) {
+            videoElementDetachedAt = 0;
+            return true;
+        }
+
+        const now = Date.now();
+        if (!videoElementDetachedAt) {
+            videoElementDetachedAt = now;
+            return true;
+        }
+
+        return (now - videoElementDetachedAt) < CONFIG.ADVANCED.VIDEO_DETACH_GRACE_MS;
+    };
+
     const adjustPlaybackAccessTokenPayload = (payload) => {
         if (!payload || typeof payload !== 'object' || !payload.variables || typeof payload.variables !== 'object') {
             return false;
@@ -426,9 +515,21 @@
             timestamp: Date.now()
         });
 
-        if (requestCache.size > 100) {
-            const oldestKey = requestCache.keys().next().value;
-            requestCache.delete(oldestKey);
+        if (requestCache.size > 80) {
+            const now = Date.now();
+            let deleted = 0;
+            for (const [key, value] of requestCache.entries()) {
+                if (deleted >= 20) break;
+                if (now - value.timestamp > CONFIG.ADVANCED.REQUEST_CACHE_TTL_MS) {
+                    requestCache.delete(key);
+                    deleted++;
+                }
+            }
+
+            if (deleted < 10 && requestCache.size > 80) {
+                const oldestKey = requestCache.keys().next().value;
+                requestCache.delete(oldestKey);
+            }
         }
     };
 
@@ -700,6 +801,16 @@ button[data-a-target*="player"],
                 continue;
             }
 
+            if (upper.startsWith('#EXT-X-DISCONTINUITY')) {
+                if (inAdBlock) {
+                    inAdBlock = false;
+                    adBlockDepth = Math.max(0, adBlockDepth - 1);
+                } else {
+                    cleanLines.push(line);
+                }
+                continue;
+            }
+
             if (upper.startsWith('#EXT-X-DATERANGE')) {
                 if (keywordUpper.some(k => upper.includes(k))) {
                     adsFound = true;
@@ -909,17 +1020,26 @@ button[data-a-target*="player"],
 
     const cleanupOldVideoElement = (vid, reason) => {
         if (!vid || typeof vid.pause !== 'function') return;
+        if (vid === videoElement) return;
 
-        const isConnected = isElementConnected(vid);
+        const now = Date.now();
 
-        if (isConnected) {
-            if (vid.offsetParent !== null) {
-                return;
-            }
-            if (vid.readyState > 0 || hasUsableSource(vid)) {
-                return;
-            }
+        if (isElementConnected(vid) && (vid.offsetParent !== null || hasUsableSource(vid))) {
+            videoDisconnectTimestamps.delete(vid);
+            return;
         }
+
+        const firstSeen = videoDisconnectTimestamps.get(vid);
+        if (!firstSeen) {
+            videoDisconnectTimestamps.set(vid, now);
+            return;
+        }
+
+        if ((now - firstSeen) < CONFIG.ADVANCED.VIDEO_CLEANUP_DELAY_MS) {
+            return;
+        }
+
+        videoDisconnectTimestamps.delete(vid);
 
         let cleaned = false;
 
@@ -945,7 +1065,7 @@ button[data-a-target*="player"],
             // ignore
         }
 
-        if (!isConnected) {
+        if (!isElementConnected(vid)) {
             try {
                 if (vid.srcObject) {
                     vid.srcObject = null;
@@ -1205,10 +1325,15 @@ button[data-a-target*="player"],
                         }
                     });
                 }
-                
+
                 videoListenerState.delete(vid);
             }
+            videoDisconnectTimestamps.delete(vid);
+            if (vid === videoElement) {
+                videoElementDetachedAt = 0;
+            }
         };
+
 
         const debouncedAttach = debounce(() => {
             const allVideos = Array.from(document.querySelectorAll('video'));
@@ -1218,6 +1343,7 @@ button[data-a-target*="player"],
                     cleanupAllTimers(videoElement);
                     cleanupOldVideoElement(videoElement, 'no video elements');
                     videoElement = null;
+                    videoElementAttachTime = 0;
                 }
                 return;
             }
@@ -1225,31 +1351,57 @@ button[data-a-target*="player"],
             const connectedVideos = allVideos.filter(isElementConnected);
             const candidates = connectedVideos.length > 0 ? connectedVideos : allVideos;
 
-            let currentVideo = null;
+            if (shouldKeepCurrentVideo()) {
+                if (!videoElement) {
+                    // nothing to do
+                } else if (!isElementConnected(videoElement)) {
+                    return;
+                } else {
+                    const now = Date.now();
+                    if (videoElementAttachTime && (now - videoElementAttachTime) < CONFIG.ADVANCED.VIDEO_ATTACH_DEBOUNCE_MS) {
+                        return;
+                    }
 
-            if (videoElement && isElementConnected(videoElement) && candidates.includes(videoElement)) {
-                currentVideo = videoElement;
-            } else {
-                currentVideo = candidates.find(vid => hasUsableSource(vid) && vid.offsetParent !== null && vid.readyState >= 2 && !vid.ended)
-                    || candidates.find(vid => hasUsableSource(vid) && vid.readyState >= 2 && !vid.ended)
-                    || candidates.find(hasUsableSource)
-                    || candidates[candidates.length - 1];
+                    if (isVideoHealthy(videoElement)) {
+                        return;
+                    }
+                }
             }
 
-            if (currentVideo && currentVideo !== videoElement) {
+            const scored = candidates
+                .map(vid => ({ vid, score: scoreVideoCandidate(vid) }))
+                .filter(item => item.score > Number.NEGATIVE_INFINITY)
+                .sort((a, b) => b.score - a.score);
+
+            if (scored.length === 0) {
+                if (videoElement) {
+                    cleanupAllTimers(videoElement);
+                    cleanupOldVideoElement(videoElement, 'no valid candidates');
+                    videoElement = null;
+                    videoElementAttachTime = 0;
+                }
+                return;
+            }
+
+            const bestCandidate = scored[0].vid;
+
+            if (bestCandidate !== videoElement) {
+                if (videoElement) {
+                    const currentScore = scoreVideoCandidate(videoElement);
+                    const bestScore = scored[0].score;
+                    if (currentScore > (bestScore - 3)) {
+                        return;
+                    }
+                }
+
                 if (videoElement) {
                     cleanupAllTimers(videoElement);
                     cleanupOldVideoElement(videoElement, 'switching video');
                     logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Switched from old video element');
                 }
-                videoElement = currentVideo;
-            } else if (!currentVideo) {
-                if (videoElement) {
-                    cleanupAllTimers(videoElement);
-                    cleanupOldVideoElement(videoElement, 'no primary video');
-                    videoElement = null;
-                }
-                return;
+                videoElement = bestCandidate;
+                videoElementAttachTime = Date.now();
+                videoElementDetachedAt = 0;
             }
 
             if (videoElement && !videoListenerState.has(videoElement)) {
@@ -1257,16 +1409,13 @@ button[data-a-target*="player"],
                 logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Attached to new video element');
             }
 
-            candidates.forEach(vid => {
+            allVideos.forEach(vid => {
                 if (!vid || vid === videoElement) {
                     return;
                 }
-                if (!isElementConnected(vid)) {
-                    cleanupAllTimers(vid);
-                    cleanupOldVideoElement(vid, 'detached video');
-                }
+                cleanupOldVideoElement(vid, 'inactive video');
             });
-        }, 250);
+        }, CONFIG.ADVANCED.VIDEO_ATTACH_DEBOUNCE_MS);
 
         videoPlayerObserver = new MutationObserver(() => debouncedAttach());
 
@@ -1311,7 +1460,7 @@ button[data-a-target*="player"],
                 }
             }
 
-            if (requestCache.size > 50) {
+            if (requestCache.size > 75) {
                 const now = Date.now();
                 for (const [key, value] of requestCache.entries()) {
                     if (now - value.timestamp > CONFIG.ADVANCED.REQUEST_CACHE_TTL_MS) {
@@ -1319,7 +1468,16 @@ button[data-a-target*="player"],
                     }
                 }
             }
-        }, 2000);
+
+            if (videoDisconnectTimestamps.size > 5) {
+                const now = Date.now();
+                for (const [vid, timestamp] of videoDisconnectTimestamps.entries()) {
+                    if ((now - timestamp) > CONFIG.ADVANCED.VIDEO_CLEANUP_DELAY_MS * 2) {
+                        videoDisconnectTimestamps.delete(vid);
+                    }
+                }
+            }
+        }, 4000);
     };
 
     if (document.readyState === 'loading') {
