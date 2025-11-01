@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         Twitch Adblock Ultimate Enhanced
+// @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      31.4.0
+// @version      31.4.1
 // @description  Advanced Twitch ad-blocking with smart controls, performance optimizations, and comprehensive ad suppression
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -42,6 +42,8 @@
             REMOVE_AD_PLACEHOLDER: GM_getValue('TTV_AdBlock_RemoveAdPlaceholder', true),
             AGGRESSIVE_AD_BLOCK: GM_getValue('TTV_AdBlock_AggressiveBlock', true),
             REQUEST_DEDUPLICATION: GM_getValue('TTV_AdBlock_RequestDedup', true),
+            DISABLE_PIP_DURING_ADS: GM_getValue('TTV_AdBlock_DisablePiP', true),
+            CLEAN_VIDEO_WEAVER_MANIFESTS: GM_getValue('TTV_AdBlock_CleanVideoWeaver', true),
         },
         DEBUG: {
             SHOW_ERRORS: GM_getValue('TTV_AdBlock_ShowErrorsInConsole', false),
@@ -164,6 +166,8 @@
         'CUE-OUT',
         'CUE-IN',
         'SCTE35',
+        'SCTE-35',
+        'DATERANGE',
         'Twitch-Ad-Signal',
         'Twitch-Prefetch',
         'Twitch-Ads',
@@ -184,6 +188,9 @@
         'PREROLL',
         'MIDROLL',
         'AD-SERVER',
+        'AD-ROLL',
+        'AD-SERVING',
+        'AD-STITCHING',
         'AD-MANIFEST',
         'AD-URL',
         'TWITCH-PREFETCH',
@@ -385,8 +392,15 @@
             updated = true;
         }
 
-        if (variables.isVod === false && variables.playerBackend !== 'mediaplayer') {
+        // Force HLS mediaplayer backend to avoid IVS ads pipeline
+        if (variables.playerBackend !== 'mediaplayer') {
             variables.playerBackend = 'mediaplayer';
+            updated = true;
+        }
+
+        // Prefer source quality when possible
+        if (variables.videoQualityPreference !== 'chunked') {
+            variables.videoQualityPreference = 'chunked';
             updated = true;
         }
 
@@ -441,7 +455,8 @@
             return new Response(null, { status: 204, statusText: 'Blocked by TTV Adblock Enhanced' });
         }
 
-        if (requestUrl === GQL_URL) {
+        // Intercept GraphQL on any gql.twitch.tv endpoint (path variations occur)
+        if (requestUrlLower.startsWith('https://gql.twitch.tv/')) {
             try {
                 let originalBodyText = null;
 
@@ -529,7 +544,12 @@
             }
         }
 
-        if (TWITCH_MANIFEST_PATH_REGEX.test(requestUrl) && requestUrlLower.includes('usher.ttvnw.net')) {
+        // Clean Twitch HLS manifest from usher, and optionally video-weaver/CDN manifests
+        const isM3u8 = TWITCH_MANIFEST_PATH_REGEX.test(requestUrl);
+        const isUsher = requestUrlLower.includes('usher.ttvnw.net');
+        const isVideoWeaver = /video-weaver\./i.test(requestUrlLower);
+        const shouldCleanManifest = isM3u8 && (isUsher || (CONFIG.SETTINGS.CLEAN_VIDEO_WEAVER_MANIFESTS && isVideoWeaver));
+        if (shouldCleanManifest) {
             const method = (input instanceof Request ? input.method : init?.method || 'GET').toUpperCase();
             const cacheKey = getCacheKey(requestUrl, method);
             const cachedResponse = getCachedResponse(cacheKey);
@@ -643,6 +663,11 @@ button[data-a-target*="player"],
     will-change: transform !important;
     transform: translateZ(0);
 }
+
+/* Avoid suppressing PiP UI to prevent layout issues */
+
+/* Keep main video container full size */
+/* Avoid forcing layout size to prevent blank UI */
         `;
 
         try {
@@ -681,6 +706,7 @@ button[data-a-target*="player"],
         const lines = m3u8Text.split('\n');
         const cleanLines = [];
         let skipNextSegment = false;
+        let flagSkipNextByMarker = false;
         let inAdBlock = false;
         let adBlockDepth = 0;
 
@@ -723,15 +749,19 @@ button[data-a-target*="player"],
                 continue;
             }
 
-            if (inAdBlock && upper.startsWith('#EXTINF')) {
+            if ((inAdBlock || flagSkipNextByMarker) && upper.startsWith('#EXTINF')) {
                 adsFound = true;
                 skipNextSegment = true;
+                flagSkipNextByMarker = false;
                 continue;
             }
 
             if (keywordUpper.some(k => upper.includes(k))) {
                 adsFound = true;
-                if (upper.startsWith('#EXTINF')) {
+                // If marker line precedes a segment, flag to drop the next media segment
+                if (!upper.startsWith('#EXTINF')) {
+                    flagSkipNextByMarker = true;
+                } else {
                     skipNextSegment = true;
                 }
                 continue;
@@ -753,7 +783,9 @@ button[data-a-target*="player"],
         if (!CONFIG.SETTINGS.ATTEMPT_DOM_AD_REMOVAL) return;
 
         const runCleanup = () => {
-            const root = videoElement?.closest('.video-player__container') || document.body || document.documentElement;
+            // Restrict to the actual Twitch video player container to avoid hiding the whole page
+            if (!videoElement) return;
+            const root = videoElement.closest('.video-player__container');
             if (!root) return;
 
             let hiddenElements = 0;
@@ -841,6 +873,22 @@ button[data-a-target*="player"],
             if (hiddenElements && CONFIG.DEBUG.PLAYER_MONITOR) {
                 logTrace(true, 'DOM', `Hidden ${hiddenElements} ad elements`);
             }
+
+            // Additionally hide a few known ad overlays globally (safe selectors only)
+            const globalSafeSelectors = [
+                '.commercial-break-in-progress',
+                '[data-test-selector="commercial-break-in-progress"]',
+                '.stream-display-ad__wrapper',
+                '.stream-display-ad__container',
+                '.stream-display-ad__transform-container',
+                '.stream-display-ad__frame',
+                '[data-test-selector*="sad-overlay"]',
+                'div[data-a-target="player-ad-overlay"]',
+                'div[data-ad-placeholder="true"]',
+            ];
+            try {
+                document.querySelectorAll(globalSafeSelectors.join(',')).forEach(safelyHideElement);
+            } catch {}
         };
 
         const debouncedCleanup = debounce(runCleanup, CONFIG.ADVANCED.OBSERVER_THROTTLE_MS);
@@ -866,7 +914,7 @@ button[data-a-target*="player"],
             }
         });
 
-        const target = document.body || document.documentElement;
+        const target = videoElement?.closest('.video-player__container');
         if (target) {
             adRemovalObserver.observe(target, {
                 childList: true,
@@ -971,8 +1019,14 @@ button[data-a-target*="player"],
             videoElement.play().catch(() => {});
         }
 
-        if (document.pictureInPictureElement && document.pictureInPictureElement !== videoElement) {
-            document.exitPictureInPicture().catch(() => {});
+        if (CONFIG.SETTINGS.DISABLE_PIP_DURING_ADS) {
+            try {
+                if (document.pictureInPictureElement && document.pictureInPictureElement !== videoElement) {
+                    document.exitPictureInPicture().catch(() => {});
+                }
+            } catch (e) {
+                // ignore
+            }
         }
 
         if (originalVideoParent && videoElement.parentElement !== originalVideoParent) {
@@ -1036,6 +1090,9 @@ button[data-a-target*="player"],
 
         const attachListeners = (vid) => {
             if (!vid || videoListenerState.has(vid)) return;
+
+            // Ensure DOM ad cleanup observes the current player container
+            removeDOMAdElements();
 
             originalVideoParent = vid.parentElement;
             if (vid.volume > 0.05) {
