@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      31.4.1
-// @description  Advanced Twitch ad-blocking with smart controls, performance optimizations, and comprehensive ad suppression
+// @version      32.0.0
+// @description  Twitch ad-blocking with multi-layer protection: fetch/XHR/WebSocket blocking, improved M3U8 cleaning, advanced DOM removal, and comprehensive ad pattern detection
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -30,7 +30,7 @@
     const defaultForceUnmute = GM_getValue('TTV_AdBlock_ForceUnmute', true);
 
     const CONFIG = {
-        SCRIPT_VERSION: '31.4.0',
+        SCRIPT_VERSION: '32.0.0',
         SETTINGS: {
             FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
             ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
@@ -46,12 +46,12 @@
             CLEAN_VIDEO_WEAVER_MANIFESTS: GM_getValue('TTV_AdBlock_CleanVideoWeaver', true),
         },
         DEBUG: {
-            SHOW_ERRORS: GM_getValue('TTV_AdBlock_ShowErrorsInConsole', false),
-            CORE: GM_getValue('TTV_AdBlock_Debug_Core', false),
-            PLAYER_MONITOR: GM_getValue('TTV_AdBlock_Debug_PlayerMon', false),
-            M3U8_CLEANING: GM_getValue('TTV_AdBlock_Debug_M3U8', false),
-            GQL_MODIFY: GM_getValue('TTV_AdBlock_Debug_GQL', false),
-            NETWORK_BLOCKING: GM_getValue('TTV_AdBlock_Debug_NetBlock', false),
+            SHOW_ERRORS: GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true),
+            CORE: GM_getValue('TTV_AdBlock_Debug_Core', true),
+            PLAYER_MONITOR: GM_getValue('TTV_AdBlock_Debug_PlayerMon', true),
+            M3U8_CLEANING: GM_getValue('TTV_AdBlock_Debug_M3U8', true),
+            GQL_MODIFY: GM_getValue('TTV_AdBlock_Debug_GQL', true),
+            NETWORK_BLOCKING: GM_getValue('TTV_AdBlock_Debug_NetBlock', true),
         },
         ADVANCED: {
             RELOAD_STALL_THRESHOLD_MS: GM_getValue('TTV_AdBlock_StallThresholdMs', 12000),
@@ -100,6 +100,60 @@
         'pubads.g.doubleclick.net',
         'imasdk.googleapis.com',
         'amazon-adsystem.com',
+        'googletagservices.com',
+        'googletags.pubads.com',
+        'contextual.media.net',
+        'rubiconproject.com',
+        'criteo.com',
+        'taboola.com',
+        'outbrain.com',
+        'twitch.tv/ads',
+        'twi.tv/ad',
+        'analytics.twitch.tv',
+        'ttvnw.net/ad',
+        'video-weaver',
+        'ttv-cdn.mozilla.org',
+        'cloudfront.net/ads',
+        'cloudfront.net/ad',
+        'ttv.libraries.video-weaver',
+        'usher.ttvnw.net/vods',
+        'usher.ttvnw.net/api/channel/hls',
+        'video-ad-stitcher',
+        'ad-mediation',
+        'adx.google.com',
+        'adsystem.amazon',
+        'msads.net',
+        '3lift.com',
+        'indexww.com',
+        'openx.net',
+        'pubmatic.com',
+        'spotxchange.com',
+        'adroll.com',
+        'blueconic.net',
+        'teads.tv',
+        'sharethrough.com',
+        '企业发展平台',
+        'adsrvr.org',
+        'exoclick.com',
+        'trafficjunky.net',
+        'yahoo.com/ad',
+        'zedo.com',
+        'yandex.ru/ads',
+        'betweendigital.com',
+        'adfox.ru',
+        'relap.io',
+        'admixer.net',
+        'google-analytics.com',
+        'segment.io',
+        'newrelic.com',
+        'telemetry.twitch.tv',
+        'particle-relay',
+        'ad-server',
+        'adnetwork',
+        'adblock',
+        'adblocker',
+        'ad-block',
+        'ad-behave',
     ];
 
     const AD_DOM_SELECTORS = [
@@ -158,6 +212,35 @@
         'iframe[src*="amazon-adsystem.com"]',
         'iframe[src*="doubleclick.net"]',
         'iframe[src*="imasdk.googleapis.com"]',
+        'div[class*="preroll"]',
+        'div[class*="midroll"]',
+        'div[class*="postroll"]',
+        'div[class*="ad__container"]',
+        'div[class*="ad__overlay"]',
+        'div[class*="ad-banner"]',
+        'div[class*="advertising"]',
+        'div[data-test-selector*="preroll"]',
+        'div[data-test-selector*="midroll"]',
+        'div[data-test-selector*="postroll"]',
+        'div[data-test-selector*="ad-container"]',
+        'div[data-test-selector*="ad-overlay"]',
+        '.extensions-app-frame',
+        '.extension-container',
+        '[data-test-selector*="extension"]',
+        '[data-test-selector*="BountyBoard"]',
+        '[data-test-selector*="bounty"]',
+        '[data-test-selector*="drops"]',
+        '[data-test-selector*="campaign"]',
+        '.raid-banner',
+        '.highlight-container',
+        '.sub-button-ad',
+        '.social-share-ad',
+        '.charity-banner',
+        '[data-test-selector="wallet-widget"]',
+        '.activity-highlight',
+        '.chat-line__message[data-a-target="chat-line-message"][data-test-selector*="promoted"]',
+        '.channel-header-content偶像',
+        '.channel-header-content偶像',
         ...(CONFIG.SETTINGS.HIDE_COOKIE_BANNER ? ['.consent-banner'] : []),
     ];
 
@@ -195,6 +278,48 @@
         'AD-URL',
         'TWITCH-PREFETCH',
         'AD-INSERTION',
+        'EXT-X-SCTE35',
+        'EXT-X-CUE-POINT',
+        'EXT-X-AD-BREAK',
+        'EXT-X-AD',
+        'EXT-X-BREAK',
+        'EXT-X-BANNER',
+        'EXT-X-OMNI-ADS',
+        'EXT-X-DATERANGE',
+        'EXT-X-AD-SIGNAL',
+        'AD-BREAK',
+        'AD-TRANSITION',
+        'AD-MARKER',
+        'AD-TRACK',
+        'AD-PROBE',
+        'AD-METADATA',
+        'AD-AUDIO',
+        'AD-SLATE',
+        'COMMERCIAL-BREAK',
+        'SPONSORED',
+        'PROMOTION',
+        'BRANDING',
+        'BUMPER',
+        'OVERLAY-AD',
+        'FILLER',
+        'PRE_ROLL_AD',
+        'MID_ROLL_AD',
+        'POST_ROLL_AD',
+        'AD-SLATE-00',
+        'AD-SLATE-01',
+        'AD-SLATE-02',
+        'AD-TRANSMISSION',
+        'AD-TRANSITION-SLATE',
+        'AD-MARKER-01',
+        'AD-MARKER-02',
+        'AD-MARKER-03',
+        'AD-MARKER-04',
+        'AD-MARKER-05',
+        'AD-MARKER-06',
+        'AD-MARKER-07',
+        'AD-MARKER-08',
+        'AD-MARKER-09',
+        'AD-MARKER-10',
     ];
 
     const PLACEHOLDER_TEXTS = [
@@ -260,6 +385,9 @@
     const USER_VOLUME_CHANGE_COOLDOWN_MS = 4000;
     const PREFERRED_SUPPORTED_CODECS = ['av1', 'h265', 'h264', 'vp9'];
     const originalFetch = unsafeWindow.fetch;
+    const originalXHR = unsafeWindow.XMLHttpRequest;
+    const originalWebSocket = unsafeWindow.WebSocket;
+    const originalRTCPeerConnection = unsafeWindow.RTCPeerConnection;
     const requestCache = new Map();
     const videoListenerState = new WeakMap();
     const HIDDEN_ATTRIBUTE = 'data-ttv-adblock-hidden';
@@ -421,7 +549,7 @@
 
     const getCachedResponse = (cacheKey) => {
         if (!CONFIG.SETTINGS.REQUEST_DEDUPLICATION) return null;
-        
+
         const cached = requestCache.get(cacheKey);
         if (cached && Date.now() - cached.timestamp < CONFIG.ADVANCED.REQUEST_CACHE_TTL_MS) {
             return cached.response;
@@ -434,7 +562,7 @@
 
     const cacheResponse = (cacheKey, response) => {
         if (!CONFIG.SETTINGS.REQUEST_DEDUPLICATION) return;
-        
+
         requestCache.set(cacheKey, {
             response: response.clone(),
             timestamp: Date.now()
@@ -451,8 +579,17 @@
         const requestUrlLower = requestUrl.toLowerCase();
 
         if (AD_URL_KEYWORDS_BLOCK.some(k => requestUrlLower.includes(String(k).toLowerCase()))) {
-            logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'Network', `Blocked fetch ${requestUrl}`);
+            logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'Network', `Blocked fetch: ${requestUrl}`);
             return new Response(null, { status: 204, statusText: 'Blocked by TTV Adblock Enhanced' });
+        }
+
+        if (requestUrlLower.includes('ad') || requestUrlLower.includes('commercial') || requestUrlLower.includes('sponsor')) {
+            const urlLower = requestUrlLower;
+            if ((urlLower.includes('.m3u8') || urlLower.includes('.ts') || urlLower.includes('.mp4')) &&
+                (urlLower.includes('ad') || urlLower.includes('commercial') || urlLower.includes('sponsor'))) {
+                logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'Network', `Blocked ad content: ${requestUrl}`);
+                return new Response(null, { status: 204, statusText: 'Blocked by TTV Adblock Enhanced' });
+            }
         }
 
         // Intercept GraphQL on any gql.twitch.tv endpoint (path variations occur)
@@ -702,6 +839,7 @@ button[data-a-target*="player"],
 
         let adsFound = false;
         let adSegments = 0;
+        let segmentsSkipped = 0;
         const keywordUpper = AD_DATERANGE_KEYWORDS.map(k => String(k).toUpperCase());
         const lines = m3u8Text.split('\n');
         const cleanLines = [];
@@ -723,6 +861,7 @@ button[data-a-target*="player"],
             if (skipNextSegment) {
                 skipNextSegment = false;
                 adSegments++;
+                segmentsSkipped++;
                 continue;
             }
 
@@ -735,7 +874,7 @@ button[data-a-target*="player"],
                 }
             }
 
-            if (upper.startsWith('#EXT-X-CUE-OUT')) {
+            if (upper.startsWith('#EXT-X-CUE-OUT') || upper.startsWith('#EXT-X-SCTE35')) {
                 adsFound = true;
                 inAdBlock = true;
                 adBlockDepth++;
@@ -756,20 +895,31 @@ button[data-a-target*="player"],
                 continue;
             }
 
-            if (keywordUpper.some(k => upper.includes(k))) {
-                adsFound = true;
-                // If marker line precedes a segment, flag to drop the next media segment
-                if (!upper.startsWith('#EXTINF')) {
-                    flagSkipNextByMarker = true;
-                } else {
-                    skipNextSegment = true;
+            let keywordMatched = false;
+            for (const k of keywordUpper) {
+                if (upper.includes(k)) {
+                    keywordMatched = true;
+                    adsFound = true;
+                    if (!upper.startsWith('#EXTINF')) {
+                        flagSkipNextByMarker = true;
+                    } else {
+                        skipNextSegment = true;
+                    }
+                    break;
                 }
+            }
+
+            if (keywordMatched) {
                 continue;
             }
 
             if (!inAdBlock) {
                 cleanLines.push(line);
             }
+        }
+
+        if (adsFound && CONFIG.DEBUG.M3U8_CLEANING) {
+            logTrace(true, 'M3U8', `URL: ${url} | Skipped ${segmentsSkipped} ad segments | Depth: ${adBlockDepth}`);
         }
 
         return {
@@ -799,14 +949,14 @@ button[data-a-target*="player"],
                         if (!el || !el.parentNode) return;
                         if (el.closest('[data-a-target*="player-controls"]')) return;
                         if (el.hasAttribute(HIDDEN_ATTRIBUTE)) return;
-                        
+
                         if (!removedStreamDisplayAd) {
                             removedStreamDisplayAd = el.matches('[data-test-selector^="sda"]') ||
                                 el.matches('[class*="stream-display-ad"]') ||
                                 el.matches('[class*="squeezeback"]') ||
                                 el.id === 'stream-lowerthird';
                         }
-                        
+
                         // Hide with CSS instead of removing to avoid React errors
                         el.style.setProperty('display', 'none', 'important');
                         el.style.setProperty('opacity', '0', 'important');
@@ -832,14 +982,14 @@ button[data-a-target*="player"],
                     if (checkedCount >= CONFIG.ADVANCED.DOM_CLEANUP_BATCH_SIZE) break;
                     if (!node || !node.textContent) continue;
                     if (node.closest('[data-a-target*="player-controls"]')) continue;
-                    
+
                     const text = node.textContent.trim().toLowerCase();
                     if (!text) continue;
-                    
+
                     checkedCount++;
                     const isPlaceholderText = PLACEHOLDER_TEXTS.some(ph => text.includes(ph.toLowerCase()));
                     const alreadyHidden = node.hasAttribute(PLACEHOLDER_ATTRIBUTE);
-                    
+
                     if (isPlaceholderText) {
                         placeholderDetected = true;
                         if (!alreadyHidden) {
@@ -1253,7 +1403,7 @@ button[data-a-target*="player"],
                         clearTimeout(timers[key]);
                     }
                 });
-                
+
                 // Remove event listeners
                 if (timers.handlers) {
                     Object.entries(timers.handlers).forEach(([eventName, handler]) => {
@@ -1262,7 +1412,7 @@ button[data-a-target*="player"],
                         }
                     });
                 }
-                
+
                 videoListenerState.delete(vid);
             }
         };
@@ -1345,10 +1495,121 @@ button[data-a-target*="player"],
         } catch (e) {
             logWarn('Init', 'Failed to override fetch', e);
         }
+
+        try {
+            if (originalXHR) {
+                const XHROverride = function() {
+                    const xhr = new originalXHR();
+                    const originalOpen = xhr.open;
+                    const originalSend = xhr.send;
+                    let requestUrl = '';
+
+                    xhr.open = function(method, url, ...args) {
+                        requestUrl = url;
+                        const urlLower = String(url).toLowerCase();
+
+                        if (AD_URL_KEYWORDS_BLOCK.some(k => urlLower.includes(String(k).toLowerCase())) ||
+                            (urlLower.includes('ad') && (urlLower.includes('.m3u8') || urlLower.includes('.ts') || urlLower.includes('.mp4')))) {
+                            logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'XHR', `Blocked XHR: ${url}`);
+                            throw new Error('Blocked by TTV Adblock Enhanced');
+                        }
+
+                        return originalOpen.apply(this, [method, url, ...args]);
+                    };
+
+                    xhr.send = function(...args) {
+                        return originalSend.apply(this, args);
+                    };
+
+                    return xhr;
+                };
+
+                XHROverride.prototype = originalXHR.prototype;
+                unsafeWindow.XMLHttpRequest = XHROverride;
+                logTrace(CONFIG.DEBUG.CORE, 'Init', 'XMLHttpRequest override installed');
+            }
+        } catch (e) {
+            logWarn('Init', 'Failed to override XMLHttpRequest', e);
+        }
+
+        try {
+            if (originalWebSocket) {
+                const WebSocketOverride = function(url, protocols) {
+                    const urlLower = String(url).toLowerCase();
+
+                    if (AD_URL_KEYWORDS_BLOCK.some(k => urlLower.includes(String(k).toLowerCase())) ||
+                        urlLower.includes('ad') ||
+                        urlLower.includes('commercial')) {
+                        logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'WebSocket', `Blocked WebSocket: ${url}`);
+                        throw new Error('Blocked by TTV Adblock Enhanced');
+                    }
+
+                    return new originalWebSocket(url, protocols);
+                };
+
+                WebSocketOverride.prototype = originalWebSocket.prototype;
+                unsafeWindow.WebSocket = WebSocketOverride;
+                logTrace(CONFIG.DEBUG.CORE, 'Init', 'WebSocket override installed');
+            }
+        } catch (e) {
+            logWarn('Init', 'Failed to override WebSocket', e);
+        }
+
+        try {
+            if (originalRTCPeerConnection) {
+                const RTCPeerConnectionOverride = function(...args) {
+                    const pc = new originalRTCPeerConnection(...args);
+                    const originalAddStream = pc.addStream;
+                    const originalAddTrack = pc.addTrack;
+
+                    pc.addStream = function(stream) {
+                        try {
+                            const url = stream.id || stream.label || '';
+                            if (AD_URL_KEYWORDS_BLOCK.some(k => url.toLowerCase().includes(String(k).toLowerCase()))) {
+                                logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'RTCPeerConnection', `Blocked media stream`);
+                                return pc;
+                            }
+                        } catch (e) {}
+                        return originalAddStream.apply(this, arguments);
+                    };
+
+                    pc.addTrack = function(track, ...rest) {
+                        try {
+                            const url = track.label || track.id || '';
+                            if (AD_URL_KEYWORDS_BLOCK.some(k => url.toLowerCase().includes(String(k).toLowerCase()))) {
+                                logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'RTCPeerConnection', `Blocked media track`);
+                                return pc;
+                            }
+                        } catch (e) {}
+                        return originalAddTrack.apply(this, arguments);
+                    };
+
+                    return pc;
+                };
+
+                RTCPeerConnectionOverride.prototype = originalRTCPeerConnection.prototype;
+                unsafeWindow.RTCPeerConnection = RTCPeerConnectionOverride;
+                logTrace(CONFIG.DEBUG.CORE, 'Init', 'RTCPeerConnection override installed');
+            }
+        } catch (e) {
+            logWarn('Init', 'Failed to override RTCPeerConnection', e);
+        }
     };
 
     const initialize = () => {
-        logDebug('Init', 'Starting Twitch Adblock Ultimate Enhanced');
+        logDebug('Init', 'Starting Twitch Adblock Ultimate Enhanced v' + CONFIG.SCRIPT_VERSION);
+        console.info(`${LOG_PREFIX} ===============================`);
+        console.info(`${LOG_PREFIX} IMPROVED VERSION 32.0.0`);
+        console.info(`${LOG_PREFIX} ===============================`);
+        console.info(`${LOG_PREFIX} New Features:`);
+        console.info(`${LOG_PREFIX}  - Enhanced ad detection with 50+ new patterns`);
+        console.info(`${LOG_PREFIX}  - XMLHttpRequest blocking`);
+        console.info(`${LOG_PREFIX}  - WebSocket connection blocking`);
+        console.info(`${LOG_PREFIX}  - RTCPeerConnection ad stream blocking`);
+        console.info(`${LOG_PREFIX}  - Improved M3U8 manifest cleaning`);
+        console.info(`${LOG_PREFIX}  - Additional DOM selectors`);
+        console.info(`${LOG_PREFIX} ===============================`);
+
         installHooks();
         injectCSS();
         if (CONFIG.SETTINGS.FORCE_MAX_QUALITY) {
@@ -1384,7 +1645,4 @@ button[data-a-target*="player"],
     } else {
         initialize();
     }
-
-    console.info(`${LOG_PREFIX} Ready! Enhanced ad blocking enabled`);
-    console.info(`${LOG_PREFIX} Config: Smart unmute=${CONFIG.SETTINGS.SMART_UNMUTE}, Respect mute=${CONFIG.SETTINGS.RESPECT_USER_MUTE}, Aggressive=${CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK}`);
 })();
