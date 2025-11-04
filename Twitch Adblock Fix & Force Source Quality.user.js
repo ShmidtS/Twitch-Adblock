@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      32.0.0
-// @description  Twitch ad-blocking with multi-layer protection: fetch/XHR/WebSocket blocking, improved M3U8 cleaning, advanced DOM removal, and comprehensive ad pattern detection
+// @version      32.1.0
+// @description  Twitch ad-blocking
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -12,6 +12,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_xmlhttpRequest
+// @grant        GM_setClipboard
 // @connect      usher.ttvnw.net
 // @connect      *.ttvnw.net
 // @connect      *.twitch.tv
@@ -24,1622 +25,714 @@
 // @license      MIT
 // ==/UserScript==
 
+
 (function() {
     'use strict';
 
-    const defaultForceUnmute = GM_getValue('TTV_AdBlock_ForceUnmute', true);
-
+    // ====== CONFIGURATION ======
     const CONFIG = {
-        SCRIPT_VERSION: '32.0.0',
+        SCRIPT_VERSION: '32.1.0',
         SETTINGS: {
-            FORCE_MAX_QUALITY: GM_getValue('TTV_AdBlock_ForceMaxQuality', true),
-            ATTEMPT_DOM_AD_REMOVAL: GM_getValue('TTV_AdBlock_AttemptDOMAdRemoval', true),
-            HIDE_COOKIE_BANNER: GM_getValue('TTV_AdBlock_HideCookieBanner', true),
-            ENABLE_AUTO_RELOAD: GM_getValue('TTV_AdBlock_EnableAutoReload', true),
-            FORCE_UNMUTE: defaultForceUnmute,
-            SMART_UNMUTE: GM_getValue('TTV_AdBlock_SmartUnmute', defaultForceUnmute),
-            RESPECT_USER_MUTE: GM_getValue('TTV_AdBlock_RespectUserMute', true),
-            REMOVE_AD_PLACEHOLDER: GM_getValue('TTV_AdBlock_RemoveAdPlaceholder', true),
-            AGGRESSIVE_AD_BLOCK: GM_getValue('TTV_AdBlock_AggressiveBlock', true),
-            REQUEST_DEDUPLICATION: GM_getValue('TTV_AdBlock_RequestDedup', true),
-            DISABLE_PIP_DURING_ADS: GM_getValue('TTV_AdBlock_DisablePiP', true),
-            CLEAN_VIDEO_WEAVER_MANIFESTS: GM_getValue('TTV_AdBlock_CleanVideoWeaver', true),
-        },
-        DEBUG: {
-            SHOW_ERRORS: GM_getValue('TTV_AdBlock_ShowErrorsInConsole', true),
-            CORE: GM_getValue('TTV_AdBlock_Debug_Core', true),
-            PLAYER_MONITOR: GM_getValue('TTV_AdBlock_Debug_PlayerMon', true),
-            M3U8_CLEANING: GM_getValue('TTV_AdBlock_Debug_M3U8', true),
-            GQL_MODIFY: GM_getValue('TTV_AdBlock_Debug_GQL', true),
-            NETWORK_BLOCKING: GM_getValue('TTV_AdBlock_Debug_NetBlock', true),
+            // Network blocking - SELECTIVE to avoid breaking chat/auth
+            ENABLE_AD_SERVER_BLOCKING: GM_getValue('TTV_BlockAdServers', true),
+            ENABLE_M3U8_CLEANING: GM_getValue('TTV_CleanM3U8', true),
+            ENABLE_GQL_MODIFICATION: GM_getValue('TTV_ModifyGQL', true),
+            ENABLE_DOM_CLEANUP: GM_getValue('TTV_DOMCleanup', true),
+            CONSERVATIVE_DOM_REMOVAL: GM_getValue('TTV_ConservativeDOM', true),
+            AUTO_UNMUTE: GM_getValue('TTV_AutoUnmute', true),
+            FORCE_QUALITY: GM_getValue('TTV_ForceQuality', true),
+            RESTORE_ON_AD: GM_getValue('TTV_RestoreOnAd', true),
+            HIDE_AD_PLACEHOLDERS: GM_getValue('TTV_HidePlaceholders', true),
+            PROTECT_CHAT: GM_getValue('TTV_ProtectChat', true),
+            SKIP_AGGRESSIVE_BLOCKING: GM_getValue('TTV_SkipAggressive', true),
+            ENABLE_DEBUG: GM_getValue('TTV_EnableDebug', false),
         },
         ADVANCED: {
-            RELOAD_STALL_THRESHOLD_MS: GM_getValue('TTV_AdBlock_StallThresholdMs', 12000),
-            RELOAD_BUFFERING_THRESHOLD_MS: GM_getValue('TTV_AdBlock_BufferingThresholdMs', 30000),
-            RELOAD_COOLDOWN_MS: GM_getValue('TTV_AdBlock_ReloadCooldownMs', 20000),
-            MAX_RELOADS_PER_SESSION: GM_getValue('TTV_AdBlock_MaxReloadsPerSession', 2),
-            RELOAD_ON_ERROR_CODES: GM_getValue('TTV_AdBlock_ReloadOnErrorCodes', "3000,4000,5000")
-                .split(',').map(s => parseInt(s.trim(), 10)).filter(n => !isNaN(n)),
-            IVS_ERROR_THRESHOLD: 5000,
-            PIP_RETRY_ATTEMPTS: 3,
-            PIP_RETRY_DELAY_MS: 1000,
-            OBSERVER_THROTTLE_MS: 450,
-            DOM_CLEANUP_BATCH_SIZE: 50,
-            REQUEST_CACHE_TTL_MS: 60000,
+            // More precise patterns - only block ACTUAL ad endpoints
+            AD_SERVER_DOMAINS: [
+                'edge.ads.twitch.tv',
+                'ads.ttvnw.net',
+                'ad.twitch.tv',
+                'doubleclick.net',
+                'googlesyndication.com',
+                'amazon-adsystem.com',
+            ],
+            // Whitelist patterns - NEVER block these
+            CHAT_PROTECTION_PATTERNS: [
+                'wss://irc-ws.chat.twitch.tv',
+                '/chat/room',
+                'chat.twitch.tv',
+                'tmi.twitch.tv',
+                'usher.ttvnw.net/api/channel/hls',
+                '/gql POST', // Don't block GQL, only modify
+            ],
+            // M3U8 ad markers
+            M3U8_AD_MARKERS: [
+                'CUE-OUT',
+                'CUE-IN',
+                'DATERANGE',
+                'SCTE35',
+                'EXT-X-TWITCH-AD',
+                'STREAM-DISPLAY-AD',
+            ],
+            // Precise DOM selectors
+            AD_DOM_SELECTORS: [
+                '[data-test-selector="commercial-break-in-progress"]',
+                '.ad-interrupt-screen',
+                '.commercial-break-in-progress',
+                '.player-ad-notice',
+                '.stream-display-ad__wrapper',
+                '.stream-display-ad__container',
+                '.ivs-ad-container',
+                '.ivs-ad-overlay',
+            ],
         },
     };
 
-    const LOG_PREFIX = `[TTV ADBLOCK ENH v${CONFIG.SCRIPT_VERSION}]`;
-    const GQL_URL = 'https://gql.twitch.tv/gql';
-    const TWITCH_MANIFEST_PATH_REGEX = /\.m3u8($|\?)/i;
+    // ====== LOGGING ======
+    const LOG_PREFIX = `[TTV ADBLOCK v${CONFIG.SCRIPT_VERSION}]`;
+    const isDebug = CONFIG.SETTINGS.ENABLE_DEBUG;
 
-    const AD_URL_KEYWORDS_BLOCK = [
-        'edge.ads.twitch.tv',
-        'nat.min.js',
-        'twitchadserver.js',
-        'player-ad-aws.js',
-        'googlesyndication.com',
-        'doubleclick.net',
-        'adnxs.com',
-        'amazon-adsystem.com',
-        'ads.ttvnw.net',
-        'ad.twitch.tv',
-        'sentry.io',
-        'scorecardresearch.com',
-        'amazon-ivs-ads',
-        'ivs-player-ads',
-        'ad-delivery',
-        'ad-beacon',
-        'ad-insertion',
-        'ad-decisioning',
-        'api.sprig.com',
-        'sprig.com/sdk',
-        'ads-api.twitch.tv',
-        'gql.twitch.tv/?op=streamdisplayad',
-        'stream-display-ad',
-        'pubads.g.doubleclick.net',
-        'imasdk.googleapis.com',
-        'amazon-adsystem.com',
-        'googletagservices.com',
-        'googletags.pubads.com',
-        'contextual.media.net',
-        'rubiconproject.com',
-        'criteo.com',
-        'taboola.com',
-        'outbrain.com',
-        'twitch.tv/ads',
-        'twi.tv/ad',
-        'analytics.twitch.tv',
-        'ttvnw.net/ad',
-        'video-weaver',
-        'ttv-cdn.mozilla.org',
-        'cloudfront.net/ads',
-        'cloudfront.net/ad',
-        'ttv.libraries.video-weaver',
-        'usher.ttvnw.net/vods',
-        'usher.ttvnw.net/api/channel/hls',
-        'video-ad-stitcher',
-        'ad-mediation',
-        'adx.google.com',
-        'adsystem.amazon',
-        'msads.net',
-        '3lift.com',
-        'indexww.com',
-        'openx.net',
-        'pubmatic.com',
-        'spotxchange.com',
-        'adroll.com',
-        'blueconic.net',
-        'teads.tv',
-        'sharethrough.com',
-        '企业发展平台',
-        'adsrvr.org',
-        'exoclick.com',
-        'trafficjunky.net',
-        'yahoo.com/ad',
-        'zedo.com',
-        'yandex.ru/ads',
-        'betweendigital.com',
-        'adfox.ru',
-        'relap.io',
-        'admixer.net',
-        'google-analytics.com',
-        'segment.io',
-        'newrelic.com',
-        'telemetry.twitch.tv',
-        'particle-relay',
-        'ad-server',
-        'adnetwork',
-        'adblock',
-        'adblocker',
-        'ad-block',
-        'ad-behave',
-    ];
+    const log = {
+        debug: (...args) => isDebug && console.debug(LOG_PREFIX, ...args),
+        info: (...args) => console.info(LOG_PREFIX, ...args),
+        warn: (...args) => console.warn(LOG_PREFIX, ...args),
+        error: (...args) => console.error(LOG_PREFIX, ...args),
+    };
 
-    const AD_DOM_SELECTORS = [
-        '.ad-interrupt-screen',
-        '.video-player__ad-info-container',
-        '.player-ad-notice',
-        'div[data-test-selector="ad-banner-default-text-area"]',
-        '.persistent-player__ad-container',
-        '[data-a-target="advertisement-notice"]',
-        'div[data-a-target="ax-overlay"]',
-        '[data-a-target="outstream-ax-overlay"]',
-        '[data-test-selector*="sad-overlay"]',
-        'div[data-a-target*="ad-block-nag"]',
-        '.ad-break-ui-container',
-        '[data-a-target="ad-banner"]',
-        '.promoted-content-card',
-        '.video-ad-display__container',
-        '[role="advertisement"]',
-        'div[data-a-target="player-ad-overlay"]',
-        '.commercial-break-in-progress',
-        '[data-test-selector="commercial-break-in-progress"]',
-        '.twitch-ad-break-placeholder',
-        '.ad-break-overlay',
-        '.player-overlay.ad-break',
-        '.video-player__overlay[data-test-selector*="ad"]',
-        '.picture-in-picture-player',
-        '.pip-player-container',
-        '[data-a-target="player-pip"]',
-        '.ivs-ad-container',
-        '.ivs-ad-overlay',
-        '.ivs-ad-wrapper',
-        '[class*="AdOverlay"]',
-        '[class*="AdBanner"]',
-        '[class*="AdContainer"]',
-        '[class*="ad-overlay"]',
-        '[class*="ad-banner"]',
-        '[class*="ad-container"]',
-        '.video-player__stream-info-overlay',
-        '[data-test-selector="sda-wrapper"]',
-        '[data-test-selector="sda-container"]',
-        '[data-test-selector="sda-transform"]',
-        '[data-test-selector="sda-frame"]',
-        '.stream-display-ad__wrapper',
-        '.stream-display-ad__container',
-        '.stream-display-ad__transform-container',
-        '.stream-display-ad__frame',
-        '[class*="stream-display-ad"]',
-        '[class*="squeezeback"]',
-        '.stream-display-ad__wrapper_squeezeback',
-        '.stream-display-ad__container_squeezeback',
-        '.stream-display-ad__transform-container_squeezeback',
-        '.stream-display-ad__frame_squeezeback',
-        '#stream-lowerthird',
-        '.squeezeback-accessibility-frame',
-        'div[data-ad-placeholder="true"]',
-        'iframe[src*="amazon-adsystem.com"]',
-        'iframe[src*="doubleclick.net"]',
-        'iframe[src*="imasdk.googleapis.com"]',
-        'div[class*="preroll"]',
-        'div[class*="midroll"]',
-        'div[class*="postroll"]',
-        'div[class*="ad__container"]',
-        'div[class*="ad__overlay"]',
-        'div[class*="ad-banner"]',
-        'div[class*="advertising"]',
-        'div[data-test-selector*="preroll"]',
-        'div[data-test-selector*="midroll"]',
-        'div[data-test-selector*="postroll"]',
-        'div[data-test-selector*="ad-container"]',
-        'div[data-test-selector*="ad-overlay"]',
-        '.extensions-app-frame',
-        '.extension-container',
-        '[data-test-selector*="extension"]',
-        '[data-test-selector*="BountyBoard"]',
-        '[data-test-selector*="bounty"]',
-        '[data-test-selector*="drops"]',
-        '[data-test-selector*="campaign"]',
-        '.raid-banner',
-        '.highlight-container',
-        '.sub-button-ad',
-        '.social-share-ad',
-        '.charity-banner',
-        '[data-test-selector="wallet-widget"]',
-        '.activity-highlight',
-        '.chat-line__message[data-a-target="chat-line-message"][data-test-selector*="promoted"]',
-        '.channel-header-content偶像',
-        '.channel-header-content偶像',
-        ...(CONFIG.SETTINGS.HIDE_COOKIE_BANNER ? ['.consent-banner'] : []),
-    ];
+    // ====== UTILITIES ======
+    const isChatOrAuthUrl = (url) => {
+        if (!url) return false;
+        const urlLower = url.toLowerCase();
 
-    const AD_DATERANGE_KEYWORDS = [
-        'AD-ID=',
-        'CUE-OUT',
-        'CUE-IN',
-        'SCTE35',
-        'SCTE-35',
-        'DATERANGE',
-        'Twitch-Ad-Signal',
-        'Twitch-Prefetch',
-        'Twitch-Ads',
-        'Twitch-Ad-Url',
-        'Twitch-Ad-Pod',
-        'X-TWITCH-AD',
-        'EXT-X-TWITCH-INFO',
-        'EXT-X-ASSET',
-        'EXT-X-IVS-AD',
-        'EXT-X-TWITCH-AD',
-        'EXT-X-TWITCH-CM',
-        'STREAM-DISPLAY-AD',
-        'SQUEEZEBACK',
-        'IVS-AD-MARKER',
-        'TWITCH-AD-ROLL',
-        'ADVERTISEMENT',
-        'STITCHED-AD',
-        'PREROLL',
-        'MIDROLL',
-        'AD-SERVER',
-        'AD-ROLL',
-        'AD-SERVING',
-        'AD-STITCHING',
-        'AD-MANIFEST',
-        'AD-URL',
-        'TWITCH-PREFETCH',
-        'AD-INSERTION',
-        'EXT-X-SCTE35',
-        'EXT-X-CUE-POINT',
-        'EXT-X-AD-BREAK',
-        'EXT-X-AD',
-        'EXT-X-BREAK',
-        'EXT-X-BANNER',
-        'EXT-X-OMNI-ADS',
-        'EXT-X-DATERANGE',
-        'EXT-X-AD-SIGNAL',
-        'AD-BREAK',
-        'AD-TRANSITION',
-        'AD-MARKER',
-        'AD-TRACK',
-        'AD-PROBE',
-        'AD-METADATA',
-        'AD-AUDIO',
-        'AD-SLATE',
-        'COMMERCIAL-BREAK',
-        'SPONSORED',
-        'PROMOTION',
-        'BRANDING',
-        'BUMPER',
-        'OVERLAY-AD',
-        'FILLER',
-        'PRE_ROLL_AD',
-        'MID_ROLL_AD',
-        'POST_ROLL_AD',
-        'AD-SLATE-00',
-        'AD-SLATE-01',
-        'AD-SLATE-02',
-        'AD-TRANSMISSION',
-        'AD-TRANSITION-SLATE',
-        'AD-MARKER-01',
-        'AD-MARKER-02',
-        'AD-MARKER-03',
-        'AD-MARKER-04',
-        'AD-MARKER-05',
-        'AD-MARKER-06',
-        'AD-MARKER-07',
-        'AD-MARKER-08',
-        'AD-MARKER-09',
-        'AD-MARKER-10',
-    ];
+        // Protected patterns - NEVER block these
+        return CONFIG.ADVANCED.CHAT_PROTECTION_PATTERNS.some(pattern => {
+            if (pattern.includes('/gql POST')) {
+                return urlLower.includes('gql.twitch.tv') && !urlLower.includes('streamdisplayad');
+            }
+            return urlLower.includes(pattern.toLowerCase());
+        });
+    };
 
-    const PLACEHOLDER_TEXTS = [
-        'Commercial break in progress',
-        'The channel is currently displaying a commercial',
-        'Ad break in progress',
-        'Advertisement',
-        'Реклама',
-        'Рекламная вставка',
-        'Werbeunterbrechung',
-        'Publicidad',
-        'Publicité',
-        '広告',
-    ];
+    const isAdServerUrl = (url) => {
+        if (!url) return false;
+        const urlLower = url.toLowerCase();
 
-    const GQL_BLOCKED_OPERATIONS = new Set([
-        'StreamDisplayAd',
-        'StreamDisplayAdMetadata',
-        'StreamDisplayAdEvent',
-        'SDAAdMetadata',
-        'SDAAdRequest',
-        'SDARegulationBanner',
-        'SDARegisterDisplayAd',
-        'PersistentStreamDisplayAdContext',
-        'AdIntegrityBanner',
-        'CommercialBreakRequest',
-        'CommercialBreakStatus',
-        'AdRequestSurface',
-        'VideoAdMetadata',
-        'VideoAdSegment',
-    ]);
+        return CONFIG.ADVANCED.AD_SERVER_DOMAINS.some(domain =>
+            urlLower.includes(domain.toLowerCase())
+        );
+    };
 
-    const shouldBlockGqlOperation = (operationName) => {
-        if (!operationName || typeof operationName !== 'string') {
-            return false;
-        }
-        if (GQL_BLOCKED_OPERATIONS.has(operationName)) {
+    const shouldSkipBlocking = (url) => {
+        if (!url) return false;
+
+        // Skip if it's chat/auth
+        if (isChatOrAuthUrl(url)) {
             return true;
         }
-        const name = operationName.toLowerCase();
-        return name.includes('streamdisplayad') ||
-            name.includes('sda') ||
-            name.includes('commercialbreak') ||
-            name.includes('adrequest') ||
-            name.includes('admetadata') ||
-            name.includes('videoad');
-    };
 
-    const createEmptyGqlResponse = () => ({ data: {}, errors: [] });
-
-    let hooksInstalled = false;
-    let adRemovalObserver = null;
-    let videoPlayerObserver = null;
-    let videoElement = null;
-    let lastReloadTimestamp = 0;
-    let reloadCount = 0;
-    let userMutedManually = false;
-    let lastUserVolumeChange = 0;
-    let adDetected = false;
-    let originalVideoParent = null;
-    let lastKnownVolume = 0.5;
-    let scriptAdjustingVolume = false;
-    const USER_VOLUME_CHANGE_COOLDOWN_MS = 4000;
-    const PREFERRED_SUPPORTED_CODECS = ['av1', 'h265', 'h264', 'vp9'];
-    const originalFetch = unsafeWindow.fetch;
-    const originalXHR = unsafeWindow.XMLHttpRequest;
-    const originalWebSocket = unsafeWindow.WebSocket;
-    const originalRTCPeerConnection = unsafeWindow.RTCPeerConnection;
-    const requestCache = new Map();
-    const videoListenerState = new WeakMap();
-    const HIDDEN_ATTRIBUTE = 'data-ttv-adblock-hidden';
-    const PLACEHOLDER_ATTRIBUTE = 'data-ttv-adblock-placeholder';
-    const HIDDEN_CLASS = 'ttv-adblock-hidden';
-
-    const logError = (s, m, ...a) => CONFIG.DEBUG.SHOW_ERRORS && console.error(`${LOG_PREFIX} [${s}] ERROR:`, m, ...a);
-    const logWarn = (s, m, ...a) => CONFIG.DEBUG.SHOW_ERRORS && console.warn(`${LOG_PREFIX} [${s}] WARN:`, m, ...a);
-    const logDebug = (s, m, ...a) => CONFIG.DEBUG.CORE && console.info(`${LOG_PREFIX} [${s}] DEBUG:`, m, ...a);
-    const logTrace = (f, s, m, ...a) => f && console.debug(`${LOG_PREFIX} [${s}] TRACE:`, m, ...a);
-
-    const debounce = (fn, wait) => {
-        let timeout = null;
-        return (...args) => {
-            clearTimeout(timeout);
-            timeout = setTimeout(() => fn(...args), wait);
-        };
-    };
-
-    const withVolumeGuard = (fn) => {
-        scriptAdjustingVolume = true;
-        try {
-            fn();
-        } finally {
-            setTimeout(() => {
-                scriptAdjustingVolume = false;
-            }, 200);
-        }
-    };
-
-    const hasRecentUserVolumeChange = () => (
-        !!(lastUserVolumeChange && (Date.now() - lastUserVolumeChange) < USER_VOLUME_CHANGE_COOLDOWN_MS)
-    );
-
-    const shouldAutoUnmute = () => {
-        if (!CONFIG.SETTINGS.FORCE_UNMUTE || !CONFIG.SETTINGS.SMART_UNMUTE) {
-            return false;
-        }
-
-        if (CONFIG.SETTINGS.RESPECT_USER_MUTE && userMutedManually) {
-            return false;
-        }
-
-        if (hasRecentUserVolumeChange()) {
-            return false;
-        }
-
-        return true;
-    };
-
-    const attemptAutoUnmute = (reason) => {
-        if (!videoElement || !shouldAutoUnmute()) {
-            if (CONFIG.DEBUG.PLAYER_MONITOR) {
-                if (userMutedManually) {
-                    logTrace(true, 'AudioGuard', `Skipping auto-unmute (${reason}) due to user mute`);
-                } else if (hasRecentUserVolumeChange()) {
-                    logTrace(true, 'AudioGuard', `Skipping auto-unmute (${reason}) due to recent user volume change`);
+        // Skip if user disabled aggressive blocking
+        if (CONFIG.SETTINGS.SKIP_AGGRESSIVE_BLOCKING) {
+            // Only block very specific ad patterns
+            const urlLower = url.toLowerCase();
+            if (urlLower.includes('ad') && !urlLower.includes('user') && !urlLower.includes('chat')) {
+                // Additional check to avoid false positives
+                if (urlLower.includes('streamdisplayad') || urlLower.includes('commercial')) {
+                    return false;
                 }
             }
-            return;
+            return true;
         }
 
-        const targetVolume = lastKnownVolume > 0.05 ? lastKnownVolume : 0.5;
-        const wasMuted = videoElement.muted;
-        const wasLowVolume = videoElement.volume <= 0.001;
-
-        withVolumeGuard(() => {
-            if (videoElement.muted) {
-                videoElement.muted = false;
-            }
-            if (videoElement.volume <= 0.001) {
-                videoElement.volume = targetVolume;
-            }
-        });
-
-        if (wasMuted || wasLowVolume) {
-            lastKnownVolume = videoElement.volume > 0.05 ? videoElement.volume : targetVolume;
-            logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `Auto-unmuted (${reason}) to volume ${lastKnownVolume.toFixed(2)}`);
-        }
-    };
-
-    const normalizeSupportedCodecs = (existing) => {
-        const codecs = Array.isArray(existing)
-            ? existing.filter(codec => typeof codec === 'string' && codec.trim())
-            : [];
-        const unique = new Set(codecs);
-        PREFERRED_SUPPORTED_CODECS.forEach(codec => unique.add(codec));
-        return Array.from(unique);
-    };
-
-    const isElementConnected = (el) => {
-        if (!el) return false;
-        if (typeof el.isConnected === 'boolean') {
-            return el.isConnected;
-        }
-        return document.contains(el);
-    };
-
-    const hasUsableSource = (vid) => {
-        if (!vid) return false;
-        if (vid.srcObject) return true;
-        if (typeof vid.currentSrc === 'string' && vid.currentSrc.trim()) return true;
-        if (typeof vid.src === 'string' && vid.src.trim()) return true;
         return false;
     };
 
-    const adjustPlaybackAccessTokenPayload = (payload) => {
-        if (!payload || typeof payload !== 'object' || !payload.variables || typeof payload.variables !== 'object') {
-            return false;
-        }
+    // ====== FETCH OVERRIDE - SELECTIVE ======
+    const originalFetch = unsafeWindow.fetch;
 
-        const { variables } = payload;
-        let updated = false;
-
-        if (variables.playerType !== 'embed') {
-            variables.playerType = 'embed';
-            updated = true;
-        }
-
-        if (!variables.platform || variables.platform !== 'web') {
-            variables.platform = 'web';
-            updated = true;
-        }
-
-        const normalizedCodecs = normalizeSupportedCodecs(variables.supportedCodecs);
-        if (!Array.isArray(variables.supportedCodecs) ||
-            variables.supportedCodecs.length !== normalizedCodecs.length ||
-            variables.supportedCodecs.some((codec, index) => normalizedCodecs[index] !== codec)) {
-            variables.supportedCodecs = normalizedCodecs;
-            updated = true;
-        }
-
-        // Force HLS mediaplayer backend to avoid IVS ads pipeline
-        if (variables.playerBackend !== 'mediaplayer') {
-            variables.playerBackend = 'mediaplayer';
-            updated = true;
-        }
-
-        // Prefer source quality when possible
-        if (variables.videoQualityPreference !== 'chunked') {
-            variables.videoQualityPreference = 'chunked';
-            updated = true;
-        }
-
-        if (Object.prototype.hasOwnProperty.call(variables, 'adblock')) {
-            delete variables.adblock;
-            updated = true;
-        }
-
-        if (Object.prototype.hasOwnProperty.call(variables, 'adsEnabled')) {
-            delete variables.adsEnabled;
-            updated = true;
-        }
-
-        return updated;
-    };
-
-    const getCacheKey = (url, method = 'GET') => `${method}:${url}`;
-
-    const getCachedResponse = (cacheKey) => {
-        if (!CONFIG.SETTINGS.REQUEST_DEDUPLICATION) return null;
-
-        const cached = requestCache.get(cacheKey);
-        if (cached && Date.now() - cached.timestamp < CONFIG.ADVANCED.REQUEST_CACHE_TTL_MS) {
-            return cached.response;
-        }
-        if (cached) {
-            requestCache.delete(cacheKey);
-        }
-        return null;
-    };
-
-    const cacheResponse = (cacheKey, response) => {
-        if (!CONFIG.SETTINGS.REQUEST_DEDUPLICATION) return;
-
-        requestCache.set(cacheKey, {
-            response: response.clone(),
-            timestamp: Date.now()
-        });
-
-        if (requestCache.size > 100) {
-            const oldestKey = requestCache.keys().next().value;
-            requestCache.delete(oldestKey);
-        }
-    };
-
-    const fetchOverride = async (input, init) => {
+    const fetchOverride = async (input, init = {}) => {
         const requestUrl = input instanceof Request ? input.url : String(input);
-        const requestUrlLower = requestUrl.toLowerCase();
+        const method = (input instanceof Request ? input.method : init.method || 'GET').toUpperCase();
 
-        if (AD_URL_KEYWORDS_BLOCK.some(k => requestUrlLower.includes(String(k).toLowerCase()))) {
-            logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'Network', `Blocked fetch: ${requestUrl}`);
-            return new Response(null, { status: 204, statusText: 'Blocked by TTV Adblock Enhanced' });
-        }
-
-        if (requestUrlLower.includes('ad') || requestUrlLower.includes('commercial') || requestUrlLower.includes('sponsor')) {
-            const urlLower = requestUrlLower;
-            if ((urlLower.includes('.m3u8') || urlLower.includes('.ts') || urlLower.includes('.mp4')) &&
-                (urlLower.includes('ad') || urlLower.includes('commercial') || urlLower.includes('sponsor'))) {
-                logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'Network', `Blocked ad content: ${requestUrl}`);
-                return new Response(null, { status: 204, statusText: 'Blocked by TTV Adblock Enhanced' });
-            }
-        }
-
-        // Intercept GraphQL on any gql.twitch.tv endpoint (path variations occur)
-        if (requestUrlLower.startsWith('https://gql.twitch.tv/')) {
-            try {
-                let originalBodyText = null;
-
-                if (typeof init?.body === 'string') {
-                    originalBodyText = init.body;
-                } else if (input instanceof Request) {
-                    originalBodyText = await input.clone().text();
-                } else if (init && init.body) {
-                    originalBodyText = await (new Request(requestUrl, init)).text();
-                }
-
-                if (originalBodyText) {
-                    const originalBody = JSON.parse(originalBodyText);
-
-                    const adjustPlayback = (payload) => {
-                        if (!payload || typeof payload !== 'object') {
-                            return false;
-                        }
-                        const updated = adjustPlaybackAccessTokenPayload(payload);
-                        if (updated) {
-                            logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQL', 'Adjusted PlaybackAccessToken payload');
-                        }
-                        return updated;
-                    };
-
-                    if (Array.isArray(originalBody)) {
-                        let modified = false;
-                        let blockedCount = 0;
-
-                        originalBody.forEach(payload => {
-                            if (payload?.operationName) {
-                                if (shouldBlockGqlOperation(payload.operationName)) {
-                                    blockedCount++;
-                                }
-                                if (payload.operationName === 'PlaybackAccessToken' && adjustPlayback(payload)) {
-                                    modified = true;
-                                }
-                            }
-                        });
-
-                        if (blockedCount === originalBody.length && blockedCount > 0) {
-                            logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQL', 'Blocked ad-related GQL batch operation');
-                            const stub = originalBody.map(() => createEmptyGqlResponse());
-                            return new Response(JSON.stringify(stub), {
-                                status: 200,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-
-                        if (modified) {
-                            const newInit = { ...(init || {}), body: JSON.stringify(originalBody) };
-                            return originalFetch(input, newInit);
-                        }
-                    } else if (originalBody && typeof originalBody === 'object') {
-                        if (originalBody.operationName && shouldBlockGqlOperation(originalBody.operationName)) {
-                            logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQL', `Blocked ad-related GQL operation: ${originalBody.operationName}`);
-                            return new Response(JSON.stringify(createEmptyGqlResponse()), {
-                                status: 200,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-
-                        if (originalBody.operationName === 'ShoutoutHighlightServiceQuery') {
-                            return new Response(JSON.stringify(createEmptyGqlResponse()), {
-                                status: 200,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-
-                        if (originalBody.operationName === 'VideoPlayerStreamInfoOverlayChannel') {
-                            return new Response(JSON.stringify({ data: { user: null }, errors: [] }), {
-                                status: 200,
-                                headers: { 'Content-Type': 'application/json' }
-                            });
-                        }
-
-                        if (originalBody.operationName === 'PlaybackAccessToken' && adjustPlayback(originalBody)) {
-                            const newInit = { ...(init || {}), body: JSON.stringify(originalBody) };
-                            return originalFetch(input, newInit);
-                        }
-                    }
-                }
-            } catch (e) {
-                logTrace(CONFIG.DEBUG.GQL_MODIFY, 'GQL', 'PlaybackAccessToken modification failed', e);
-            }
-        }
-
-        // Clean Twitch HLS manifest from usher, and optionally video-weaver/CDN manifests
-        const isM3u8 = TWITCH_MANIFEST_PATH_REGEX.test(requestUrl);
-        const isUsher = requestUrlLower.includes('usher.ttvnw.net');
-        const isVideoWeaver = /video-weaver\./i.test(requestUrlLower);
-        const shouldCleanManifest = isM3u8 && (isUsher || (CONFIG.SETTINGS.CLEAN_VIDEO_WEAVER_MANIFESTS && isVideoWeaver));
-        if (shouldCleanManifest) {
-            const method = (input instanceof Request ? input.method : init?.method || 'GET').toUpperCase();
-            const cacheKey = getCacheKey(requestUrl, method);
-            const cachedResponse = getCachedResponse(cacheKey);
-            if (cachedResponse) {
-                logTrace(CONFIG.DEBUG.M3U8_CLEANING, 'M3U8', 'Using cached response');
-                return cachedResponse.clone();
+        try {
+            // Skip blocking for chat/auth/protected endpoints
+            if (shouldSkipBlocking(requestUrl)) {
+                log.debug('Allowing (protected):', requestUrl);
+                return originalFetch(input, init);
             }
 
-            try {
+            // Block ad servers - ONLY specific domains
+            if (CONFIG.SETTINGS.ENABLE_AD_SERVER_BLOCKING && isAdServerUrl(requestUrl)) {
+                log.info('Blocked ad server:', requestUrl);
+                return new Response(null, { status: 204, statusText: 'Blocked' });
+            }
+
+            // Handle M3U8 cleaning
+            if (CONFIG.SETTINGS.ENABLE_M3U8_CLEANING &&
+                requestUrl.includes('.m3u8') &&
+                requestUrl.includes('usher.ttvnw.net')) {
+
+                log.debug('Cleaning M3U8 manifest:', requestUrl);
                 const response = await originalFetch(input, init);
+
                 if (response && response.ok) {
-                    const manifestText = await response.text();
-                    const { cleanedText, adsFound, adSegments } = parseAndCleanM3U8(manifestText, requestUrl);
+                    const text = await response.clone().text();
+                    if (typeof text === 'string' && text.length > 0) {
+                        const cleaned = cleanM3U8(text);
 
-                    if (adsFound) {
-                        adDetected = true;
-                        logTrace(CONFIG.DEBUG.M3U8_CLEANING, 'M3U8', `Removed ${adSegments} ad segments`);
-
-                        const newHeaders = new Headers(response.headers);
-                        newHeaders.delete('Content-Length');
-                        newHeaders.set('X-Adblock-Cleaned', 'true');
-
-                        const cleanedResponse = new Response(cleanedText, {
-                            status: response.status,
-                            statusText: response.statusText,
-                            headers: newHeaders
-                        });
-                        cacheResponse(cacheKey, cleanedResponse);
-                        return cleanedResponse;
+                        if (cleaned.changed && cleaned.text && cleaned.text !== text) {
+                            log.info(`Cleaned M3U8: removed ${cleaned.removedSegments} ad segments`);
+                            const newHeaders = new Headers(response.headers);
+                            newHeaders.set('Content-Type', 'application/x-mpegURL');
+                            return new Response(cleaned.text, {
+                                status: response.status,
+                                statusText: response.statusText,
+                                headers: newHeaders
+                            });
+                        }
                     }
-
-                    const finalResponse = new Response(manifestText, {
-                        status: response.status,
-                        statusText: response.statusText,
-                        headers: response.headers
-                    });
-                    cacheResponse(cacheKey, finalResponse);
-                    return finalResponse;
                 }
 
                 return response;
-            } catch (e) {
-                logWarn('Network', 'Failed to clean M3U8 manifest', e);
+            }
+
+            // Handle GQL modification
+            if (CONFIG.SETTINGS.ENABLE_GQL_MODIFICATION && requestUrl.includes('gql.twitch.tv')) {
+                let body = null;
+
+                // Get body from Request object or init
+                if (input instanceof Request && init.body == null) {
+                    body = await input.clone().text();
+                } else if (init.body) {
+                    body = typeof init.body === 'string' ? init.body : JSON.stringify(init.body);
+                }
+
+                if (body && typeof body === 'string' && body.length > 0) {
+                    try {
+                        const parsed = JSON.parse(body);
+                        const modified = modifyGQLRequest(parsed);
+
+                        if (modified.changed) {
+                            log.debug('Modified GQL request');
+                            const newInit = { ...(init || {}), body: JSON.stringify(modified.data) };
+                            return originalFetch(input, newInit);
+                        }
+                    } catch (e) {
+                        // Not critical - just pass through
+                    }
+                }
+            }
+
+            // Default: pass through
+            return originalFetch(input, init);
+        } catch (error) {
+            // Don't break the page on errors - always fall back
+            log.warn('Fetch override error, falling back to original:', error);
+            try {
+                return originalFetch(input, init);
+            } catch (fallbackError) {
+                log.error('Even original fetch failed:', fallbackError);
+                // Last resort: return a minimal response
+                return new Response('Network error', { status: 500 });
             }
         }
-
-        return originalFetch(input, init);
     };
 
-    const injectCSS = () => {
-        const css = `
-${AD_DOM_SELECTORS.join(',\n')} {
-    display: none !important;
-    opacity: 0 !important;
-    visibility: hidden !important;
-    z-index: -9999 !important;
-    position: absolute !important;
-    width: 0 !important;
-    height: 0 !important;
-    pointer-events: none !important;
-    overflow: hidden !important;
-}
+    // ====== XHR OVERRIDE - LIGHTWEIGHT ======
+    const originalXHR = unsafeWindow.XMLHttpRequest;
 
-.${HIDDEN_CLASS},
-[${HIDDEN_ATTRIBUTE}="true"] {
-    display: none !important;
-    opacity: 0 !important;
-    visibility: hidden !important;
-    z-index: -9999 !important;
-    position: absolute !important;
-    width: 0 !important;
-    height: 0 !important;
-    pointer-events: none !important;
-    overflow: hidden !important;
-}
+    const XHROverride = function() {
+        const xhr = new originalXHR();
+        const originalOpen = xhr.open;
+        const originalSend = xhr.send;
+        let requestUrl = '';
+        let method = 'GET';
+        let opened = false;
 
-.video-player__container {
-    position: relative !important;
-}
+        xhr.open = function(m, url, ...args) {
+            try {
+                method = (m || 'GET').toString().toUpperCase();
+                requestUrl = url || '';
 
-.video-player__overlay[data-test-selector*="ad"]:not([data-a-target*="player-controls"]) {
-    pointer-events: none !important;
-}
+                // Protect chat/auth endpoints
+                if (shouldSkipBlocking(requestUrl)) {
+                    log.debug('XHR Allowing (protected):', requestUrl);
+                    opened = true;
+                    return originalOpen.apply(this, [method, requestUrl, ...args]);
+                }
 
-video {
-    display: block !important;
-    width: 100% !important;
-    height: 100% !important;
-    object-fit: contain !important;
-}
+                // Block ONLY ad servers
+                if (CONFIG.SETTINGS.ENABLE_AD_SERVER_BLOCKING && isAdServerUrl(requestUrl)) {
+                    log.info('XHR Blocked ad server:', requestUrl);
+                    // Don't throw - just make it a no-op by opening a data URL
+                    opened = false;
+                    const noOp = function() {
+                        Object.defineProperty(this, 'readyState', { get: () => 4 });
+                        Object.defineProperty(this, 'status', { get: () => 204 });
+                        Object.defineProperty(this, 'responseText', { get: () => '' });
+                        setTimeout(() => {
+                            if (this.onreadystatechange) this.onreadystatechange();
+                            if (this.onload) this.onload();
+                        }, 0);
+                    };
+                    return noOp.bind(this);
+                }
 
-[data-a-target*="player-controls"],
-[data-a-target*="player-overlay-click-handler"],
-.player-controls,
-.player-controls__left-control-group,
-.player-controls__right-control-group,
-button[data-a-target*="player"],
-.player-button,
-[class*="player-controls"],
-[class*="PlayerControls"],
-[class*="player-overlay-background"],
-.video-player__overlay-background {
-    pointer-events: auto !important;
-    display: block !important;
-    opacity: 1 !important;
-    visibility: visible !important;
-}
+                opened = true;
+                return originalOpen.apply(this, [method, requestUrl, ...args]);
+            } catch (error) {
+                log.error('XHR open error:', error);
+                // Fallback to original
+                return originalOpen.apply(this, [method, requestUrl, ...args]);
+            }
+        };
 
-.video-player__container,
-.video-player {
-    will-change: transform !important;
-    transform: translateZ(0);
-}
+        xhr.send = function(...args) {
+            try {
+                if (!opened) {
+                    // This shouldn't happen, but just in case
+                    log.warn('XHR send called without open');
+                    return originalSend.apply(this, args);
+                }
+                return originalSend.apply(this, args);
+            } catch (error) {
+                log.error('XHR send error:', error);
+                // Try to fall back
+                try {
+                    return originalSend.apply(this, args);
+                } catch (e) {
+                    // Last resort
+                    if (this.onerror) this.onerror(e);
+                }
+            }
+        };
 
-/* Avoid suppressing PiP UI to prevent layout issues */
+        return xhr;
+    };
 
-/* Keep main video container full size */
-/* Avoid forcing layout size to prevent blank UI */
-        `;
+    // Ensure prototype is properly set
+    if (originalXHR) {
+        XHROverride.prototype = originalXHR.prototype;
+        // Copy static methods
+        Object.setPrototypeOf(XHROverride, originalXHR);
+    }
+
+    // ====== WEBSOCKET OVERRIDE - CHAT-SAFE ======
+    const originalWebSocket = unsafeWindow.WebSocket;
+
+    const WebSocketOverride = function(url, protocols) {
+        // ALWAYS allow WebSocket connections - critical for chat
+        log.debug('WebSocket (allowed):', url);
+        try {
+            return new originalWebSocket(url, protocols);
+        } catch (error) {
+            log.error('WebSocket creation error:', error);
+            // Don't break - just let it fail naturally
+            throw error;
+        }
+    };
+
+    // Ensure prototype is properly set
+    if (originalWebSocket) {
+        WebSocketOverride.prototype = originalWebSocket.prototype;
+        // Copy static properties
+        Object.setPrototypeOf(WebSocketOverride, originalWebSocket);
+    }
+
+    // ====== M3U8 CLEANING - IMPROVED ======
+    const cleanM3U8 = (text) => {
+        if (!text || typeof text !== 'string') {
+            return { text, changed: false, removedSegments: 0 };
+        }
 
         try {
-            GM_addStyle(css);
-            logTrace(CONFIG.DEBUG.CORE, 'Init', 'CSS injected');
-        } catch (e) {
-            logWarn('Init', 'CSS injection failed', e);
-        }
-    };
+            const lines = text.split('\n');
+            const result = [];
+            let removedSegments = 0;
+            let skipNext = false;
+            let inAdBlock = false;
+            let adBlockDepth = 0;
 
-    const forceMaxQuality = () => {
-        try {
-            Object.defineProperties(document, {
-                visibilityState: { get: () => 'visible', configurable: true },
-                hidden: { get: () => false, configurable: true },
-                webkitHidden: { get: () => false, configurable: true },
-                mozHidden: { get: () => false, configurable: true },
-                msHidden: { get: () => false, configurable: true },
-            });
-            document.addEventListener('visibilitychange', e => e.stopImmediatePropagation(), true);
-            document.addEventListener('webkitvisibilitychange', e => e.stopImmediatePropagation(), true);
-            logTrace(CONFIG.DEBUG.CORE, 'Init', 'Page visibility overridden for quality');
-        } catch (e) {
-            logWarn('Init', 'Unable to override visibility API', e);
-        }
-    };
+            for (let i = 0; i < lines.length; i++) {
+                const rawLine = lines[i];
+                const line = rawLine.trim();
+                const upper = line.toUpperCase();
 
-    const parseAndCleanM3U8 = (m3u8Text, url = 'N/A') => {
-        if (!m3u8Text || typeof m3u8Text !== 'string') {
-            return { cleanedText: m3u8Text, adsFound: false, adSegments: 0 };
-        }
+                // Handle nested ad blocks
+                if (upper.startsWith('#EXT-X-DATERANGE')) {
+                    const isAdMarker = CONFIG.ADVANCED.M3U8_AD_MARKERS.some(marker =>
+                        upper.includes(marker)
+                    );
+                    if (isAdMarker) {
+                        inAdBlock = true;
+                        adBlockDepth++;
+                        continue;
+                    }
+                }
 
-        let adsFound = false;
-        let adSegments = 0;
-        let segmentsSkipped = 0;
-        const keywordUpper = AD_DATERANGE_KEYWORDS.map(k => String(k).toUpperCase());
-        const lines = m3u8Text.split('\n');
-        const cleanLines = [];
-        let skipNextSegment = false;
-        let flagSkipNextByMarker = false;
-        let inAdBlock = false;
-        let adBlockDepth = 0;
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-            if (!line) {
-                cleanLines.push(line);
-                continue;
-            }
-
-            const trimmed = line.trim();
-            const upper = trimmed.toUpperCase();
-
-            if (skipNextSegment) {
-                skipNextSegment = false;
-                adSegments++;
-                segmentsSkipped++;
-                continue;
-            }
-
-            if (upper.startsWith('#EXT-X-DATERANGE')) {
-                if (keywordUpper.some(k => upper.includes(k))) {
-                    adsFound = true;
+                if (upper.startsWith('#EXT-X-CUE-OUT') || upper.startsWith('#EXT-X-SCTE35')) {
                     inAdBlock = true;
                     adBlockDepth++;
                     continue;
                 }
-            }
 
-            if (upper.startsWith('#EXT-X-CUE-OUT') || upper.startsWith('#EXT-X-SCTE35')) {
-                adsFound = true;
-                inAdBlock = true;
-                adBlockDepth++;
-                continue;
-            }
+                if (upper.startsWith('#EXT-X-CUE-IN')) {
+                    inAdBlock = false;
+                    adBlockDepth = Math.max(0, adBlockDepth - 1);
+                    continue;
+                }
 
-            if (upper.startsWith('#EXT-X-CUE-IN')) {
-                adsFound = true;
-                inAdBlock = false;
-                adBlockDepth = Math.max(0, adBlockDepth - 1);
-                continue;
-            }
+                // Check for ad markers
+                const isAdMarker = CONFIG.ADVANCED.M3U8_AD_MARKERS.some(marker =>
+                    upper.includes(marker)
+                );
 
-            if ((inAdBlock || flagSkipNextByMarker) && upper.startsWith('#EXTINF')) {
-                adsFound = true;
-                skipNextSegment = true;
-                flagSkipNextByMarker = false;
-                continue;
-            }
+                if (isAdMarker) {
+                    inAdBlock = true;
+                    adBlockDepth++;
+                    continue;
+                }
 
-            let keywordMatched = false;
-            for (const k of keywordUpper) {
-                if (upper.includes(k)) {
-                    keywordMatched = true;
-                    adsFound = true;
-                    if (!upper.startsWith('#EXTINF')) {
-                        flagSkipNextByMarker = true;
+                // Skip ad segments
+                if (inAdBlock || skipNext) {
+                    if (line.startsWith('#EXTINF')) {
+                        skipNext = true;
+                        removedSegments++;
+                        continue;
+                    }
+
+                    if (line && !line.startsWith('#')) {
+                        removedSegments++;
+                        continue;
+                    }
+
+                    if (line.startsWith('#EXT-X-') && !inAdBlock) {
+                        // This might be the end of ad block
+                        inAdBlock = false;
+                        adBlockDepth = Math.max(0, adBlockDepth - 1);
                     } else {
-                        skipNextSegment = true;
-                    }
-                    break;
-                }
-            }
-
-            if (keywordMatched) {
-                continue;
-            }
-
-            if (!inAdBlock) {
-                cleanLines.push(line);
-            }
-        }
-
-        if (adsFound && CONFIG.DEBUG.M3U8_CLEANING) {
-            logTrace(true, 'M3U8', `URL: ${url} | Skipped ${segmentsSkipped} ad segments | Depth: ${adBlockDepth}`);
-        }
-
-        return {
-            cleanedText: adsFound ? cleanLines.join('\n') : m3u8Text,
-            adsFound,
-            adSegments,
-        };
-    };
-
-    const removeDOMAdElements = () => {
-        if (!CONFIG.SETTINGS.ATTEMPT_DOM_AD_REMOVAL) return;
-
-        const runCleanup = () => {
-            // Restrict to the actual Twitch video player container to avoid hiding the whole page
-            if (!videoElement) return;
-            const root = videoElement.closest('.video-player__container');
-            if (!root) return;
-
-            let hiddenElements = 0;
-            let placeholderDetected = false;
-            let removedStreamDisplayAd = false;
-
-            AD_DOM_SELECTORS.forEach(selector => {
-                try {
-                    const matches = root.querySelectorAll(selector);
-                    matches.forEach(el => {
-                        if (!el || !el.parentNode) return;
-                        if (el.closest('[data-a-target*="player-controls"]')) return;
-                        if (el.hasAttribute(HIDDEN_ATTRIBUTE)) return;
-
-                        if (!removedStreamDisplayAd) {
-                            removedStreamDisplayAd = el.matches('[data-test-selector^="sda"]') ||
-                                el.matches('[class*="stream-display-ad"]') ||
-                                el.matches('[class*="squeezeback"]') ||
-                                el.id === 'stream-lowerthird';
-                        }
-
-                        // Hide with CSS instead of removing to avoid React errors
-                        el.style.setProperty('display', 'none', 'important');
-                        el.style.setProperty('opacity', '0', 'important');
-                        el.style.setProperty('visibility', 'hidden', 'important');
-                        el.style.setProperty('pointer-events', 'none', 'important');
-                        el.style.setProperty('position', 'absolute', 'important');
-                        el.style.setProperty('width', '0', 'important');
-                        el.style.setProperty('height', '0', 'important');
-                        el.style.setProperty('z-index', '-9999', 'important');
-                        el.setAttribute(HIDDEN_ATTRIBUTE, 'true');
-                        el.classList.add(HIDDEN_CLASS);
-                        hiddenElements++;
-                    });
-                } catch (e) {
-                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'DOM', `Selector error: ${selector}`, e);
-                }
-            });
-
-            if (CONFIG.SETTINGS.REMOVE_AD_PLACEHOLDER) {
-                const textContainers = root.querySelectorAll('div, span, p, section, article');
-                let checkedCount = 0;
-                for (const node of textContainers) {
-                    if (checkedCount >= CONFIG.ADVANCED.DOM_CLEANUP_BATCH_SIZE) break;
-                    if (!node || !node.textContent) continue;
-                    if (node.closest('[data-a-target*="player-controls"]')) continue;
-
-                    const text = node.textContent.trim().toLowerCase();
-                    if (!text) continue;
-
-                    checkedCount++;
-                    const isPlaceholderText = PLACEHOLDER_TEXTS.some(ph => text.includes(ph.toLowerCase()));
-                    const alreadyHidden = node.hasAttribute(PLACEHOLDER_ATTRIBUTE);
-
-                    if (isPlaceholderText) {
-                        placeholderDetected = true;
-                        if (!alreadyHidden) {
-                            node.style.setProperty('display', 'none', 'important');
-                            node.style.setProperty('opacity', '0', 'important');
-                            node.style.setProperty('visibility', 'hidden', 'important');
-                            node.setAttribute(HIDDEN_ATTRIBUTE, 'true');
-                            node.setAttribute(PLACEHOLDER_ATTRIBUTE, 'true');
-                            node.classList.add(HIDDEN_CLASS);
-                            hiddenElements++;
-                        }
-                    } else if (alreadyHidden) {
-                        node.removeAttribute(PLACEHOLDER_ATTRIBUTE);
-                        node.removeAttribute(HIDDEN_ATTRIBUTE);
-                        node.classList.remove(HIDDEN_CLASS);
-                        node.style.removeProperty('display');
-                        node.style.removeProperty('opacity');
-                        node.style.removeProperty('visibility');
+                        // Still in ad block
+                        removedSegments++;
+                        continue;
                     }
                 }
+
+                // Keep the line
+                result.push(rawLine);
             }
 
-            if (removedStreamDisplayAd) {
-                restoreVideoFromAd('stream display ad cleanup');
-            }
-
-            if (placeholderDetected) {
-                restoreVideoFromAd('placeholder cleanup');
-            }
-
-            if (hiddenElements && CONFIG.DEBUG.PLAYER_MONITOR) {
-                logTrace(true, 'DOM', `Hidden ${hiddenElements} ad elements`);
-            }
-
-            // Additionally hide a few known ad overlays globally (safe selectors only)
-            const globalSafeSelectors = [
-                '.commercial-break-in-progress',
-                '[data-test-selector="commercial-break-in-progress"]',
-                '.stream-display-ad__wrapper',
-                '.stream-display-ad__container',
-                '.stream-display-ad__transform-container',
-                '.stream-display-ad__frame',
-                '[data-test-selector*="sad-overlay"]',
-                'div[data-a-target="player-ad-overlay"]',
-                'div[data-ad-placeholder="true"]',
-            ];
-            try {
-                document.querySelectorAll(globalSafeSelectors.join(',')).forEach(safelyHideElement);
-            } catch {}
-        };
-
-        const debouncedCleanup = debounce(runCleanup, CONFIG.ADVANCED.OBSERVER_THROTTLE_MS);
-
-        if (adRemovalObserver) {
-            adRemovalObserver.disconnect();
+            const cleaned = result.join('\n');
+            return {
+                text: cleaned,
+                changed: removedSegments > 0,
+                removedSegments
+            };
+        } catch (error) {
+            log.error('M3U8 cleaning error:', error);
+            // Return original on error
+            return { text, changed: false, removedSegments: 0 };
         }
-
-        adRemovalObserver = new MutationObserver((mutations) => {
-            let shouldClean = false;
-            for (const mutation of mutations) {
-                if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
-                    shouldClean = true;
-                    break;
-                }
-                if (mutation.type === 'attributes' && ['class', 'data-a-target', 'data-test-selector', 'style'].includes(mutation.attributeName)) {
-                    shouldClean = true;
-                    break;
-                }
-            }
-            if (shouldClean) {
-                debouncedCleanup();
-            }
-        });
-
-        const target = videoElement?.closest('.video-player__container');
-        if (target) {
-            adRemovalObserver.observe(target, {
-                childList: true,
-                subtree: true,
-                attributes: true,
-                attributeFilter: ['style', 'class', 'data-a-target', 'data-test-selector'],
-            });
-        }
-
-        runCleanup();
     };
 
-    const safelyHideElement = (el) => {
-        if (!el || !el.style) return;
+    // ====== GQL MODIFICATION - ROBUST ======
+    const modifyGQLRequest = (body) => {
         try {
-            el.style.setProperty('display', 'none', 'important');
-            el.style.setProperty('opacity', '0', 'important');
-            el.style.setProperty('visibility', 'hidden', 'important');
-            el.style.setProperty('pointer-events', 'none', 'important');
-            el.style.setProperty('position', 'absolute', 'important');
-            el.style.setProperty('width', '0', 'important');
-            el.style.setProperty('height', '0', 'important');
-            el.style.setProperty('z-index', '-9999', 'important');
-            el.style.setProperty('overflow', 'hidden', 'important');
-            if (typeof el.setAttribute === 'function') {
-                el.setAttribute(HIDDEN_ATTRIBUTE, 'true');
-            }
-            if (el.classList && !el.classList.contains(HIDDEN_CLASS)) {
-                el.classList.add(HIDDEN_CLASS);
-            } else if (typeof el.getAttribute === 'function') {
-                const existing = el.getAttribute('class') || '';
-                if (!existing.includes(HIDDEN_CLASS)) {
-                    el.setAttribute('class', `${existing} ${HIDDEN_CLASS}`.trim());
-                }
-            }
-        } catch (e) {
-            // Ignore errors
-        }
-    };
-
-    const cleanupOldVideoElement = (vid, reason) => {
-        if (!vid || typeof vid.pause !== 'function') return;
-
-        const isConnected = isElementConnected(vid);
-
-        if (isConnected) {
-            if (vid.offsetParent !== null) {
-                return;
-            }
-            if (vid.readyState > 0 || hasUsableSource(vid)) {
-                return;
-            }
-        }
-
-        let cleaned = false;
-
-        try {
-            if (!vid.paused) {
-                vid.pause();
-                cleaned = true;
-            }
-        } catch (e) {
-            // ignore
-        }
-
-        try {
-            if (!vid.muted) {
-                vid.muted = true;
-                cleaned = true;
-            }
-            if (vid.volume !== 0) {
-                vid.volume = 0;
-                cleaned = true;
-            }
-        } catch (e) {
-            // ignore
-        }
-
-        if (!isConnected) {
-            try {
-                if (vid.srcObject) {
-                    vid.srcObject = null;
-                    cleaned = true;
-                }
-            } catch (e) {
-                // ignore
-            }
-        }
-
-        if (cleaned) {
-            const msg = reason ? `Cleaned up old video element (${reason})` : 'Cleaned up old video element';
-            logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', msg);
-        }
-    };
-
-    const restoreVideoFromAd = (reason = 'ad cleanup') => {
-        if (!videoElement) return;
-
-        attemptAutoUnmute(reason);
-
-        if (videoElement.paused) {
-            videoElement.play().catch(() => {});
-        }
-
-        if (CONFIG.SETTINGS.DISABLE_PIP_DURING_ADS) {
-            try {
-                if (document.pictureInPictureElement && document.pictureInPictureElement !== videoElement) {
-                    document.exitPictureInPicture().catch(() => {});
-                }
-            } catch (e) {
-                // ignore
-            }
-        }
-
-        if (originalVideoParent && videoElement.parentElement !== originalVideoParent) {
-            try {
-                originalVideoParent.appendChild(videoElement);
-            } catch (e) {
-                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Failed to restore video parent', e);
-            }
-        }
-
-        videoElement.style.removeProperty('display');
-        videoElement.style.removeProperty('opacity');
-        videoElement.style.removeProperty('width');
-        videoElement.style.removeProperty('height');
-        videoElement.style.removeProperty('transform');
-
-        const videoContainer = videoElement.closest('.video-player__container');
-        if (videoContainer) {
-            videoContainer.style.removeProperty('transform');
-            videoContainer.style.removeProperty('max-height');
-            videoContainer.style.removeProperty('min-height');
-            videoContainer.style.removeProperty('height');
-        }
-
-        const persistentPlayer = videoElement.closest('.persistent-player');
-        if (persistentPlayer) {
-            persistentPlayer.style.removeProperty('transform');
-            persistentPlayer.style.removeProperty('max-height');
-            persistentPlayer.style.removeProperty('height');
-        }
-
-        const videoLayout = videoElement.closest('[data-test-selector="video-player__video-layout"]');
-        if (videoLayout) {
-            videoLayout.style.removeProperty('transform');
-            videoLayout.style.removeProperty('max-height');
-            videoLayout.style.removeProperty('min-height');
-        }
-
-        adDetected = false;
-    };
-
-    const triggerReload = (reason) => {
-        if (!CONFIG.SETTINGS.ENABLE_AUTO_RELOAD) return;
-
-        const now = Date.now();
-        if (reloadCount >= CONFIG.ADVANCED.MAX_RELOADS_PER_SESSION || (now - lastReloadTimestamp) < CONFIG.ADVANCED.RELOAD_COOLDOWN_MS) {
-            logTrace(CONFIG.DEBUG.CORE, 'Reload', `Skipped reload (${reason})`);
-            return;
-        }
-
-        reloadCount++;
-        lastReloadTimestamp = now;
-        logWarn('Reload', `Reloading page (#${reloadCount}) due to ${reason}`);
-        setTimeout(() => unsafeWindow.location.reload(), 100);
-    };
-
-    const setupVideoPlayerMonitor = () => {
-        if (videoPlayerObserver) {
-            videoPlayerObserver.disconnect();
-        }
-
-        const attachListeners = (vid) => {
-            if (!vid || videoListenerState.has(vid)) return;
-
-            // Ensure DOM ad cleanup observes the current player container
-            removeDOMAdElements();
-
-            originalVideoParent = vid.parentElement;
-            if (vid.volume > 0.05) {
-                lastKnownVolume = vid.volume;
+            if (!body || typeof body !== 'object') {
+                return { changed: false, data: body };
             }
 
-            const timers = {
-                stallTimer: null,
-                ivsErrorTimer: null,
-                waitingTimer: null,
-                initialUnmute1: null,
-                initialUnmute2: null,
-                handlers: {}
-            };
+            let changed = false;
+            let data = body;
 
-            const handlers = timers.handlers;
-
-            const onVolumeChange = () => {
-                const now = Date.now();
-                if (scriptAdjustingVolume) {
-                    if (vid.volume > 0.05) {
-                        lastKnownVolume = vid.volume;
-                    }
-                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', 'Volume changed by script');
-                    return;
-                }
-
-                const isMuted = vid.muted || vid.volume <= 0.001;
-                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', `User volume change: muted=${isMuted}, volume=${vid.volume.toFixed(2)}`);
-
-                if (isMuted) {
-                    userMutedManually = true;
-                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', 'User manually muted');
-                } else {
-                    userMutedManually = false;
-                    if (vid.volume > 0.05) {
-                        lastKnownVolume = vid.volume;
-                    }
-                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'AudioGuard', 'User manually unmuted');
-                }
-                lastUserVolumeChange = now;
-            };
-
-            const onStalled = () => {
-                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Playback stalled');
-                if (timers.stallTimer) clearTimeout(timers.stallTimer);
-                timers.stallTimer = setTimeout(() => triggerReload('stall timeout'), CONFIG.ADVANCED.RELOAD_STALL_THRESHOLD_MS);
-                document.querySelectorAll('.commercial-break-in-progress,[data-test-selector="commercial-break-in-progress"]').forEach(safelyHideElement);
-                if (vid.paused) {
-                    vid.play().catch(() => {});
-                }
-            };
-
-            const onPlaying = () => {
-                if (timers.stallTimer) {
-                    clearTimeout(timers.stallTimer);
-                    timers.stallTimer = null;
-                }
-                if (timers.waitingTimer) {
-                    clearTimeout(timers.waitingTimer);
-                    timers.waitingTimer = null;
-                }
-                if (adDetected) {
-                    attemptAutoUnmute('playing');
-                    adDetected = false;
-                }
-                if (vid.volume > 0.05 && !scriptAdjustingVolume) {
-                    lastKnownVolume = vid.volume;
-                }
-            };
-
-            const onLoadedData = () => {
-                if (adDetected) {
-                    attemptAutoUnmute('loadeddata');
-                    adDetected = false;
-                }
-            };
-
-            const onError = (e) => {
-                const code = e?.target?.error?.code;
-                const message = e?.target?.error?.message || '';
-                logError('Video', `Player error (code=${code}, message=${message})`);
-                if (code && (CONFIG.ADVANCED.RELOAD_ON_ERROR_CODES.includes(code) || message.includes('IVS') || message.includes('InvalidCharacter'))) {
-                    if (timers.ivsErrorTimer) clearTimeout(timers.ivsErrorTimer);
-                    timers.ivsErrorTimer = setTimeout(() => triggerReload(`error ${code}`), CONFIG.ADVANCED.IVS_ERROR_THRESHOLD);
-                }
-                document.querySelectorAll('.commercial-break-in-progress,[data-test-selector="commercial-break-in-progress"]').forEach(safelyHideElement);
-            };
-
-            const onWaiting = () => {
-                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Buffering...');
-                if (timers.waitingTimer) clearTimeout(timers.waitingTimer);
-                timers.waitingTimer = setTimeout(() => {
-                    if (vid.readyState < 3) {
-                        vid.play().catch(() => {});
-                    }
-                }, CONFIG.ADVANCED.RELOAD_BUFFERING_THRESHOLD_MS);
-            };
-
-            const onCanPlay = () => {
-                if (timers.waitingTimer) {
-                    clearTimeout(timers.waitingTimer);
-                    timers.waitingTimer = null;
-                }
-            };
-
-            const onSeeking = () => {
-                if (timers.stallTimer) {
-                    clearTimeout(timers.stallTimer);
-                    timers.stallTimer = null;
-                }
-            };
-
-            handlers.volumechange = onVolumeChange;
-            handlers.stalled = onStalled;
-            handlers.playing = onPlaying;
-            handlers.loadeddata = onLoadedData;
-            handlers.error = onError;
-            handlers.waiting = onWaiting;
-            handlers.canplay = onCanPlay;
-            handlers.seeking = onSeeking;
-
-            vid.addEventListener('volumechange', onVolumeChange, { passive: true });
-            vid.addEventListener('stalled', onStalled, { passive: true });
-            vid.addEventListener('playing', onPlaying, { passive: true });
-            vid.addEventListener('loadeddata', onLoadedData, { passive: true });
-            vid.addEventListener('error', onError);
-            vid.addEventListener('waiting', onWaiting, { passive: true });
-            vid.addEventListener('canplay', onCanPlay, { passive: true });
-            vid.addEventListener('seeking', onSeeking, { passive: true });
-
-            videoListenerState.set(vid, timers);
-
-            if (!vid._ttvInitialState) {
-                vid._ttvInitialState = true;
-                if (CONFIG.SETTINGS.FORCE_UNMUTE && CONFIG.SETTINGS.SMART_UNMUTE) {
-                    timers.initialUnmute1 = setTimeout(() => {
-                        if (videoElement === vid && !userMutedManually) {
-                            attemptAutoUnmute('initial setup');
+            if (Array.isArray(body)) {
+                data = body.map(item => {
+                    try {
+                        if (item?.operationName === 'PlaybackAccessToken') {
+                            const result = modifyPlaybackToken(item);
+                            if (result.changed) {
+                                changed = true;
+                            }
+                            return result.data;
                         }
-                    }, 1000);
-
-                    timers.initialUnmute2 = setTimeout(() => {
-                        if (videoElement === vid && !userMutedManually && (vid.muted || vid.volume <= 0.001)) {
-                            attemptAutoUnmute('initial setup retry');
-                        }
-                    }, 2500);
-                }
-            }
-        };
-
-        const cleanupAllTimers = (vid) => {
-            const timers = videoListenerState.get(vid);
-            if (timers) {
-                // Clear all timers
-                ['stallTimer', 'ivsErrorTimer', 'waitingTimer', 'initialUnmute1', 'initialUnmute2'].forEach(key => {
-                    if (timers[key]) {
-                        clearTimeout(timers[key]);
+                        return item;
+                    } catch (e) {
+                        // Return original on error
+                        return item;
                     }
                 });
-
-                // Remove event listeners
-                if (timers.handlers) {
-                    Object.entries(timers.handlers).forEach(([eventName, handler]) => {
-                        if (handler) {
-                            vid.removeEventListener(eventName, handler);
-                        }
-                    });
-                }
-
-                videoListenerState.delete(vid);
-            }
-        };
-
-        const debouncedAttach = debounce(() => {
-            const allVideos = Array.from(document.querySelectorAll('video'));
-
-            if (allVideos.length === 0) {
-                if (videoElement) {
-                    cleanupAllTimers(videoElement);
-                    cleanupOldVideoElement(videoElement, 'no video elements');
-                    videoElement = null;
-                }
-                return;
+            } else if (body.operationName === 'PlaybackAccessToken') {
+                const result = modifyPlaybackToken(body);
+                changed = result.changed;
+                data = result.data;
             }
 
-            const connectedVideos = allVideos.filter(isElementConnected);
-            const candidates = connectedVideos.length > 0 ? connectedVideos : allVideos;
-
-            let currentVideo = null;
-
-            if (videoElement && isElementConnected(videoElement) && candidates.includes(videoElement)) {
-                currentVideo = videoElement;
-            } else {
-                currentVideo = candidates.find(vid => hasUsableSource(vid) && vid.offsetParent !== null && vid.readyState >= 2 && !vid.ended)
-                    || candidates.find(vid => hasUsableSource(vid) && vid.readyState >= 2 && !vid.ended)
-                    || candidates.find(hasUsableSource)
-                    || candidates[candidates.length - 1];
-            }
-
-            if (currentVideo && currentVideo !== videoElement) {
-                if (videoElement) {
-                    cleanupAllTimers(videoElement);
-                    cleanupOldVideoElement(videoElement, 'switching video');
-                    logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Switched from old video element');
-                }
-                videoElement = currentVideo;
-            } else if (!currentVideo) {
-                if (videoElement) {
-                    cleanupAllTimers(videoElement);
-                    cleanupOldVideoElement(videoElement, 'no primary video');
-                    videoElement = null;
-                }
-                return;
-            }
-
-            if (videoElement && !videoListenerState.has(videoElement)) {
-                attachListeners(videoElement);
-                logTrace(CONFIG.DEBUG.PLAYER_MONITOR, 'Video', 'Attached to new video element');
-            }
-
-            candidates.forEach(vid => {
-                if (!vid || vid === videoElement) {
-                    return;
-                }
-                if (!isElementConnected(vid)) {
-                    cleanupAllTimers(vid);
-                    cleanupOldVideoElement(vid, 'detached video');
-                }
-            });
-        }, 250);
-
-        videoPlayerObserver = new MutationObserver(() => debouncedAttach());
-
-        const target = document.body || document.documentElement;
-        if (target) {
-            videoPlayerObserver.observe(target, { childList: true, subtree: true });
+            return { changed, data };
+        } catch (error) {
+            log.error('GQL modification error:', error);
+            return { changed: false, data: body };
         }
-
-        debouncedAttach();
     };
 
-    const installHooks = () => {
-        if (hooksInstalled) return;
-        hooksInstalled = true;
-
+    const modifyPlaybackToken = (payload) => {
         try {
-            unsafeWindow.fetch = fetchOverride;
-            logTrace(CONFIG.DEBUG.CORE, 'Init', 'Fetch override installed');
-        } catch (e) {
-            logWarn('Init', 'Failed to override fetch', e);
-        }
-
-        try {
-            if (originalXHR) {
-                const XHROverride = function() {
-                    const xhr = new originalXHR();
-                    const originalOpen = xhr.open;
-                    const originalSend = xhr.send;
-                    let requestUrl = '';
-
-                    xhr.open = function(method, url, ...args) {
-                        requestUrl = url;
-                        const urlLower = String(url).toLowerCase();
-
-                        if (AD_URL_KEYWORDS_BLOCK.some(k => urlLower.includes(String(k).toLowerCase())) ||
-                            (urlLower.includes('ad') && (urlLower.includes('.m3u8') || urlLower.includes('.ts') || urlLower.includes('.mp4')))) {
-                            logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'XHR', `Blocked XHR: ${url}`);
-                            throw new Error('Blocked by TTV Adblock Enhanced');
-                        }
-
-                        return originalOpen.apply(this, [method, url, ...args]);
-                    };
-
-                    xhr.send = function(...args) {
-                        return originalSend.apply(this, args);
-                    };
-
-                    return xhr;
-                };
-
-                XHROverride.prototype = originalXHR.prototype;
-                unsafeWindow.XMLHttpRequest = XHROverride;
-                logTrace(CONFIG.DEBUG.CORE, 'Init', 'XMLHttpRequest override installed');
+            if (!payload || typeof payload !== 'object') {
+                return { changed: false, data: payload };
             }
-        } catch (e) {
-            logWarn('Init', 'Failed to override XMLHttpRequest', e);
+
+            if (!payload.variables || typeof payload.variables !== 'object') {
+                return { changed: false, data: payload };
+            }
+
+            let changed = false;
+            const vars = { ...payload.variables };
+
+            // Force embed player to avoid ads
+            if (vars.playerType !== 'embed') {
+                vars.playerType = 'embed';
+                changed = true;
+            }
+
+            // Ensure web platform
+            if (vars.platform !== 'web') {
+                vars.platform = 'web';
+                changed = true;
+            }
+
+            // Prefer source quality
+            if (vars.videoQualityPreference !== 'chunked') {
+                vars.videoQualityPreference = 'chunked';
+                changed = true;
+            }
+
+            // Add supported codecs to avoid IVS ads
+            if (!vars.supportedCodecs || !Array.isArray(vars.supportedCodecs)) {
+                vars.supportedCodecs = ['av01', 'avc1', 'vp9'];
+                changed = true;
+            }
+
+            return { changed, data: { ...payload, variables: vars } };
+        } catch (error) {
+            log.error('PlaybackToken modification error:', error);
+            return { changed: false, data: payload };
         }
+    };
+
+    // ====== DOM CLEANUP - CONSERVATIVE ======
+    const injectCSS = () => {
+        if (!CONFIG.SETTINGS.ENABLE_DOM_CLEANUP) return;
 
         try {
-            if (originalWebSocket) {
-                const WebSocketOverride = function(url, protocols) {
-                    const urlLower = String(url).toLowerCase();
+            // Check if GM_addStyle is available
+            if (typeof GM_addStyle !== 'function') {
+                log.warn('GM_addStyle not available');
+                return;
+            }
 
-                    if (AD_URL_KEYWORDS_BLOCK.some(k => urlLower.includes(String(k).toLowerCase())) ||
-                        urlLower.includes('ad') ||
-                        urlLower.includes('commercial')) {
-                        logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'WebSocket', `Blocked WebSocket: ${url}`);
-                        throw new Error('Blocked by TTV Adblock Enhanced');
+            // Build CSS safely
+            const baseSelectors = CONFIG.ADVANCED.AD_DOM_SELECTORS;
+            let additionalSelectors = [];
+
+            if (!CONFIG.SETTINGS.CONSERVATIVE_DOM_REMOVAL) {
+                additionalSelectors = [
+                    '[data-test-selector*="ad-overlay"]',
+                    '.ad-banner',
+                    '.ad-container',
+                    '.ad-overlay'
+                ];
+            }
+
+            const allSelectors = [...baseSelectors, ...additionalSelectors];
+            const selectorChunk1 = allSelectors.slice(0, Math.ceil(allSelectors.length / 2));
+            const selectorChunk2 = allSelectors.slice(Math.ceil(allSelectors.length / 2));
+
+            // Split into two parts to avoid CSS length limits
+            const css1 = `
+${selectorChunk1.join(',\n')} {
+    display: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+}
+            `;
+
+            const css2 = `
+${selectorChunk2.join(',\n')} {
+    display: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+}
+
+video {
+    pointer-events: auto !important;
+    display: block !important;
+}
+
+[data-a-target*="player-controls"] {
+    pointer-events: auto !important;
+    display: block !important;
+}
+            `;
+
+            GM_addStyle(css1);
+            GM_addStyle(css2);
+            log.debug('CSS injected successfully');
+        } catch (e) {
+            log.error('CSS injection failed:', e);
+        }
+    };
+
+    // ====== VIDEO PLAYER MONITOR ======
+    const setupPlayerMonitor = () => {
+        try {
+            const video = document.querySelector('video');
+            if (!video) {
+                log.debug('No video element found, will retry later');
+                return;
+            }
+
+            log.debug('Video player found, setting up monitor');
+
+            // Auto-unmute on certain events
+            if (CONFIG.SETTINGS.AUTO_UNMUTE) {
+                const autoUnmute = () => {
+                    try {
+                        if (video && video.muted) {
+                            log.info('Auto-unmuting video');
+                            video.muted = false;
+                            video.volume = Math.max(video.volume, 0.5);
+                        }
+                    } catch (e) {
+                        log.error('Auto-unmute error:', e);
                     }
-
-                    return new originalWebSocket(url, protocols);
                 };
 
-                WebSocketOverride.prototype = originalWebSocket.prototype;
-                unsafeWindow.WebSocket = WebSocketOverride;
-                logTrace(CONFIG.DEBUG.CORE, 'Init', 'WebSocket override installed');
+                video.addEventListener('playing', autoUnmute, { once: true });
+                video.addEventListener('loadeddata', autoUnmute, { once: true });
             }
-        } catch (e) {
-            logWarn('Init', 'Failed to override WebSocket', e);
-        }
 
-        try {
-            if (originalRTCPeerConnection) {
-                const RTCPeerConnectionOverride = function(...args) {
-                    const pc = new originalRTCPeerConnection(...args);
-                    const originalAddStream = pc.addStream;
-                    const originalAddTrack = pc.addTrack;
+            // Restore playback on ad detection
+            if (CONFIG.SETTINGS.RESTORE_ON_AD) {
+                let adDetected = false;
+                let retryCount = 0;
+                const maxRetries = 3;
 
-                    pc.addStream = function(stream) {
-                        try {
-                            const url = stream.id || stream.label || '';
-                            if (AD_URL_KEYWORDS_BLOCK.some(k => url.toLowerCase().includes(String(k).toLowerCase()))) {
-                                logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'RTCPeerConnection', `Blocked media stream`);
-                                return pc;
+                const onStalled = () => {
+                    try {
+                        if (!adDetected) {
+                            log.debug('Possible ad detected, attempting to restore playback');
+                            adDetected = true;
+                            retryCount++;
+
+                            if (retryCount <= maxRetries) {
+                                setTimeout(() => {
+                                    try {
+                                        if (video && video.paused) {
+                                            log.debug(`Playback restore attempt ${retryCount}`);
+                                            video.play().catch(() => {});
+                                        }
+                                        adDetected = false;
+                                    } catch (e) {
+                                        log.error('Play attempt error:', e);
+                                    }
+                                }, 1500 * retryCount); // Exponential backoff
+                            } else {
+                                log.warn('Max retries reached, giving up on restore');
+                                adDetected = false;
+                                retryCount = 0;
                             }
-                        } catch (e) {}
-                        return originalAddStream.apply(this, arguments);
-                    };
-
-                    pc.addTrack = function(track, ...rest) {
-                        try {
-                            const url = track.label || track.id || '';
-                            if (AD_URL_KEYWORDS_BLOCK.some(k => url.toLowerCase().includes(String(k).toLowerCase()))) {
-                                logTrace(CONFIG.DEBUG.NETWORK_BLOCKING, 'RTCPeerConnection', `Blocked media track`);
-                                return pc;
-                            }
-                        } catch (e) {}
-                        return originalAddTrack.apply(this, arguments);
-                    };
-
-                    return pc;
+                        }
+                    } catch (e) {
+                        log.error('Stalled handler error:', e);
+                    }
                 };
 
-                RTCPeerConnectionOverride.prototype = originalRTCPeerConnection.prototype;
-                unsafeWindow.RTCPeerConnection = RTCPeerConnectionOverride;
-                logTrace(CONFIG.DEBUG.CORE, 'Init', 'RTCPeerConnection override installed');
+                video.addEventListener('stalled', onStalled, { passive: true });
+                video.addEventListener('waiting', onStalled, { passive: true });
             }
-        } catch (e) {
-            logWarn('Init', 'Failed to override RTCPeerConnection', e);
+        } catch (error) {
+            log.error('Player monitor setup error:', error);
         }
     };
 
+    // ====== INITIALIZATION ======
     const initialize = () => {
-        logDebug('Init', 'Starting Twitch Adblock Ultimate Enhanced v' + CONFIG.SCRIPT_VERSION);
-        console.info(`${LOG_PREFIX} ===============================`);
-        console.info(`${LOG_PREFIX} IMPROVED VERSION 32.0.0`);
-        console.info(`${LOG_PREFIX} ===============================`);
-        console.info(`${LOG_PREFIX} New Features:`);
-        console.info(`${LOG_PREFIX}  - Enhanced ad detection with 50+ new patterns`);
-        console.info(`${LOG_PREFIX}  - XMLHttpRequest blocking`);
-        console.info(`${LOG_PREFIX}  - WebSocket connection blocking`);
-        console.info(`${LOG_PREFIX}  - RTCPeerConnection ad stream blocking`);
-        console.info(`${LOG_PREFIX}  - Improved M3U8 manifest cleaning`);
-        console.info(`${LOG_PREFIX}  - Additional DOM selectors`);
-        console.info(`${LOG_PREFIX} ===============================`);
+        try {
+            log.info('Starting Twitch Adblock Ultimate v' + CONFIG.SCRIPT_VERSION);
+            console.info(`\n${'='.repeat(60)}`);
+            console.info(`${LOG_PREFIX} IMPROVED VERSION ${CONFIG.SCRIPT_VERSION}`);
+            console.info(`${'='.repeat(60)}`);
+            console.info(`${LOG_PREFIX} ✅ Chat protection: ENABLED`);
+            console.info(`${LOG_PREFIX} ✅ Selective blocking: ENABLED`);
+            console.info(`${LOG_PREFIX} ✅ M3U8 cleaning: ${CONFIG.SETTINGS.ENABLE_M3U8_CLEANING ? 'ENABLED' : 'DISABLED'}`);
+            console.info(`${LOG_PREFIX} ✅ GQL modification: ${CONFIG.SETTINGS.ENABLE_GQL_MODIFICATION ? 'ENABLED' : 'DISABLED'}`);
+            console.info(`${LOG_PREFIX} ✅ Auto-unmute: ${CONFIG.SETTINGS.AUTO_UNMUTE ? 'ENABLED' : 'DISABLED'}`);
+            console.info(`${LOG_PREFIX} ✅ DOM cleanup: ${CONFIG.SETTINGS.ENABLE_DOM_CLEANUP ? 'ENABLED' : 'DISABLED'}`);
+            console.info(`${'='.repeat(60)}\n`);
 
-        installHooks();
-        injectCSS();
-        if (CONFIG.SETTINGS.FORCE_MAX_QUALITY) {
-            forceMaxQuality();
+            // Verify critical APIs are available
+            if (typeof unsafeWindow !== 'object') {
+                throw new Error('unsafeWindow not available');
+            }
+            if (typeof originalFetch !== 'function') {
+                log.warn('Original fetch not found, fetch override may not work');
+            }
+            if (typeof originalXHR !== 'function') {
+                log.warn('Original XMLHttpRequest not found, XHR override may not work');
+            }
+            if (typeof originalWebSocket !== 'function') {
+                log.warn('Original WebSocket not found, WebSocket override may not work');
+            }
+
+            // Install network overrides
+            try {
+                unsafeWindow.fetch = fetchOverride;
+                log.debug('✓ Fetch override installed');
+            } catch (e) {
+                log.error('✗ Fetch override failed:', e);
+            }
+
+            try {
+                unsafeWindow.XMLHttpRequest = XHROverride;
+                log.debug('✓ XHR override installed');
+            } catch (e) {
+                log.error('✗ XHR override failed:', e);
+            }
+
+            try {
+                unsafeWindow.WebSocket = WebSocketOverride;
+                log.debug('✓ WebSocket override installed (chat-safe)');
+            } catch (e) {
+                log.error('✗ WebSocket override failed:', e);
+            }
+
+            // Inject CSS
+            injectCSS();
+
+            // Setup player monitor with retry
+            let retryCount = 0;
+            const maxRetries = 5;
+            const retryInterval = setInterval(() => {
+                try {
+                    setupPlayerMonitor();
+                    clearInterval(retryInterval);
+                } catch (e) {
+                    log.error('Player monitor setup error:', e);
+                }
+                retryCount++;
+                if (retryCount >= maxRetries) {
+                    clearInterval(retryInterval);
+                    log.warn('Player monitor retry limit reached');
+                }
+            }, 1000);
+
+            log.info('✓ Initialization complete');
+            console.info(`${LOG_PREFIX} Ready! Enjoy ad-free Twitch with working chat!\n`);
+        } catch (error) {
+            log.error('✗ Initialization failed:', error);
+            console.error(`${LOG_PREFIX} Failed to initialize!`, error);
         }
-        removeDOMAdElements();
-        setupVideoPlayerMonitor();
-
-        setInterval(() => {
-            if (adDetected && videoElement && CONFIG.SETTINGS.AGGRESSIVE_AD_BLOCK) {
-                restoreVideoFromAd('periodic watchdog');
-            }
-
-            if (videoElement && CONFIG.SETTINGS.FORCE_UNMUTE && CONFIG.SETTINGS.SMART_UNMUTE && !userMutedManually) {
-                if (videoElement.muted || videoElement.volume <= 0.001) {
-                    attemptAutoUnmute('periodic check');
-                }
-            }
-
-            if (requestCache.size > 50) {
-                const now = Date.now();
-                for (const [key, value] of requestCache.entries()) {
-                    if (now - value.timestamp > CONFIG.ADVANCED.REQUEST_CACHE_TTL_MS) {
-                        requestCache.delete(key);
-                    }
-                }
-            }
-        }, 2000);
     };
 
+    // Start when ready
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', initialize, { once: true });
     } else {
