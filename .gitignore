@@ -126,3 +126,4 @@ crypto_data.db-shm
 crypto_data.lmdb/data.mdb
 crypto_data.lmdb/lock.mdb
 crypto_analyzer_data.lmdb/
+.claude/settings.local.json

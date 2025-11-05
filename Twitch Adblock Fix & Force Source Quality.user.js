@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      32.1.0
+// @version      32.2.0
 // @description  Twitch ad-blocking
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -31,7 +31,7 @@
 
     // ====== CONFIGURATION ======
     const CONFIG = {
-        SCRIPT_VERSION: '32.1.0',
+        SCRIPT_VERSION: '32.2.0',
         SETTINGS: {
             // Network blocking - SELECTIVE to avoid breaking chat/auth
             ENABLE_AD_SERVER_BLOCKING: GM_getValue('TTV_BlockAdServers', true),
@@ -44,7 +44,7 @@
             RESTORE_ON_AD: GM_getValue('TTV_RestoreOnAd', true),
             HIDE_AD_PLACEHOLDERS: GM_getValue('TTV_HidePlaceholders', true),
             PROTECT_CHAT: GM_getValue('TTV_ProtectChat', true),
-            SKIP_AGGRESSIVE_BLOCKING: GM_getValue('TTV_SkipAggressive', true),
+            SKIP_AGGRESSIVE_BLOCKING: GM_getValue('TTV_SkipAggressive', false),
             ENABLE_DEBUG: GM_getValue('TTV_EnableDebug', false),
         },
         ADVANCED: {
@@ -53,9 +53,20 @@
                 'edge.ads.twitch.tv',
                 'ads.ttvnw.net',
                 'ad.twitch.tv',
+                'poster.ad.twitch.tv',
+                'video.ad.twitch.tv',
                 'doubleclick.net',
                 'googlesyndication.com',
+                'googletagservices.com',
                 'amazon-adsystem.com',
+                'adservice.google.com',
+                'imasdk.googleapis.com',
+                'criteo.com',
+                'taboola.com',
+                'outbrain.com',
+                'scorecardresearch.com',
+                'quantserve.com',
+                'newrelic.com',
             ],
             // Whitelist patterns - NEVER block these
             CHAT_PROTECTION_PATTERNS: [
@@ -77,14 +88,56 @@
             ],
             // Precise DOM selectors
             AD_DOM_SELECTORS: [
+                // Commercial breaks
                 '[data-test-selector="commercial-break-in-progress"]',
                 '.ad-interrupt-screen',
                 '.commercial-break-in-progress',
                 '.player-ad-notice',
+                // Stream display ads
                 '.stream-display-ad__wrapper',
                 '.stream-display-ad__container',
+                '.stream-display-ad',
+                // IVS ads
                 '.ivs-ad-container',
                 '.ivs-ad-overlay',
+                '.ivs-ad-container__overlay',
+                // Video player ads
+                '[data-a-target="player-ad-label"]',
+                '.player-ad-overlay',
+                '.player-ad-overlay--linear',
+                '.player-ad-ui',
+                '.video-chat__containercommercial-break',
+                // Cookie/GDPR consent banners
+                '.consent-banner',
+                '.gdpr-consent-banner',
+                '[data-a-target="consent-banner-accept"]',
+                '.cookie-consent',
+                '.cookie-banner',
+                '#consent-banner',
+                '.gdpr-banner',
+                // Popups and overlays
+                '[role="dialog"][aria-label*="ad" i]',
+                '[aria-label*="advertisement" i]',
+                '[aria-label*="commercial" i]',
+            ],
+            // Cookie/GDPR consent selectors
+            COOKIE_CONSENT_SELECTORS: [
+                '.consent-banner',
+                '.gdpr-consent-banner',
+                '.cookie-consent',
+                '.cookie-banner',
+                '#consent-banner',
+                '.gdpr-banner',
+                '[data-test-selector="consent-banner"]',
+                '[data-test-selector="cookie-consent-banner"]',
+                '[data-test-selector="gdpr-consent-banner"]',
+                '[data-a-target="consent-banner-accept"]',
+                '[data-a-target="consent-banner-decline"]',
+                '.consent-modal',
+                '.gdpr-modal',
+                '.cookie-modal',
+                '.consent-banner-container',
+                '.gdpr-consent-modal',
             ],
         },
     };
@@ -490,23 +543,60 @@
             if (vars.playerType !== 'embed') {
                 vars.playerType = 'embed';
                 changed = true;
+                log.debug('Forcing playerType to embed');
             }
 
             // Ensure web platform
             if (vars.platform !== 'web') {
                 vars.platform = 'web';
                 changed = true;
+                log.debug('Forcing platform to web');
             }
 
-            // Prefer source quality
+            // AGGRESSIVE: Force source quality (chunked)
             if (vars.videoQualityPreference !== 'chunked') {
                 vars.videoQualityPreference = 'chunked';
+                changed = true;
+                log.debug('Forcing video quality to chunked (source)');
+            }
+
+            // Add additional quality preferences for more reliable source setting
+            if (!vars.videoQualityDefault || vars.videoQualityDefault !== 'chunked') {
+                vars.videoQualityDefault = 'chunked';
+                changed = true;
+            }
+
+            if (!vars.videoPriorities || !Array.isArray(vars.videoPriorities) || !vars.videoPriorities.includes('chunked')) {
+                vars.videoPriorities = ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'];
                 changed = true;
             }
 
             // Add supported codecs to avoid IVS ads
             if (!vars.supportedCodecs || !Array.isArray(vars.supportedCodecs)) {
-                vars.supportedCodecs = ['av01', 'avc1', 'vp9'];
+                vars.supportedCodecs = ['av01', 'avc1', 'vp9', 'hev1', 'hvc1'];
+                changed = true;
+                log.debug('Setting supported codecs:', vars.supportedCodecs);
+            }
+
+            // Add additional parameters for better ad blocking
+            if (vars.realtime !== false) {
+                vars.realtime = false;
+                changed = true;
+            }
+
+            if (vars.useReruns !== false) {
+                vars.useReruns = false;
+                changed = true;
+            }
+
+            if (vars.allowSource !== true) {
+                vars.allowSource = true;
+                changed = true;
+            }
+
+            // Ensure we get the highest quality
+            if (typeof vars.lowLatency !== 'boolean') {
+                vars.lowLatency = false;
                 changed = true;
             }
 
@@ -530,6 +620,7 @@
 
             // Build CSS safely
             const baseSelectors = CONFIG.ADVANCED.AD_DOM_SELECTORS;
+            const cookieSelectors = CONFIG.ADVANCED.COOKIE_CONSENT_SELECTORS;
             let additionalSelectors = [];
 
             if (!CONFIG.SETTINGS.CONSERVATIVE_DOM_REMOVAL) {
@@ -541,7 +632,7 @@
                 ];
             }
 
-            const allSelectors = [...baseSelectors, ...additionalSelectors];
+            const allSelectors = [...baseSelectors, ...cookieSelectors, ...additionalSelectors];
             const selectorChunk1 = allSelectors.slice(0, Math.ceil(allSelectors.length / 2));
             const selectorChunk2 = allSelectors.slice(Math.ceil(allSelectors.length / 2));
 
@@ -580,6 +671,114 @@ video {
         }
     };
 
+    // ====== COOKIE CONSENT REMOVAL - AGGRESSIVE ======
+    const removeCookieBanners = () => {
+        try {
+            const selectors = CONFIG.ADVANCED.COOKIE_CONSENT_SELECTORS;
+            let removedCount = 0;
+
+            selectors.forEach(selector => {
+                try {
+                    const elements = document.querySelectorAll(selector);
+                    elements.forEach(element => {
+                        if (element && element.parentNode) {
+                            element.parentNode.removeChild(element);
+                            removedCount++;
+                        }
+                    });
+                } catch (e) {
+                    log.debug('Selector error:', selector, e);
+                }
+            });
+
+            // Also try to click accept buttons automatically
+            const acceptButtons = [
+                '[data-a-target="consent-banner-accept"]',
+                'button[aria-label*="accept" i]',
+                'button[aria-label*="agree" i]',
+                'button[aria-label*="ok" i]',
+                'button:contains("Accept")',
+                'button:contains("Agree")',
+                'button:contains("OK")'
+            ];
+
+            acceptButtons.forEach(selector => {
+                try {
+                    const buttons = document.querySelectorAll(selector);
+                    buttons.forEach(button => {
+                        if (button && !button.disabled) {
+                            button.click();
+                            removedCount++;
+                        }
+                    });
+                } catch (e) {
+                    // Ignore errors
+                }
+            });
+
+            if (removedCount > 0) {
+                log.info(`Removed ${removedCount} cookie/consent banner elements`);
+            }
+        } catch (e) {
+            log.error('Cookie banner removal error:', e);
+        }
+    };
+
+    // ====== QUALITY FORCE MONITOR ======
+    const forceSourceQuality = () => {
+        if (!CONFIG.SETTINGS.FORCE_QUALITY) return;
+
+        try {
+            // Try to find quality selector/button
+            const qualitySelectors = [
+                '[data-a-target="player-settings-menu"]',
+                '[data-a-target="player-settings-quality"]',
+                '.tw-select',
+                '.player-menu__toggle',
+                '.quality-selector',
+                'button[aria-label*="quality" i]',
+                'button[aria-label*="качество" i]'
+            ];
+
+            for (const selector of qualitySelectors) {
+                const button = document.querySelector(selector);
+                if (button) {
+                    log.debug('Found quality menu button, attempting to click');
+                    button.click();
+
+                    // Wait a bit then look for chunked/source option
+                    setTimeout(() => {
+                        const qualityOptions = [
+                            'button:contains("Source")',
+                            'button:contains("Исходник")',
+                            'button:contains("chunked")',
+                            '[data-a-target="quality-option-chunked"]',
+                            '[data-test-selector="quality-option-chunked"]',
+                            '.tw-core-button:contains("chunked")',
+                            '.tw-core-button:contains("Source")'
+                        ];
+
+                        for (const option of qualityOptions) {
+                            try {
+                                const qualityButton = document.querySelector(option);
+                                if (qualityButton) {
+                                    log.info('Found source quality option, clicking');
+                                    qualityButton.click();
+                                    return;
+                                }
+                            } catch (e) {
+                                // Continue searching
+                            }
+                        }
+                    }, 500);
+                    break;
+                }
+            }
+        } catch (e) {
+            log.debug('Quality force error:', e);
+        }
+    };
+
     // ====== VIDEO PLAYER MONITOR ======
     const setupPlayerMonitor = () => {
         try {
@@ -590,6 +789,9 @@ video {
             }
 
             log.debug('Video player found, setting up monitor');
+
+            // Force source quality immediately
+            forceSourceQuality();
 
             // Auto-unmute on certain events
             if (CONFIG.SETTINGS.AUTO_UNMUTE) {
@@ -648,6 +850,14 @@ video {
                 video.addEventListener('stalled', onStalled, { passive: true });
                 video.addEventListener('waiting', onStalled, { passive: true });
             }
+
+            // Periodically force source quality to prevent quality degradation
+            const qualityCheckInterval = setInterval(() => {
+                forceSourceQuality();
+            }, 10000); // Check every 10 seconds
+
+            // Store interval ID to clear it later if needed
+            video._qualityCheckInterval = qualityCheckInterval;
         } catch (error) {
             log.error('Player monitor setup error:', error);
         }
@@ -661,11 +871,13 @@ video {
             console.info(`${LOG_PREFIX} IMPROVED VERSION ${CONFIG.SCRIPT_VERSION}`);
             console.info(`${'='.repeat(60)}`);
             console.info(`${LOG_PREFIX} ✅ Chat protection: ENABLED`);
-            console.info(`${LOG_PREFIX} ✅ Selective blocking: ENABLED`);
+            console.info(`${LOG_PREFIX} ✅ Aggressive ad blocking: ENABLED`);
+            console.info(`${LOG_PREFIX} ✅ Cookie banner removal: ENABLED`);
             console.info(`${LOG_PREFIX} ✅ M3U8 cleaning: ${CONFIG.SETTINGS.ENABLE_M3U8_CLEANING ? 'ENABLED' : 'DISABLED'}`);
             console.info(`${LOG_PREFIX} ✅ GQL modification: ${CONFIG.SETTINGS.ENABLE_GQL_MODIFICATION ? 'ENABLED' : 'DISABLED'}`);
             console.info(`${LOG_PREFIX} ✅ Auto-unmute: ${CONFIG.SETTINGS.AUTO_UNMUTE ? 'ENABLED' : 'DISABLED'}`);
             console.info(`${LOG_PREFIX} ✅ DOM cleanup: ${CONFIG.SETTINGS.ENABLE_DOM_CLEANUP ? 'ENABLED' : 'DISABLED'}`);
+            console.info(`${LOG_PREFIX} ✅ Force Source quality: ${CONFIG.SETTINGS.FORCE_QUALITY ? 'ENABLED' : 'DISABLED'}`);
             console.info(`${'='.repeat(60)}\n`);
 
             // Verify critical APIs are available
@@ -706,6 +918,47 @@ video {
 
             // Inject CSS
             injectCSS();
+
+            // Remove cookie banners immediately
+            removeCookieBanners();
+
+            // Setup periodic cookie banner removal (every 2 seconds for first 30 seconds)
+            let bannerCheckCount = 0;
+            const bannerCheckInterval = setInterval(() => {
+                removeCookieBanners();
+                bannerCheckCount++;
+                if (bannerCheckCount >= 15) {
+                    clearInterval(bannerCheckInterval);
+                }
+            }, 2000);
+
+            // Setup MutationObserver for dynamic cookie banners
+            if (typeof MutationObserver !== 'undefined') {
+                const bannerObserver = new MutationObserver((mutations) => {
+                    let shouldCheck = false;
+                    mutations.forEach((mutation) => {
+                        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                            for (let node of mutation.addedNodes) {
+                                if (node.nodeType === 1) { // ELEMENT_NODE
+                                    const text = node.textContent || '';
+                                    if (text.toLowerCase().includes('cookie') ||
+                                        text.toLowerCase().includes('consent') ||
+                                        text.toLowerCase().includes('gdpr')) {
+                                        shouldCheck = true;
+                                    }
+                                }
+                            }
+                        }
+                    });
+                    if (shouldCheck) {
+                        setTimeout(removeCookieBanners, 500);
+                    }
+                });
+                bannerObserver.observe(document.body || document.documentElement, {
+                    childList: true,
+                    subtree: true
+                });
+            }
 
             // Setup player monitor with retry
             let retryCount = 0;
