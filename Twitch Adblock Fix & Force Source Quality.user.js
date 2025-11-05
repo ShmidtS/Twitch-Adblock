@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      32.2.0
+// @version      32.2.1
 // @description  Twitch ad-blocking
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -210,8 +210,8 @@
         const urlLower = url.toLowerCase();
 
         return CONFIG.ADVANCED.AD_SERVER_DOMAINS.some(domain =>
-            urlLower.includes(domain.toLowerCase())
-        );
+                                                      urlLower.includes(domain.toLowerCase())
+                                                     );
     };
 
     const shouldSkipBlocking = (url) => {
@@ -298,7 +298,7 @@
 
         init(video) {
             if (this.initialized || !video) return;
-            
+
             this.lastVolume = video.volume || 0.5;
             this.manuallyMuted = video.muted || false;
             this.initialized = true;
@@ -332,7 +332,7 @@
 
         restoreVolume(video) {
             if (!video || !this.initialized) return;
-            
+
             if (!this.manuallyMuted) {
                 video.volume = Math.max(this.lastVolume, 0.3);
                 video.muted = false;
@@ -371,10 +371,10 @@
 
         process() {
             if (this.processing || this.queue.length === 0) return;
-            
+
             this.processing = true;
             const batch = this.queue.splice(0, CONFIG.PERFORMANCE.BATCH_SIZE);
-            
+
             requestAnimationFrame(() => {
                 batch.forEach(element => {
                     try {
@@ -385,9 +385,9 @@
                         log.debug('Batch remove error:', e);
                     }
                 });
-                
+
                 this.processing = false;
-                
+
                 if (this.queue.length > 0) {
                     this.scheduleProcess();
                 }
@@ -406,7 +406,7 @@
             try {
                 const qualityButtons = document.querySelectorAll('button[data-a-target*="quality-option"]');
                 const qualities = [];
-                
+
                 qualityButtons.forEach(button => {
                     const text = button.textContent?.trim() || button.getAttribute('aria-label') || '';
                     if (text && !text.toLowerCase().includes('auto')) {
@@ -435,14 +435,14 @@
         getBestQuality() {
             const available = this.detectAvailableQualities();
             const preferred = CONFIG.QUALITY_SETTINGS.PREFERRED_QUALITIES;
-            
+
             for (const pref of preferred) {
-                if (available.some(q => q.toLowerCase().includes(pref.toLowerCase()) || 
-                                        pref.toLowerCase().includes(q.toLowerCase()))) {
+                if (available.some(q => q.toLowerCase().includes(pref.toLowerCase()) ||
+                                   pref.toLowerCase().includes(q.toLowerCase()))) {
                     return pref;
                 }
             }
-            
+
             return available[0] || 'chunked';
         },
 
@@ -452,19 +452,19 @@
 
             try {
                 // Attempting to set quality
-                
+
                 // Open quality menu
                 const settingsButton = document.querySelector('[data-a-target="player-settings-menu"]');
                 if (settingsButton) {
                     settingsButton.click();
                     await new Promise(resolve => setTimeout(resolve, 300));
-                    
+
                     // Click quality option
                     const qualityButton = document.querySelector('[data-a-target="player-settings-quality"]');
                     if (qualityButton) {
                         qualityButton.click();
                         await new Promise(resolve => setTimeout(resolve, 300));
-                        
+
                         // Find and click target quality
                         const qualityOptions = document.querySelectorAll('button[data-a-target*="quality-option"], .tw-select-option');
                         for (const option of qualityOptions) {
@@ -473,12 +473,12 @@
                                 targetQuality.toLowerCase().includes(text.toLowerCase())) {
                                 option.click();
                                 this.currentQuality = targetQuality;
-                                
+
                                 // Cache the preference
                                 if (CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE) {
                                     QualityCache.set('preferredQuality', targetQuality);
                                 }
-                                
+
                                 log.info(`Quality set to: ${targetQuality}`);
                                 return true;
                             }
@@ -490,25 +490,25 @@
             } finally {
                 this.isChanging = false;
             }
-            
+
             return false;
         },
 
         async restoreQuality() {
             if (!CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) return;
-            
+
             const now = Date.now();
             if (now - this.lastCheck < CONFIG.QUALITY_SETTINGS.QUALITY_CHECK_INTERVAL) return;
             this.lastCheck = now;
 
             try {
                 let targetQuality = this.currentQuality;
-                
+
                 // Try to get cached preference first
                 if (CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE && !targetQuality) {
                     targetQuality = QualityCache.get('preferredQuality');
                 }
-                
+
                 // Fall back to best available
                 if (!targetQuality) {
                     targetQuality = this.getBestQuality();
@@ -737,8 +737,8 @@
                 // Handle nested ad blocks
                 if (upper.startsWith('#EXT-X-DATERANGE')) {
                     const isAdMarker = CONFIG.ADVANCED.M3U8_AD_MARKERS.some(marker =>
-                        upper.includes(marker)
-                    );
+                                                                            upper.includes(marker)
+                                                                           );
                     if (isAdMarker) {
                         inAdBlock = true;
                         adBlockDepth++;
@@ -760,8 +760,8 @@
 
                 // Check for ad markers
                 const isAdMarker = CONFIG.ADVANCED.M3U8_AD_MARKERS.some(marker =>
-                    upper.includes(marker)
-                );
+                                                                        upper.includes(marker)
+                                                                       );
 
                 if (isAdMarker) {
                     inAdBlock = true;
@@ -1181,7 +1181,7 @@ div[id*="ivs"][id*="ad"] {
                                         if (video && video.paused) {
                                             // Playback restore attempt
                                             video.play().catch(() => {});
-                                            
+
                                             // Restore quality after ad
                                             if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
                                                 setTimeout(() => {
@@ -1210,19 +1210,19 @@ div[id*="ivs"][id*="ad"] {
             }
 
             // Enhanced quality monitoring with debouncing
-            const qualityCheckFunction = CONFIG.SETTINGS.DEBOUNCED_OBSERVERS 
-                ? debounce(() => {
-                    forceSourceQuality();
-                    if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
-                        QualityManager.restoreQuality();
-                    }
-                }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY)
-                : () => {
-                    forceSourceQuality();
-                    if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
-                        QualityManager.restoreQuality();
-                    }
-                };
+            const qualityCheckFunction = CONFIG.SETTINGS.DEBOUNCED_OBSERVERS
+            ? debounce(() => {
+                forceSourceQuality();
+                if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
+                    QualityManager.restoreQuality();
+                }
+            }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY)
+            : () => {
+                forceSourceQuality();
+                if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
+                    QualityManager.restoreQuality();
+                }
+            };
 
             const qualityCheckInterval = setInterval(qualityCheckFunction, CONFIG.QUALITY_SETTINGS.QUALITY_CHECK_INTERVAL);
 
@@ -1318,20 +1318,20 @@ div[id*="ivs"][id*="ad"] {
                 const THROTTLE_INTERVAL = 2000; // 2 seconds
 
                 const bannerCheckFunction = CONFIG.SETTINGS.DEBOUNCED_OBSERVERS
-                    ? debounce(() => {
-                        const now = Date.now();
-                        if (now - lastBannerCheck >= THROTTLE_INTERVAL) {
-                            lastBannerCheck = now;
-                            removeCookieBanners(true); // Use debug mode
-                        }
-                    }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY)
-                    : () => {
-                        const now = Date.now();
-                        if (now - lastBannerCheck >= THROTTLE_INTERVAL) {
-                            lastBannerCheck = now;
-                            setTimeout(() => removeCookieBanners(true), 500); // Use debug mode
-                        }
-                    };
+                ? debounce(() => {
+                    const now = Date.now();
+                    if (now - lastBannerCheck >= THROTTLE_INTERVAL) {
+                        lastBannerCheck = now;
+                        removeCookieBanners(true); // Use debug mode
+                    }
+                }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY)
+                : () => {
+                    const now = Date.now();
+                    if (now - lastBannerCheck >= THROTTLE_INTERVAL) {
+                        lastBannerCheck = now;
+                        setTimeout(() => removeCookieBanners(true), 500); // Use debug mode
+                    }
+                };
 
                 const bannerObserver = new MutationObserver((mutations) => {
                     let shouldCheck = false;
