@@ -30,35 +30,33 @@
     'use strict';
 
     // ====== CONFIGURATION ======
+    const SETTINGS = {
+        ENABLE_AD_SERVER_BLOCKING: GM_getValue('TTV_BlockAdServers', true),
+        ENABLE_M3U8_CLEANING: GM_getValue('TTV_CleanM3U8', true),
+        ENABLE_GQL_MODIFICATION: GM_getValue('TTV_ModifyGQL', true),
+        ENABLE_DOM_CLEANUP: GM_getValue('TTV_DOMCleanup', true),
+        CONSERVATIVE_DOM_REMOVAL: GM_getValue('TTV_ConservativeDOM', true),
+        AUTO_UNMUTE: GM_getValue('TTV_AutoUnmute', true),
+        FORCE_QUALITY: GM_getValue('TTV_ForceQuality', true),
+        RESTORE_ON_AD: GM_getValue('TTV_RestoreOnAd', true),
+        HIDE_AD_PLACEHOLDERS: GM_getValue('TTV_HidePlaceholders', true),
+        PROTECT_CHAT: GM_getValue('TTV_ProtectChat', true),
+        SKIP_AGGRESSIVE_BLOCKING: GM_getValue('TTV_SkipAggressive', false),
+        ENABLE_DEBUG: GM_getValue('TTV_EnableDebug', false),
+        SMART_QUALITY_PERSISTENCE: GM_getValue('TTV_SmartQualityPersistence', true),
+        DEBOUNCED_OBSERVERS: GM_getValue('TTV_DebouncedObservers', true),
+        ENHANCED_PLAYER_CONTROLS: GM_getValue('TTV_EnhancedPlayerControls', true),
+        PERFORMANCE_MODE: GM_getValue('TTV_PerformanceMode', false),
+        QUALITY_CACHE_ENABLED: GM_getValue('TTV_QualityCacheEnabled', true),
+        AUTO_QUALITY_RESTORE: GM_getValue('TTV_AutoQualityRestore', true),
+        SMART_UNMUTE_RESPECT_MANUAL: GM_getValue('TTV_SmartUnmuteRespectManual', true),
+        BATCH_DOM_REMOVAL: GM_getValue('TTV_BatchDOMRemoval', true),
+    };
+
     const CONFIG = {
-        SCRIPT_VERSION: '32.2.0',
-        SETTINGS: {
-            // Network blocking - SELECTIVE to avoid breaking chat/auth
-            ENABLE_AD_SERVER_BLOCKING: GM_getValue('TTV_BlockAdServers', true),
-            ENABLE_M3U8_CLEANING: GM_getValue('TTV_CleanM3U8', true),
-            ENABLE_GQL_MODIFICATION: GM_getValue('TTV_ModifyGQL', true),
-            ENABLE_DOM_CLEANUP: GM_getValue('TTV_DOMCleanup', true),
-            CONSERVATIVE_DOM_REMOVAL: GM_getValue('TTV_ConservativeDOM', true),
-            AUTO_UNMUTE: GM_getValue('TTV_AutoUnmute', true),
-            FORCE_QUALITY: GM_getValue('TTV_ForceQuality', true),
-            RESTORE_ON_AD: GM_getValue('TTV_RestoreOnAd', true),
-            HIDE_AD_PLACEHOLDERS: GM_getValue('TTV_HidePlaceholders', true),
-            PROTECT_CHAT: GM_getValue('TTV_ProtectChat', true),
-            SKIP_AGGRESSIVE_BLOCKING: GM_getValue('TTV_SkipAggressive', false),
-            ENABLE_DEBUG: GM_getValue('TTV_EnableDebug', false),
-            
-            // Enhanced features from history
-            SMART_QUALITY_PERSISTENCE: GM_getValue('TTV_SmartQualityPersistence', true),
-            DEBOUNCED_OBSERVERS: GM_getValue('TTV_DebouncedObservers', true),
-            ENHANCED_PLAYER_CONTROLS: GM_getValue('TTV_EnhancedPlayerControls', true),
-            PERFORMANCE_MODE: GM_getValue('TTV_PerformanceMode', false),
-            QUALITY_CACHE_ENABLED: GM_getValue('TTV_QualityCacheEnabled', true),
-            AUTO_QUALITY_RESTORE: GM_getValue('TTV_AutoQualityRestore', true),
-            SMART_UNMUTE_RESPECT_MANUAL: GM_getValue('TTV_SmartUnmuteRespectManual', true),
-            BATCH_DOM_REMOVAL: GM_getValue('TTV_BatchDOMRemoval', true),
-        },
+        SCRIPT_VERSION: '32.2.1',
+        SETTINGS,
         ADVANCED: {
-            // More precise patterns - only block ACTUAL ad endpoints
             AD_SERVER_DOMAINS: [
                 'edge.ads.twitch.tv',
                 'ads.ttvnw.net',
@@ -77,6 +75,15 @@
                 'scorecardresearch.com',
                 'quantserve.com',
                 'newrelic.com',
+                'sq-tungsten-ts.amazon-adsystem.com',
+                'aax.amazon-adsystem.com',
+                'api.sprig.com',
+                'sprig.com',
+                'segment.com',
+                'mixpanel.com',
+                'hotjar.com',
+                'fullstory.com',
+                'clarity.ms',
             ],
             // Whitelist patterns - NEVER block these
             CHAT_PROTECTION_PATTERNS: [
@@ -85,7 +92,7 @@
                 'chat.twitch.tv',
                 'tmi.twitch.tv',
                 'usher.ttvnw.net/api/channel/hls',
-                '/gql POST', // Don't block GQL, only modify
+                '/gql POST',
             ],
             // M3U8 ad markers
             M3U8_AD_MARKERS: [
@@ -95,6 +102,10 @@
                 'SCTE35',
                 'EXT-X-TWITCH-AD',
                 'STREAM-DISPLAY-AD',
+                'EXT-X-AD-SECTION',
+                'EXT-X-SPLICEPOINT-SCTE35',
+                'EXT-X-SEGMENT',
+                'EXT-X-TARGETDURATION',
             ],
             // Precise DOM selectors
             AD_DOM_SELECTORS: [
@@ -103,21 +114,32 @@
                 '.ad-interrupt-screen',
                 '.commercial-break-in-progress',
                 '.player-ad-notice',
-                // Stream display ads
                 '.stream-display-ad__wrapper',
                 '.stream-display-ad__container',
                 '.stream-display-ad',
-                // IVS ads
                 '.ivs-ad-container',
                 '.ivs-ad-overlay',
                 '.ivs-ad-container__overlay',
-                // Video player ads
+                '.ivs-ad-container__pause-button',
+                '.ivs-ad-slate',
+                '.ivs-ad-title-card',
+                '.ivs-ad-skip-button',
+                '.ivs-ad-linear',
+                '.ivs-linear-ad',
                 '[data-a-target="player-ad-label"]',
                 '.player-ad-overlay',
                 '.player-ad-overlay--linear',
                 '.player-ad-ui',
                 '.video-chat__containercommercial-break',
-                // Cookie/GDPR consent banners
+                '[class*="ivs-ad"]',
+                '[id*="ivs-ad"]',
+                '[class*="amazon-ivs"]',
+                '[class*="amzn-ivs"]',
+                '[data-a-target="preroll-ad-banner"]',
+                '.preroll-ad-container',
+                '[role="dialog"][aria-label*="ad" i]',
+                '[aria-label*="advertisement" i]',
+                '[aria-label*="commercial" i]',
                 '.consent-banner',
                 '.gdpr-consent-banner',
                 '[data-a-target="consent-banner-accept"]',
@@ -125,12 +147,7 @@
                 '.cookie-banner',
                 '#consent-banner',
                 '.gdpr-banner',
-                // Popups and overlays
-                '[role="dialog"][aria-label*="ad" i]',
-                '[aria-label*="advertisement" i]',
-                '[aria-label*="commercial" i]',
             ],
-            // Cookie/GDPR consent selectors
             COOKIE_CONSENT_SELECTORS: [
                 '.consent-banner',
                 '.gdpr-consent-banner',
@@ -150,17 +167,16 @@
                 '.gdpr-consent-modal',
             ],
         },
-        // Enhanced features configuration
         QUALITY_SETTINGS: {
             PREFERRED_QUALITIES: ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'],
-            QUALITY_CHECK_INTERVAL: CONFIG.SETTINGS.PERFORMANCE_MODE ? 15000 : 8000,
+            QUALITY_CHECK_INTERVAL: SETTINGS.PERFORMANCE_MODE ? 5000 : 5000,
             QUALITY_RESTORE_DELAY: 2000,
-            CACHE_EXPIRY: 3600000, // 1 hour
+            CACHE_EXPIRY: 3600000,
         },
         PERFORMANCE: {
-            DEBOUNCE_DELAY: CONFIG.SETTINGS.PERFORMANCE_MODE ? 500 : 200,
+            DEBOUNCE_DELAY: SETTINGS.PERFORMANCE_MODE ? 500 : 200,
             BATCH_SIZE: 10,
-            OBSERVER_THROTTLE: CONFIG.SETTINGS.PERFORMANCE_MODE ? 1000 : 300,
+            OBSERVER_THROTTLE: SETTINGS.PERFORMANCE_MODE ? 1000 : 300,
         },
     };
 
@@ -201,17 +217,13 @@
     const shouldSkipBlocking = (url) => {
         if (!url) return false;
 
-        // Skip if it's chat/auth
         if (isChatOrAuthUrl(url)) {
             return true;
         }
 
-        // Skip if user disabled aggressive blocking
         if (CONFIG.SETTINGS.SKIP_AGGRESSIVE_BLOCKING) {
-            // Only block very specific ad patterns
             const urlLower = url.toLowerCase();
             if (urlLower.includes('ad') && !urlLower.includes('user') && !urlLower.includes('chat')) {
-                // Additional check to avoid false positives
                 if (urlLower.includes('streamdisplayad') || urlLower.includes('commercial')) {
                     return false;
                 }
@@ -264,12 +276,14 @@
         },
         clear: () => {
             try {
-                const keys = GM_listValues?.() || [];
-                keys.forEach(key => {
-                    if (key.startsWith('TTV_QualityCache_')) {
-                        GM_deleteValue(key);
-                    }
-                });
+                if (typeof GM_listValues === 'function') {
+                    const keys = GM_listValues() || [];
+                    keys.forEach(key => {
+                        if (key.startsWith('TTV_QualityCache_')) {
+                            GM_deleteValue(key);
+                        }
+                    });
+                }
             } catch (e) {
                 log.debug('Cache clear error:', e);
             }
@@ -848,66 +862,40 @@
             let changed = false;
             const vars = { ...payload.variables };
 
-            // Force embed player to avoid ads
-            if (vars.playerType !== 'embed') {
-                vars.playerType = 'embed';
-                changed = true;
-                // Forcing playerType to embed
-            }
+            // CONSERVATIVE: Only modify playerType if it's causing issues
+            // DO NOT modify playerType, platform, or other critical parameters
+            // to avoid integrity check failures
 
-            // Ensure web platform
-            if (vars.platform !== 'web') {
-                vars.platform = 'web';
-                changed = true;
-                // Forcing platform to web
-            }
-
-            // AGGRESSIVE: Force source quality (chunked)
-            if (vars.videoQualityPreference !== 'chunked') {
+            // Optional: Force source quality only if user explicitly enabled it
+            // Commented out to avoid breaking Twitch integrity checks
+            /*
+            if (vars.videoQualityPreference && vars.videoQualityPreference !== 'chunked') {
                 vars.videoQualityPreference = 'chunked';
                 changed = true;
-                // Forcing video quality to chunked (source)
             }
+            */
 
-            // Add additional quality preferences for more reliable source setting
-            if (!vars.videoQualityDefault || vars.videoQualityDefault !== 'chunked') {
-                vars.videoQualityDefault = 'chunked';
-                changed = true;
-            }
-
-            if (!vars.videoPriorities || !Array.isArray(vars.videoPriorities) || !vars.videoPriorities.includes('chunked')) {
-                vars.videoPriorities = ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'];
-                changed = true;
-            }
-
-            // Add supported codecs to avoid IVS ads
+            // Add supported codecs to avoid IVS ads - this is safe
             if (!vars.supportedCodecs || !Array.isArray(vars.supportedCodecs)) {
                 vars.supportedCodecs = ['av01', 'avc1', 'vp9', 'hev1', 'hvc1'];
                 changed = true;
-                // Setting supported codecs
             }
 
-            // Add additional parameters for better ad blocking
-            if (vars.realtime !== false) {
-                vars.realtime = false;
-                changed = true;
-            }
+            // DISABLED: These parameters often cause integrity check failures
+            // if (vars.realtime !== false) {
+            //     vars.realtime = false;
+            //     changed = true;
+            // }
 
-            if (vars.useReruns !== false) {
-                vars.useReruns = false;
-                changed = true;
-            }
+            // if (vars.useReruns !== false) {
+            //     vars.useReruns = false;
+            //     changed = true;
+            // }
 
-            if (vars.allowSource !== true) {
-                vars.allowSource = true;
-                changed = true;
-            }
-
-            // Ensure we get the highest quality
-            if (typeof vars.lowLatency !== 'boolean') {
-                vars.lowLatency = false;
-                changed = true;
-            }
+            // if (vars.allowSource !== true) {
+            //     vars.allowSource = true;
+            //     changed = true;
+            // }
 
             return { changed, data: { ...payload, variables: vars } };
         } catch (error) {
@@ -970,6 +958,39 @@ video {
     pointer-events: auto !important;
     display: block !important;
 }
+
+/* IVS-specific ad blocking */
+[class*="ivs-ad"], [id*="ivs-ad"] {
+    display: none !important;
+    visibility: hidden !important;
+}
+
+[class*="amazon-ivs"], [class*="amzn-ivs"] {
+    display: none !important;
+}
+
+/* Additional IVS elements */
+.ivs-ad-container,
+.ivs-ad-overlay,
+.ivs-ad-slate,
+.ivs-ad-title-card,
+.ivs-ad-skip-button,
+.ivs-ad-linear,
+.ivs-linear-ad {
+    display: none !important;
+    opacity: 0 !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    width: 0 !important;
+    position: absolute !important;
+    left: -9999px !important;
+}
+
+/* Block IVS ad overlays */
+div[class*="ivs"][class*="ad"],
+div[id*="ivs"][id*="ad"] {
+    display: none !important;
+}
             `;
 
             GM_addStyle(css1);
@@ -980,8 +1001,8 @@ video {
         }
     };
 
-    // ====== COOKIE CONSENT REMOVAL - AGGRESSIVE ======
-    const removeCookieBanners = () => {
+    // ====== COOKIE CONSENT REMOVAL - OPTIMIZED ======
+    const removeCookieBanners = (isDebugCheck = false) => {
         try {
             const selectors = CONFIG.ADVANCED.COOKIE_CONSENT_SELECTORS;
             let removedCount = 0;
@@ -1029,8 +1050,8 @@ video {
                 }
             });
 
-            if (removedCount > 0) {
-                log.info(`Removed ${removedCount} cookie/consent banner elements`);
+            if (removedCount > 0 && !isDebugCheck) {
+                log.debug(`Removed ${removedCount} cookie/consent banner elements`);
             }
         } catch (e) {
             log.error('Cookie banner removal error:', e);
@@ -1238,30 +1259,7 @@ video {
     const initialize = () => {
         try {
             log.info(`Starting Twitch Adblock Ultimate v${CONFIG.SCRIPT_VERSION}`);
-            if (isDebug) {
-                console.info(`\n${'='.repeat(60)}`);
-                console.info(`${LOG_PREFIX} IMPROVED VERSION ${CONFIG.SCRIPT_VERSION}`);
-                console.info(`${'='.repeat(60)}`);
-                console.info(`${LOG_PREFIX} ✅ Chat protection: ENABLED`);
-                console.info(`${LOG_PREFIX} ✅ Aggressive ad blocking: ENABLED`);
-                console.info(`${LOG_PREFIX} ✅ Cookie banner removal: ENABLED`);
-                console.info(`${LOG_PREFIX} ✅ M3U8 cleaning: ${CONFIG.SETTINGS.ENABLE_M3U8_CLEANING ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ GQL modification: ${CONFIG.SETTINGS.ENABLE_GQL_MODIFICATION ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Auto-unmute: ${CONFIG.SETTINGS.AUTO_UNMUTE ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ DOM cleanup: ${CONFIG.SETTINGS.ENABLE_DOM_CLEANUP ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Force Source quality: ${CONFIG.SETTINGS.FORCE_QUALITY ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Smart quality persistence: ${CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Debounced observers: ${CONFIG.SETTINGS.DEBOUNCED_OBSERVERS ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Enhanced player controls: ${CONFIG.SETTINGS.ENHANCED_PLAYER_CONTROLS ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Auto quality restore: ${CONFIG.SETTINGS.AUTO_QUALITY_RESTORE ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Smart unmute (respect manual): ${CONFIG.SETTINGS.SMART_UNMUTE_RESPECT_MANUAL ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Batch DOM removal: ${CONFIG.SETTINGS.BATCH_DOM_REMOVAL ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Quality caching: ${CONFIG.SETTINGS.QUALITY_CACHE_ENABLED ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${LOG_PREFIX} ✅ Performance mode: ${CONFIG.SETTINGS.PERFORMANCE_MODE ? 'ENABLED' : 'DISABLED'}`);
-                console.info(`${'='.repeat(60)}\n`);
-            }
 
-            // Verify critical APIs are available
             if (typeof unsafeWindow !== 'object') {
                 throw new Error('unsafeWindow not available');
             }
@@ -1303,24 +1301,36 @@ video {
             // Remove cookie banners immediately
             removeCookieBanners();
 
-            // Setup periodic cookie banner removal (every 2 seconds for first 30 seconds)
+            // Setup periodic cookie banner removal (every 10 seconds for first 60 seconds)
             let bannerCheckCount = 0;
             const bannerCheckInterval = setInterval(() => {
-                removeCookieBanners();
+                removeCookieBanners(true); // Use debug mode to reduce log spam
                 bannerCheckCount++;
-                if (bannerCheckCount >= 15) {
+                if (bannerCheckCount >= 6) { // 6 times * 10 seconds = 60 seconds total
                     clearInterval(bannerCheckInterval);
                 }
-            }, 2000);
+            }, 10000); // Check every 10 seconds instead of 2
 
             // Setup enhanced MutationObserver for dynamic cookie banners
             if (typeof MutationObserver !== 'undefined') {
+                // Throttle to prevent excessive calls
+                let lastBannerCheck = 0;
+                const THROTTLE_INTERVAL = 2000; // 2 seconds
+
                 const bannerCheckFunction = CONFIG.SETTINGS.DEBOUNCED_OBSERVERS
                     ? debounce(() => {
-                        removeCookieBanners();
+                        const now = Date.now();
+                        if (now - lastBannerCheck >= THROTTLE_INTERVAL) {
+                            lastBannerCheck = now;
+                            removeCookieBanners(true); // Use debug mode
+                        }
                     }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY)
                     : () => {
-                        removeCookieBanners();
+                        const now = Date.now();
+                        if (now - lastBannerCheck >= THROTTLE_INTERVAL) {
+                            lastBannerCheck = now;
+                            setTimeout(() => removeCookieBanners(true), 500); // Use debug mode
+                        }
                     };
 
                 const bannerObserver = new MutationObserver((mutations) => {
@@ -1332,14 +1342,18 @@ video {
                                     const text = node.textContent || '';
                                     const className = node.className || '';
                                     const id = node.id || '';
-                                    
+
+                                    // Safe string checks
+                                    const classNameStr = typeof className === 'string' ? className : '';
+                                    const idStr = typeof id === 'string' ? id : '';
+
                                     if (text.toLowerCase().includes('cookie') ||
                                         text.toLowerCase().includes('consent') ||
                                         text.toLowerCase().includes('gdpr') ||
-                                        className.toLowerCase().includes('cookie') ||
-                                        className.toLowerCase().includes('consent') ||
-                                        id.toLowerCase().includes('cookie') ||
-                                        id.toLowerCase().includes('consent')) {
+                                        classNameStr.toLowerCase().includes('cookie') ||
+                                        classNameStr.toLowerCase().includes('consent') ||
+                                        idStr.toLowerCase().includes('cookie') ||
+                                        idStr.toLowerCase().includes('consent')) {
                                         shouldCheck = true;
                                         break;
                                     }
@@ -1348,15 +1362,84 @@ video {
                         }
                     });
                     if (shouldCheck) {
-                        if (CONFIG.SETTINGS.DEBOUNCED_OBSERVERS) {
-                            bannerCheckFunction();
-                        } else {
-                            setTimeout(removeCookieBanners, 500);
-                        }
+                        bannerCheckFunction();
                     }
                 });
 
                 bannerObserver.observe(document.body || document.documentElement, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ['class', 'id']
+                });
+            }
+
+            // Setup IVS ad observer for dynamic elements
+            if (typeof MutationObserver !== 'undefined') {
+                let lastIVSCheck = 0;
+                const IVS_THROTTLE_INTERVAL = 1000; // 1 second
+
+                const ivsCheckFunction = debounce(() => {
+                    const now = Date.now();
+                    if (now - lastIVSCheck >= IVS_THROTTLE_INTERVAL) {
+                        lastIVSCheck = now;
+                        // Remove IVS ad elements
+                        CONFIG.ADVANCED.AD_DOM_SELECTORS.forEach(selector => {
+                            try {
+                                const elements = document.querySelectorAll(selector);
+                                elements.forEach(element => {
+                                    if (element && element.parentNode) {
+                                        if (CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
+                                            BatchDOMRemover.add(element);
+                                        } else {
+                                            element.parentNode.removeChild(element);
+                                        }
+                                    }
+                                });
+                            } catch (e) {
+                                // Ignore selector errors
+                            }
+                        });
+                    }
+                }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY);
+
+                const ivsObserver = new MutationObserver((mutations) => {
+                    let shouldCheck = false;
+                    mutations.forEach((mutation) => {
+                        if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
+                            for (let node of mutation.addedNodes) {
+                                if (node.nodeType === 1) { // ELEMENT_NODE
+                                    const className = node.className || '';
+                                    const id = node.id || '';
+                                    const classNameStr = typeof className === 'string' ? className : '';
+                                    const idStr = typeof id === 'string' ? id : '';
+
+                                    if (classNameStr.toLowerCase().includes('ivs') ||
+                                        classNameStr.toLowerCase().includes('amazon') ||
+                                        idStr.toLowerCase().includes('ivs') ||
+                                        idStr.toLowerCase().includes('amazon')) {
+                                        shouldCheck = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (mutation.type === 'attributes' && (mutation.attributeName === 'class' || mutation.attributeName === 'id')) {
+                            const attrValue = mutation.target[mutation.attributeName] || '';
+                            if (typeof attrValue === 'string' &&
+                                (attrValue.toLowerCase().includes('ivs') ||
+                                 attrValue.toLowerCase().includes('amazon') ||
+                                 attrValue.toLowerCase().includes('ad'))) {
+                                shouldCheck = true;
+                            }
+                        }
+                    });
+                    if (shouldCheck) {
+                        ivsCheckFunction();
+                    }
+                });
+
+                ivsObserver.observe(document.body || document.documentElement, {
                     childList: true,
                     subtree: true,
                     attributes: true,
@@ -1380,12 +1463,6 @@ video {
                     log.warn('Player monitor retry limit reached');
                 }
             }, 1000);
-
-            log.info('✓ Initialization complete');
-            if (isDebug) {
-                console.info(`${LOG_PREFIX} Ready! Enjoy ad-free Twitch with enhanced features and working chat!\n`);
-                console.info(`${LOG_PREFIX} 🚀 Enhanced features: Smart quality persistence, performance optimization, and intelligent controls activated.\n`);
-            }
         } catch (error) {
             log.error('✗ Initialization failed:', error);
             if (isDebug) {
