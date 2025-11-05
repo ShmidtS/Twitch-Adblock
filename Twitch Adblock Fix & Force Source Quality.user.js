@@ -309,7 +309,7 @@
             video.addEventListener('mute', handleMuteChange, { passive: true });
             video.addEventListener('unmute', handleMuteChange, { passive: true });
 
-            log.debug('Volume tracker initialized');
+            // Volume tracker initialized
         },
 
         shouldUnmute() {
@@ -410,7 +410,7 @@
                 });
 
                 this.availableQualities = qualities;
-                log.debug('Detected qualities:', qualities);
+                // Detected qualities available
                 return qualities;
             } catch (e) {
                 log.debug('Quality detection error:', e);
@@ -437,7 +437,7 @@
             this.isChanging = true;
 
             try {
-                log.debug(`Attempting to set quality to: ${targetQuality}`);
+                // Attempting to set quality
                 
                 // Open quality menu
                 const settingsButton = document.querySelector('[data-a-target="player-settings-menu"]');
@@ -519,7 +519,7 @@
         try {
             // Skip blocking for chat/auth/protected endpoints
             if (shouldSkipBlocking(requestUrl)) {
-                log.debug('Allowing (protected):', requestUrl);
+                // Allowing protected request
                 return originalFetch(input, init);
             }
 
@@ -534,7 +534,7 @@
                 requestUrl.includes('.m3u8') &&
                 requestUrl.includes('usher.ttvnw.net')) {
 
-                log.debug('Cleaning M3U8 manifest:', requestUrl);
+                // Cleaning M3U8 manifest
                 const response = await originalFetch(input, init);
 
                 if (response && response.ok) {
@@ -575,7 +575,7 @@
                         const modified = modifyGQLRequest(parsed);
 
                         if (modified.changed) {
-                            log.debug('Modified GQL request');
+                            // Modified GQL request
                             const newInit = { ...(init || {}), body: JSON.stringify(modified.data) };
                             return originalFetch(input, newInit);
                         }
@@ -684,7 +684,7 @@
 
     const WebSocketOverride = function(url, protocols) {
         // ALWAYS allow WebSocket connections - critical for chat
-        log.debug('WebSocket (allowed):', url);
+        // WebSocket connection allowed
         try {
             return new originalWebSocket(url, protocols);
         } catch (error) {
@@ -852,21 +852,21 @@
             if (vars.playerType !== 'embed') {
                 vars.playerType = 'embed';
                 changed = true;
-                log.debug('Forcing playerType to embed');
+                // Forcing playerType to embed
             }
 
             // Ensure web platform
             if (vars.platform !== 'web') {
                 vars.platform = 'web';
                 changed = true;
-                log.debug('Forcing platform to web');
+                // Forcing platform to web
             }
 
             // AGGRESSIVE: Force source quality (chunked)
             if (vars.videoQualityPreference !== 'chunked') {
                 vars.videoQualityPreference = 'chunked';
                 changed = true;
-                log.debug('Forcing video quality to chunked (source)');
+                // Forcing video quality to chunked (source)
             }
 
             // Add additional quality preferences for more reliable source setting
@@ -884,7 +884,7 @@
             if (!vars.supportedCodecs || !Array.isArray(vars.supportedCodecs)) {
                 vars.supportedCodecs = ['av01', 'avc1', 'vp9', 'hev1', 'hvc1'];
                 changed = true;
-                log.debug('Setting supported codecs:', vars.supportedCodecs);
+                // Setting supported codecs
             }
 
             // Add additional parameters for better ad blocking
@@ -974,7 +974,7 @@ video {
 
             GM_addStyle(css1);
             GM_addStyle(css2);
-            log.debug('CSS injected successfully');
+            // CSS injected successfully
         } catch (e) {
             log.error('CSS injection failed:', e);
         }
@@ -1000,7 +1000,7 @@ video {
                         }
                     });
                 } catch (e) {
-                    log.debug('Selector error:', selector, e);
+                    // Selector error
                 }
             });
 
@@ -1060,7 +1060,7 @@ video {
                 for (const selector of qualitySelectors) {
                     const button = document.querySelector(selector);
                     if (button) {
-                        log.debug('Found quality menu button, attempting to click');
+                        // Found quality menu button, attempting to click
                         button.click();
 
                         // Wait a bit then look for chunked/source option
@@ -1093,7 +1093,7 @@ video {
                 }
             }
         } catch (e) {
-            log.debug('Quality force error:', e);
+            // Quality force error
         }
     };
 
@@ -1102,11 +1102,11 @@ video {
         try {
             const video = document.querySelector('video');
             if (!video) {
-                log.debug('No video element found, will retry later');
+                // No video element found, will retry later
                 return;
             }
 
-            log.debug('Video player found, setting up enhanced monitor');
+            // Video player found, setting up enhanced monitor
 
             // Initialize volume tracker for smart unmute
             if (CONFIG.SETTINGS.SMART_UNMUTE_RESPECT_MANUAL) {
@@ -1150,7 +1150,7 @@ video {
                 const onStalled = () => {
                     try {
                         if (!adDetected) {
-                            log.debug('Possible ad detected, attempting to restore playback');
+                            // Possible ad detected, attempting to restore playback
                             adDetected = true;
                             retryCount++;
 
@@ -1158,7 +1158,7 @@ video {
                                 setTimeout(() => {
                                     try {
                                         if (video && video.paused) {
-                                            log.debug(`Playback restore attempt ${retryCount}`);
+                                            // Playback restore attempt
                                             video.play().catch(() => {});
                                             
                                             // Restore quality after ad
@@ -1213,7 +1213,7 @@ video {
                 const streamChangeObserver = new MutationObserver(debounce((mutations) => {
                     for (const mutation of mutations) {
                         if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
-                            log.debug('Stream change detected, restoring quality');
+                            // Stream change detected, restoring quality
                             setTimeout(() => {
                                 QualityManager.restoreQuality();
                             }, 2000);
@@ -1237,29 +1237,29 @@ video {
     // ====== INITIALIZATION ======
     const initialize = () => {
         try {
-            log.info('Starting Twitch Adblock Ultimate v' + CONFIG.SCRIPT_VERSION);
-            console.info(`\n${'='.repeat(60)}`);
-            console.info(`${LOG_PREFIX} IMPROVED VERSION ${CONFIG.SCRIPT_VERSION}`);
-            console.info(`${'='.repeat(60)}`);
-            console.info(`${LOG_PREFIX} ✅ Chat protection: ENABLED`);
-            console.info(`${LOG_PREFIX} ✅ Aggressive ad blocking: ENABLED`);
-            console.info(`${LOG_PREFIX} ✅ Cookie banner removal: ENABLED`);
-            console.info(`${LOG_PREFIX} ✅ M3U8 cleaning: ${CONFIG.SETTINGS.ENABLE_M3U8_CLEANING ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ GQL modification: ${CONFIG.SETTINGS.ENABLE_GQL_MODIFICATION ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Auto-unmute: ${CONFIG.SETTINGS.AUTO_UNMUTE ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ DOM cleanup: ${CONFIG.SETTINGS.ENABLE_DOM_CLEANUP ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Force Source quality: ${CONFIG.SETTINGS.FORCE_QUALITY ? 'ENABLED' : 'DISABLED'}`);
-            
-            // Enhanced features
-            console.info(`${LOG_PREFIX} ✅ Smart quality persistence: ${CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Debounced observers: ${CONFIG.SETTINGS.DEBOUNCED_OBSERVERS ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Enhanced player controls: ${CONFIG.SETTINGS.ENHANCED_PLAYER_CONTROLS ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Auto quality restore: ${CONFIG.SETTINGS.AUTO_QUALITY_RESTORE ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Smart unmute (respect manual): ${CONFIG.SETTINGS.SMART_UNMUTE_RESPECT_MANUAL ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Batch DOM removal: ${CONFIG.SETTINGS.BATCH_DOM_REMOVAL ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Quality caching: ${CONFIG.SETTINGS.QUALITY_CACHE_ENABLED ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Performance mode: ${CONFIG.SETTINGS.PERFORMANCE_MODE ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${'='.repeat(60)}\n`);
+            log.info(`Starting Twitch Adblock Ultimate v${CONFIG.SCRIPT_VERSION}`);
+            if (isDebug) {
+                console.info(`\n${'='.repeat(60)}`);
+                console.info(`${LOG_PREFIX} IMPROVED VERSION ${CONFIG.SCRIPT_VERSION}`);
+                console.info(`${'='.repeat(60)}`);
+                console.info(`${LOG_PREFIX} ✅ Chat protection: ENABLED`);
+                console.info(`${LOG_PREFIX} ✅ Aggressive ad blocking: ENABLED`);
+                console.info(`${LOG_PREFIX} ✅ Cookie banner removal: ENABLED`);
+                console.info(`${LOG_PREFIX} ✅ M3U8 cleaning: ${CONFIG.SETTINGS.ENABLE_M3U8_CLEANING ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ GQL modification: ${CONFIG.SETTINGS.ENABLE_GQL_MODIFICATION ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Auto-unmute: ${CONFIG.SETTINGS.AUTO_UNMUTE ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ DOM cleanup: ${CONFIG.SETTINGS.ENABLE_DOM_CLEANUP ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Force Source quality: ${CONFIG.SETTINGS.FORCE_QUALITY ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Smart quality persistence: ${CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Debounced observers: ${CONFIG.SETTINGS.DEBOUNCED_OBSERVERS ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Enhanced player controls: ${CONFIG.SETTINGS.ENHANCED_PLAYER_CONTROLS ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Auto quality restore: ${CONFIG.SETTINGS.AUTO_QUALITY_RESTORE ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Smart unmute (respect manual): ${CONFIG.SETTINGS.SMART_UNMUTE_RESPECT_MANUAL ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Batch DOM removal: ${CONFIG.SETTINGS.BATCH_DOM_REMOVAL ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Quality caching: ${CONFIG.SETTINGS.QUALITY_CACHE_ENABLED ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Performance mode: ${CONFIG.SETTINGS.PERFORMANCE_MODE ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${'='.repeat(60)}\n`);
+            }
 
             // Verify critical APIs are available
             if (typeof unsafeWindow !== 'object') {
@@ -1278,21 +1278,21 @@ video {
             // Install network overrides
             try {
                 unsafeWindow.fetch = fetchOverride;
-                log.debug('✓ Fetch override installed');
+                // Fetch override installed
             } catch (e) {
                 log.error('✗ Fetch override failed:', e);
             }
 
             try {
                 unsafeWindow.XMLHttpRequest = XHROverride;
-                log.debug('✓ XHR override installed');
+                // XHR override installed
             } catch (e) {
                 log.error('✗ XHR override failed:', e);
             }
 
             try {
                 unsafeWindow.WebSocket = WebSocketOverride;
-                log.debug('✓ WebSocket override installed (chat-safe)');
+                // WebSocket override installed (chat-safe)
             } catch (e) {
                 log.error('✗ WebSocket override failed:', e);
             }
@@ -1381,12 +1381,16 @@ video {
                 }
             }, 1000);
 
-            log.info('✓ Enhanced initialization complete');
-            console.info(`${LOG_PREFIX} Ready! Enjoy ad-free Twitch with enhanced features and working chat!\n`);
-            console.info(`${LOG_PREFIX} 🚀 Enhanced features: Smart quality persistence, performance optimization, and intelligent controls activated.\n`);
+            log.info('✓ Initialization complete');
+            if (isDebug) {
+                console.info(`${LOG_PREFIX} Ready! Enjoy ad-free Twitch with enhanced features and working chat!\n`);
+                console.info(`${LOG_PREFIX} 🚀 Enhanced features: Smart quality persistence, performance optimization, and intelligent controls activated.\n`);
+            }
         } catch (error) {
-            log.error('✗ Enhanced initialization failed:', error);
-            console.error(`${LOG_PREFIX} Failed to initialize enhanced features!`, error);
+            log.error('✗ Initialization failed:', error);
+            if (isDebug) {
+                console.error(`${LOG_PREFIX} Failed to initialize enhanced features!`, error);
+            }
         }
     };
 
@@ -1409,7 +1413,7 @@ video {
                 }
             }
 
-            log.debug('Enhanced cleanup completed');
+            // Enhanced cleanup completed
         } catch (e) {
             log.debug('Cleanup error:', e);
         }
