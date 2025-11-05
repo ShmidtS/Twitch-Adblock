@@ -46,6 +46,16 @@
             PROTECT_CHAT: GM_getValue('TTV_ProtectChat', true),
             SKIP_AGGRESSIVE_BLOCKING: GM_getValue('TTV_SkipAggressive', false),
             ENABLE_DEBUG: GM_getValue('TTV_EnableDebug', false),
+            
+            // Enhanced features from history
+            SMART_QUALITY_PERSISTENCE: GM_getValue('TTV_SmartQualityPersistence', true),
+            DEBOUNCED_OBSERVERS: GM_getValue('TTV_DebouncedObservers', true),
+            ENHANCED_PLAYER_CONTROLS: GM_getValue('TTV_EnhancedPlayerControls', true),
+            PERFORMANCE_MODE: GM_getValue('TTV_PerformanceMode', false),
+            QUALITY_CACHE_ENABLED: GM_getValue('TTV_QualityCacheEnabled', true),
+            AUTO_QUALITY_RESTORE: GM_getValue('TTV_AutoQualityRestore', true),
+            SMART_UNMUTE_RESPECT_MANUAL: GM_getValue('TTV_SmartUnmuteRespectManual', true),
+            BATCH_DOM_REMOVAL: GM_getValue('TTV_BatchDOMRemoval', true),
         },
         ADVANCED: {
             // More precise patterns - only block ACTUAL ad endpoints
@@ -140,6 +150,18 @@
                 '.gdpr-consent-modal',
             ],
         },
+        // Enhanced features configuration
+        QUALITY_SETTINGS: {
+            PREFERRED_QUALITIES: ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'],
+            QUALITY_CHECK_INTERVAL: CONFIG.SETTINGS.PERFORMANCE_MODE ? 15000 : 8000,
+            QUALITY_RESTORE_DELAY: 2000,
+            CACHE_EXPIRY: 3600000, // 1 hour
+        },
+        PERFORMANCE: {
+            DEBOUNCE_DELAY: CONFIG.SETTINGS.PERFORMANCE_MODE ? 500 : 200,
+            BATCH_SIZE: 10,
+            OBSERVER_THROTTLE: CONFIG.SETTINGS.PERFORMANCE_MODE ? 1000 : 300,
+        },
     };
 
     // ====== LOGGING ======
@@ -200,6 +222,293 @@
         return false;
     };
 
+    // ====== ENHANCED UTILITIES ======
+    // Debounce utility for performance optimization
+    const debounce = (func, wait) => {
+        let timeout;
+        return function executedFunction(...args) {
+            const later = () => {
+                clearTimeout(timeout);
+                func(...args);
+            };
+            clearTimeout(timeout);
+            timeout = setTimeout(later, wait);
+        };
+    };
+
+    // Quality cache for persistence across sessions
+    const QualityCache = {
+        get: (key) => {
+            if (!CONFIG.SETTINGS.QUALITY_CACHE_ENABLED) return null;
+            try {
+                const cached = GM_getValue(`TTV_QualityCache_${key}`, null);
+                if (cached && cached.timestamp && Date.now() - cached.timestamp < CONFIG.QUALITY_SETTINGS.CACHE_EXPIRY) {
+                    return cached.value;
+                }
+                return null;
+            } catch (e) {
+                log.debug('Cache get error:', e);
+                return null;
+            }
+        },
+        set: (key, value) => {
+            if (!CONFIG.SETTINGS.QUALITY_CACHE_ENABLED) return;
+            try {
+                GM_setValue(`TTV_QualityCache_${key}`, {
+                    value,
+                    timestamp: Date.now()
+                });
+            } catch (e) {
+                log.debug('Cache set error:', e);
+            }
+        },
+        clear: () => {
+            try {
+                const keys = GM_listValues?.() || [];
+                keys.forEach(key => {
+                    if (key.startsWith('TTV_QualityCache_')) {
+                        GM_deleteValue(key);
+                    }
+                });
+            } catch (e) {
+                log.debug('Cache clear error:', e);
+            }
+        }
+    };
+
+    // Smart volume tracking for manual mute respect
+    const VolumeTracker = {
+        lastVolume: 0.5,
+        manuallyMuted: false,
+        initialized: false,
+
+        init(video) {
+            if (this.initialized || !video) return;
+            
+            this.lastVolume = video.volume || 0.5;
+            this.manuallyMuted = video.muted || false;
+            this.initialized = true;
+
+            // Track manual volume changes
+            const handleVolumeChange = () => {
+                if (!video.muted) {
+                    this.lastVolume = video.volume;
+                    this.manuallyMuted = false;
+                }
+            };
+
+            const handleMuteChange = () => {
+                if (video.muted) {
+                    this.manuallyMuted = true;
+                } else {
+                    this.manuallyMuted = false;
+                }
+            };
+
+            video.addEventListener('volumechange', handleVolumeChange, { passive: true });
+            video.addEventListener('mute', handleMuteChange, { passive: true });
+            video.addEventListener('unmute', handleMuteChange, { passive: true });
+
+            // Volume tracker initialized
+        },
+
+        shouldUnmute() {
+            return !CONFIG.SETTINGS.SMART_UNMUTE_RESPECT_MANUAL || !this.manuallyMuted;
+        },
+
+        restoreVolume(video) {
+            if (!video || !this.initialized) return;
+            
+            if (!this.manuallyMuted) {
+                video.volume = Math.max(this.lastVolume, 0.3);
+                video.muted = false;
+            }
+        }
+    };
+
+    // Batch DOM removal for performance
+    const BatchDOMRemover = {
+        queue: [],
+        processing: false,
+
+        add(element) {
+            if (!CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
+                this.removeNow(element);
+                return;
+            }
+
+            this.queue.push(element);
+            this.scheduleProcess();
+        },
+
+        removeNow(element) {
+            try {
+                if (element && element.parentNode) {
+                    element.parentNode.removeChild(element);
+                }
+            } catch (e) {
+                log.debug('Individual remove error:', e);
+            }
+        },
+
+        scheduleProcess: debounce(() => {
+            this.process();
+        }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY),
+
+        process() {
+            if (this.processing || this.queue.length === 0) return;
+            
+            this.processing = true;
+            const batch = this.queue.splice(0, CONFIG.PERFORMANCE.BATCH_SIZE);
+            
+            requestAnimationFrame(() => {
+                batch.forEach(element => {
+                    try {
+                        if (element && element.parentNode) {
+                            element.parentNode.removeChild(element);
+                        }
+                    } catch (e) {
+                        log.debug('Batch remove error:', e);
+                    }
+                });
+                
+                this.processing = false;
+                
+                if (this.queue.length > 0) {
+                    this.scheduleProcess();
+                }
+            });
+        }
+    };
+
+    // Enhanced quality detection and selection
+    const QualityManager = {
+        currentQuality: null,
+        availableQualities: [],
+        lastCheck: 0,
+        isChanging: false,
+
+        detectAvailableQualities() {
+            try {
+                const qualityButtons = document.querySelectorAll('button[data-a-target*="quality-option"]');
+                const qualities = [];
+                
+                qualityButtons.forEach(button => {
+                    const text = button.textContent?.trim() || button.getAttribute('aria-label') || '';
+                    if (text && !text.toLowerCase().includes('auto')) {
+                        qualities.push(text);
+                    }
+                });
+
+                // Also check for quality menu items
+                const menuItems = document.querySelectorAll('.tw-select-option, .quality-menu-item');
+                menuItems.forEach(item => {
+                    const text = item.textContent?.trim();
+                    if (text && !text.toLowerCase().includes('auto') && !qualities.includes(text)) {
+                        qualities.push(text);
+                    }
+                });
+
+                this.availableQualities = qualities;
+                // Detected qualities available
+                return qualities;
+            } catch (e) {
+                log.debug('Quality detection error:', e);
+                return [];
+            }
+        },
+
+        getBestQuality() {
+            const available = this.detectAvailableQualities();
+            const preferred = CONFIG.QUALITY_SETTINGS.PREFERRED_QUALITIES;
+            
+            for (const pref of preferred) {
+                if (available.some(q => q.toLowerCase().includes(pref.toLowerCase()) || 
+                                        pref.toLowerCase().includes(q.toLowerCase()))) {
+                    return pref;
+                }
+            }
+            
+            return available[0] || 'chunked';
+        },
+
+        async setQuality(targetQuality) {
+            if (this.isChanging) return;
+            this.isChanging = true;
+
+            try {
+                // Attempting to set quality
+                
+                // Open quality menu
+                const settingsButton = document.querySelector('[data-a-target="player-settings-menu"]');
+                if (settingsButton) {
+                    settingsButton.click();
+                    await new Promise(resolve => setTimeout(resolve, 300));
+                    
+                    // Click quality option
+                    const qualityButton = document.querySelector('[data-a-target="player-settings-quality"]');
+                    if (qualityButton) {
+                        qualityButton.click();
+                        await new Promise(resolve => setTimeout(resolve, 300));
+                        
+                        // Find and click target quality
+                        const qualityOptions = document.querySelectorAll('button[data-a-target*="quality-option"], .tw-select-option');
+                        for (const option of qualityOptions) {
+                            const text = option.textContent?.trim() || option.getAttribute('aria-label') || '';
+                            if (text.toLowerCase().includes(targetQuality.toLowerCase()) ||
+                                targetQuality.toLowerCase().includes(text.toLowerCase())) {
+                                option.click();
+                                this.currentQuality = targetQuality;
+                                
+                                // Cache the preference
+                                if (CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE) {
+                                    QualityCache.set('preferredQuality', targetQuality);
+                                }
+                                
+                                log.info(`Quality set to: ${targetQuality}`);
+                                return true;
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                log.debug('Quality setting error:', e);
+            } finally {
+                this.isChanging = false;
+            }
+            
+            return false;
+        },
+
+        async restoreQuality() {
+            if (!CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) return;
+            
+            const now = Date.now();
+            if (now - this.lastCheck < CONFIG.QUALITY_SETTINGS.QUALITY_CHECK_INTERVAL) return;
+            this.lastCheck = now;
+
+            try {
+                let targetQuality = this.currentQuality;
+                
+                // Try to get cached preference first
+                if (CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE && !targetQuality) {
+                    targetQuality = QualityCache.get('preferredQuality');
+                }
+                
+                // Fall back to best available
+                if (!targetQuality) {
+                    targetQuality = this.getBestQuality();
+                }
+
+                if (targetQuality && targetQuality !== this.currentQuality) {
+                    await this.setQuality(targetQuality);
+                }
+            } catch (e) {
+                log.debug('Quality restore error:', e);
+            }
+        }
+    };
+
     // ====== FETCH OVERRIDE - SELECTIVE ======
     const originalFetch = unsafeWindow.fetch;
 
@@ -210,7 +519,7 @@
         try {
             // Skip blocking for chat/auth/protected endpoints
             if (shouldSkipBlocking(requestUrl)) {
-                log.debug('Allowing (protected):', requestUrl);
+                // Allowing protected request
                 return originalFetch(input, init);
             }
 
@@ -225,7 +534,7 @@
                 requestUrl.includes('.m3u8') &&
                 requestUrl.includes('usher.ttvnw.net')) {
 
-                log.debug('Cleaning M3U8 manifest:', requestUrl);
+                // Cleaning M3U8 manifest
                 const response = await originalFetch(input, init);
 
                 if (response && response.ok) {
@@ -266,7 +575,7 @@
                         const modified = modifyGQLRequest(parsed);
 
                         if (modified.changed) {
-                            log.debug('Modified GQL request');
+                            // Modified GQL request
                             const newInit = { ...(init || {}), body: JSON.stringify(modified.data) };
                             return originalFetch(input, newInit);
                         }
@@ -375,7 +684,7 @@
 
     const WebSocketOverride = function(url, protocols) {
         // ALWAYS allow WebSocket connections - critical for chat
-        log.debug('WebSocket (allowed):', url);
+        // WebSocket connection allowed
         try {
             return new originalWebSocket(url, protocols);
         } catch (error) {
@@ -543,21 +852,21 @@
             if (vars.playerType !== 'embed') {
                 vars.playerType = 'embed';
                 changed = true;
-                log.debug('Forcing playerType to embed');
+                // Forcing playerType to embed
             }
 
             // Ensure web platform
             if (vars.platform !== 'web') {
                 vars.platform = 'web';
                 changed = true;
-                log.debug('Forcing platform to web');
+                // Forcing platform to web
             }
 
             // AGGRESSIVE: Force source quality (chunked)
             if (vars.videoQualityPreference !== 'chunked') {
                 vars.videoQualityPreference = 'chunked';
                 changed = true;
-                log.debug('Forcing video quality to chunked (source)');
+                // Forcing video quality to chunked (source)
             }
 
             // Add additional quality preferences for more reliable source setting
@@ -575,7 +884,7 @@
             if (!vars.supportedCodecs || !Array.isArray(vars.supportedCodecs)) {
                 vars.supportedCodecs = ['av01', 'avc1', 'vp9', 'hev1', 'hvc1'];
                 changed = true;
-                log.debug('Setting supported codecs:', vars.supportedCodecs);
+                // Setting supported codecs
             }
 
             // Add additional parameters for better ad blocking
@@ -665,7 +974,7 @@ video {
 
             GM_addStyle(css1);
             GM_addStyle(css2);
-            log.debug('CSS injected successfully');
+            // CSS injected successfully
         } catch (e) {
             log.error('CSS injection failed:', e);
         }
@@ -682,12 +991,16 @@ video {
                     const elements = document.querySelectorAll(selector);
                     elements.forEach(element => {
                         if (element && element.parentNode) {
-                            element.parentNode.removeChild(element);
+                            if (CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
+                                BatchDOMRemover.add(element);
+                            } else {
+                                element.parentNode.removeChild(element);
+                            }
                             removedCount++;
                         }
                     });
                 } catch (e) {
-                    log.debug('Selector error:', selector, e);
+                    // Selector error
                 }
             });
 
@@ -724,83 +1037,100 @@ video {
         }
     };
 
-    // ====== QUALITY FORCE MONITOR ======
-    const forceSourceQuality = () => {
+    // ====== QUALITY FORCE MONITOR - ENHANCED ======
+    const forceSourceQuality = async () => {
         if (!CONFIG.SETTINGS.FORCE_QUALITY) return;
 
         try {
-            // Try to find quality selector/button
-            const qualitySelectors = [
-                '[data-a-target="player-settings-menu"]',
-                '[data-a-target="player-settings-quality"]',
-                '.tw-select',
-                '.player-menu__toggle',
-                '.quality-selector',
-                'button[aria-label*="quality" i]',
-                'button[aria-label*="качество" i]'
-            ];
+            if (CONFIG.SETTINGS.ENHANCED_PLAYER_CONTROLS) {
+                // Use the enhanced QualityManager
+                await QualityManager.setQuality('chunked');
+            } else {
+                // Fallback to original method
+                const qualitySelectors = [
+                    '[data-a-target="player-settings-menu"]',
+                    '[data-a-target="player-settings-quality"]',
+                    '.tw-select',
+                    '.player-menu__toggle',
+                    '.quality-selector',
+                    'button[aria-label*="quality" i]',
+                    'button[aria-label*="качество" i]'
+                ];
 
-            for (const selector of qualitySelectors) {
-                const button = document.querySelector(selector);
-                if (button) {
-                    log.debug('Found quality menu button, attempting to click');
-                    button.click();
+                for (const selector of qualitySelectors) {
+                    const button = document.querySelector(selector);
+                    if (button) {
+                        // Found quality menu button, attempting to click
+                        button.click();
 
-                    // Wait a bit then look for chunked/source option
-                    setTimeout(() => {
-                        const qualityOptions = [
-                            'button:contains("Source")',
-                            'button:contains("Исходник")',
-                            'button:contains("chunked")',
-                            '[data-a-target="quality-option-chunked"]',
-                            '[data-test-selector="quality-option-chunked"]',
-                            '.tw-core-button:contains("chunked")',
-                            '.tw-core-button:contains("Source")'
-                        ];
+                        // Wait a bit then look for chunked/source option
+                        setTimeout(() => {
+                            const qualityOptions = [
+                                'button:contains("Source")',
+                                'button:contains("Исходник")',
+                                'button:contains("chunked")',
+                                '[data-a-target="quality-option-chunked"]',
+                                '[data-test-selector="quality-option-chunked"]',
+                                '.tw-core-button:contains("chunked")',
+                                '.tw-core-button:contains("Source")'
+                            ];
 
-                        for (const option of qualityOptions) {
-                            try {
-                                const qualityButton = document.querySelector(option);
-                                if (qualityButton) {
-                                    log.info('Found source quality option, clicking');
-                                    qualityButton.click();
-                                    return;
+                            for (const option of qualityOptions) {
+                                try {
+                                    const qualityButton = document.querySelector(option);
+                                    if (qualityButton) {
+                                        log.info('Found source quality option, clicking');
+                                        qualityButton.click();
+                                        return;
+                                    }
+                                } catch (e) {
+                                    // Continue searching
                                 }
-                            } catch (e) {
-                                // Continue searching
                             }
-                        }
-                    }, 500);
-                    break;
+                        }, 500);
+                        break;
+                    }
                 }
             }
         } catch (e) {
-            log.debug('Quality force error:', e);
+            // Quality force error
         }
     };
 
-    // ====== VIDEO PLAYER MONITOR ======
+    // ====== VIDEO PLAYER MONITOR - ENHANCED ======
     const setupPlayerMonitor = () => {
         try {
             const video = document.querySelector('video');
             if (!video) {
-                log.debug('No video element found, will retry later');
+                // No video element found, will retry later
                 return;
             }
 
-            log.debug('Video player found, setting up monitor');
+            // Video player found, setting up enhanced monitor
+
+            // Initialize volume tracker for smart unmute
+            if (CONFIG.SETTINGS.SMART_UNMUTE_RESPECT_MANUAL) {
+                VolumeTracker.init(video);
+            }
 
             // Force source quality immediately
             forceSourceQuality();
 
-            // Auto-unmute on certain events
+            // Enhanced auto-unmute with manual mute respect
             if (CONFIG.SETTINGS.AUTO_UNMUTE) {
                 const autoUnmute = () => {
                     try {
                         if (video && video.muted) {
-                            log.info('Auto-unmuting video');
-                            video.muted = false;
-                            video.volume = Math.max(video.volume, 0.5);
+                            if (CONFIG.SETTINGS.SMART_UNMUTE_RESPECT_MANUAL) {
+                                if (VolumeTracker.shouldUnmute()) {
+                                    log.info('Smart auto-unmuting video');
+                                    VolumeTracker.restoreVolume(video);
+                                }
+                            } else {
+                                log.info('Auto-unmuting video');
+                                video.muted = false;
+                                video.volume = Math.max(video.volume, 0.5);
+                            }
                         }
                     } catch (e) {
                         log.error('Auto-unmute error:', e);
@@ -811,7 +1141,7 @@ video {
                 video.addEventListener('loadeddata', autoUnmute, { once: true });
             }
 
-            // Restore playback on ad detection
+            // Enhanced playback restoration with quality recovery
             if (CONFIG.SETTINGS.RESTORE_ON_AD) {
                 let adDetected = false;
                 let retryCount = 0;
@@ -820,7 +1150,7 @@ video {
                 const onStalled = () => {
                     try {
                         if (!adDetected) {
-                            log.debug('Possible ad detected, attempting to restore playback');
+                            // Possible ad detected, attempting to restore playback
                             adDetected = true;
                             retryCount++;
 
@@ -828,8 +1158,15 @@ video {
                                 setTimeout(() => {
                                     try {
                                         if (video && video.paused) {
-                                            log.debug(`Playback restore attempt ${retryCount}`);
+                                            // Playback restore attempt
                                             video.play().catch(() => {});
+                                            
+                                            // Restore quality after ad
+                                            if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
+                                                setTimeout(() => {
+                                                    QualityManager.restoreQuality();
+                                                }, CONFIG.QUALITY_SETTINGS.QUALITY_RESTORE_DELAY);
+                                            }
                                         }
                                         adDetected = false;
                                     } catch (e) {
@@ -851,13 +1188,47 @@ video {
                 video.addEventListener('waiting', onStalled, { passive: true });
             }
 
-            // Periodically force source quality to prevent quality degradation
-            const qualityCheckInterval = setInterval(() => {
-                forceSourceQuality();
-            }, 10000); // Check every 10 seconds
+            // Enhanced quality monitoring with debouncing
+            const qualityCheckFunction = CONFIG.SETTINGS.DEBOUNCED_OBSERVERS 
+                ? debounce(() => {
+                    forceSourceQuality();
+                    if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
+                        QualityManager.restoreQuality();
+                    }
+                }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY)
+                : () => {
+                    forceSourceQuality();
+                    if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
+                        QualityManager.restoreQuality();
+                    }
+                };
+
+            const qualityCheckInterval = setInterval(qualityCheckFunction, CONFIG.QUALITY_SETTINGS.QUALITY_CHECK_INTERVAL);
 
             // Store interval ID to clear it later if needed
             video._qualityCheckInterval = qualityCheckInterval;
+
+            // Stream change detection for quality restoration
+            if (CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE) {
+                const streamChangeObserver = new MutationObserver(debounce((mutations) => {
+                    for (const mutation of mutations) {
+                        if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
+                            // Stream change detected, restoring quality
+                            setTimeout(() => {
+                                QualityManager.restoreQuality();
+                            }, 2000);
+                            break;
+                        }
+                    }
+                }, CONFIG.PERFORMANCE.OBSERVER_THROTTLE));
+
+                streamChangeObserver.observe(video, {
+                    attributes: true,
+                    attributeFilter: ['src']
+                });
+
+                video._streamChangeObserver = streamChangeObserver;
+            }
         } catch (error) {
             log.error('Player monitor setup error:', error);
         }
@@ -866,19 +1237,29 @@ video {
     // ====== INITIALIZATION ======
     const initialize = () => {
         try {
-            log.info('Starting Twitch Adblock Ultimate v' + CONFIG.SCRIPT_VERSION);
-            console.info(`\n${'='.repeat(60)}`);
-            console.info(`${LOG_PREFIX} IMPROVED VERSION ${CONFIG.SCRIPT_VERSION}`);
-            console.info(`${'='.repeat(60)}`);
-            console.info(`${LOG_PREFIX} ✅ Chat protection: ENABLED`);
-            console.info(`${LOG_PREFIX} ✅ Aggressive ad blocking: ENABLED`);
-            console.info(`${LOG_PREFIX} ✅ Cookie banner removal: ENABLED`);
-            console.info(`${LOG_PREFIX} ✅ M3U8 cleaning: ${CONFIG.SETTINGS.ENABLE_M3U8_CLEANING ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ GQL modification: ${CONFIG.SETTINGS.ENABLE_GQL_MODIFICATION ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Auto-unmute: ${CONFIG.SETTINGS.AUTO_UNMUTE ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ DOM cleanup: ${CONFIG.SETTINGS.ENABLE_DOM_CLEANUP ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${LOG_PREFIX} ✅ Force Source quality: ${CONFIG.SETTINGS.FORCE_QUALITY ? 'ENABLED' : 'DISABLED'}`);
-            console.info(`${'='.repeat(60)}\n`);
+            log.info(`Starting Twitch Adblock Ultimate v${CONFIG.SCRIPT_VERSION}`);
+            if (isDebug) {
+                console.info(`\n${'='.repeat(60)}`);
+                console.info(`${LOG_PREFIX} IMPROVED VERSION ${CONFIG.SCRIPT_VERSION}`);
+                console.info(`${'='.repeat(60)}`);
+                console.info(`${LOG_PREFIX} ✅ Chat protection: ENABLED`);
+                console.info(`${LOG_PREFIX} ✅ Aggressive ad blocking: ENABLED`);
+                console.info(`${LOG_PREFIX} ✅ Cookie banner removal: ENABLED`);
+                console.info(`${LOG_PREFIX} ✅ M3U8 cleaning: ${CONFIG.SETTINGS.ENABLE_M3U8_CLEANING ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ GQL modification: ${CONFIG.SETTINGS.ENABLE_GQL_MODIFICATION ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Auto-unmute: ${CONFIG.SETTINGS.AUTO_UNMUTE ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ DOM cleanup: ${CONFIG.SETTINGS.ENABLE_DOM_CLEANUP ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Force Source quality: ${CONFIG.SETTINGS.FORCE_QUALITY ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Smart quality persistence: ${CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Debounced observers: ${CONFIG.SETTINGS.DEBOUNCED_OBSERVERS ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Enhanced player controls: ${CONFIG.SETTINGS.ENHANCED_PLAYER_CONTROLS ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Auto quality restore: ${CONFIG.SETTINGS.AUTO_QUALITY_RESTORE ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Smart unmute (respect manual): ${CONFIG.SETTINGS.SMART_UNMUTE_RESPECT_MANUAL ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Batch DOM removal: ${CONFIG.SETTINGS.BATCH_DOM_REMOVAL ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Quality caching: ${CONFIG.SETTINGS.QUALITY_CACHE_ENABLED ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${LOG_PREFIX} ✅ Performance mode: ${CONFIG.SETTINGS.PERFORMANCE_MODE ? 'ENABLED' : 'DISABLED'}`);
+                console.info(`${'='.repeat(60)}\n`);
+            }
 
             // Verify critical APIs are available
             if (typeof unsafeWindow !== 'object') {
@@ -897,21 +1278,21 @@ video {
             // Install network overrides
             try {
                 unsafeWindow.fetch = fetchOverride;
-                log.debug('✓ Fetch override installed');
+                // Fetch override installed
             } catch (e) {
                 log.error('✗ Fetch override failed:', e);
             }
 
             try {
                 unsafeWindow.XMLHttpRequest = XHROverride;
-                log.debug('✓ XHR override installed');
+                // XHR override installed
             } catch (e) {
                 log.error('✗ XHR override failed:', e);
             }
 
             try {
                 unsafeWindow.WebSocket = WebSocketOverride;
-                log.debug('✓ WebSocket override installed (chat-safe)');
+                // WebSocket override installed (chat-safe)
             } catch (e) {
                 log.error('✗ WebSocket override failed:', e);
             }
@@ -932,8 +1313,16 @@ video {
                 }
             }, 2000);
 
-            // Setup MutationObserver for dynamic cookie banners
+            // Setup enhanced MutationObserver for dynamic cookie banners
             if (typeof MutationObserver !== 'undefined') {
+                const bannerCheckFunction = CONFIG.SETTINGS.DEBOUNCED_OBSERVERS
+                    ? debounce(() => {
+                        removeCookieBanners();
+                    }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY)
+                    : () => {
+                        removeCookieBanners();
+                    };
+
                 const bannerObserver = new MutationObserver((mutations) => {
                     let shouldCheck = false;
                     mutations.forEach((mutation) => {
@@ -941,22 +1330,37 @@ video {
                             for (let node of mutation.addedNodes) {
                                 if (node.nodeType === 1) { // ELEMENT_NODE
                                     const text = node.textContent || '';
+                                    const className = node.className || '';
+                                    const id = node.id || '';
+                                    
                                     if (text.toLowerCase().includes('cookie') ||
                                         text.toLowerCase().includes('consent') ||
-                                        text.toLowerCase().includes('gdpr')) {
+                                        text.toLowerCase().includes('gdpr') ||
+                                        className.toLowerCase().includes('cookie') ||
+                                        className.toLowerCase().includes('consent') ||
+                                        id.toLowerCase().includes('cookie') ||
+                                        id.toLowerCase().includes('consent')) {
                                         shouldCheck = true;
+                                        break;
                                     }
                                 }
                             }
                         }
                     });
                     if (shouldCheck) {
-                        setTimeout(removeCookieBanners, 500);
+                        if (CONFIG.SETTINGS.DEBOUNCED_OBSERVERS) {
+                            bannerCheckFunction();
+                        } else {
+                            setTimeout(removeCookieBanners, 500);
+                        }
                     }
                 });
+
                 bannerObserver.observe(document.body || document.documentElement, {
                     childList: true,
-                    subtree: true
+                    subtree: true,
+                    attributes: true,
+                    attributeFilter: ['class', 'id']
                 });
             }
 
@@ -978,12 +1382,45 @@ video {
             }, 1000);
 
             log.info('✓ Initialization complete');
-            console.info(`${LOG_PREFIX} Ready! Enjoy ad-free Twitch with working chat!\n`);
+            if (isDebug) {
+                console.info(`${LOG_PREFIX} Ready! Enjoy ad-free Twitch with enhanced features and working chat!\n`);
+                console.info(`${LOG_PREFIX} 🚀 Enhanced features: Smart quality persistence, performance optimization, and intelligent controls activated.\n`);
+            }
         } catch (error) {
             log.error('✗ Initialization failed:', error);
-            console.error(`${LOG_PREFIX} Failed to initialize!`, error);
+            if (isDebug) {
+                console.error(`${LOG_PREFIX} Failed to initialize enhanced features!`, error);
+            }
         }
     };
+
+    // Enhanced cleanup for better memory management
+    const cleanup = () => {
+        try {
+            // Clear quality cache if expired
+            if (CONFIG.SETTINGS.QUALITY_CACHE_ENABLED) {
+                QualityCache.clear();
+            }
+
+            // Clear intervals
+            const video = document.querySelector('video');
+            if (video) {
+                if (video._qualityCheckInterval) {
+                    clearInterval(video._qualityCheckInterval);
+                }
+                if (video._streamChangeObserver) {
+                    video._streamChangeObserver.disconnect();
+                }
+            }
+
+            // Enhanced cleanup completed
+        } catch (e) {
+            log.debug('Cleanup error:', e);
+        }
+    };
+
+    // Cleanup on page unload
+    window.addEventListener('beforeunload', cleanup);
 
     // Start when ready
     if (document.readyState === 'loading') {
