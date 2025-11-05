@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      32.2.1
+// @version      32.3.0
 // @description  Twitch ad-blocking
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -54,7 +54,7 @@
     };
 
     const CONFIG = {
-        SCRIPT_VERSION: '32.2.1',
+        SCRIPT_VERSION: '32.3.0',
         SETTINGS,
         ADVANCED: {
             AD_SERVER_DOMAINS: [
@@ -862,40 +862,74 @@
             let changed = false;
             const vars = { ...payload.variables };
 
-            // CONSERVATIVE: Only modify playerType if it's causing issues
-            // DO NOT modify playerType, platform, or other critical parameters
-            // to avoid integrity check failures
+            // Force embed player to avoid ads - this is the key to blocking ads
+            if (vars.playerType !== 'embed') {
+                vars.playerType = 'embed';
+                changed = true;
+                log.debug('Modified playerType to embed');
+            }
 
-            // Optional: Force source quality only if user explicitly enabled it
-            // Commented out to avoid breaking Twitch integrity checks
-            /*
-            if (vars.videoQualityPreference && vars.videoQualityPreference !== 'chunked') {
+            // Ensure web platform
+            if (vars.platform !== 'web') {
+                vars.platform = 'web';
+                changed = true;
+                log.debug('Modified platform to web');
+            }
+
+            // Force HLS mediaplayer backend to avoid IVS ads pipeline
+            // This is critical for blocking ads across country changes
+            if (vars.playerBackend !== 'mediaplayer') {
+                vars.playerBackend = 'mediaplayer';
+                changed = true;
+                log.debug('Modified playerBackend to mediaplayer');
+            }
+
+            // Prefer source quality
+            if (vars.videoQualityPreference !== 'chunked') {
                 vars.videoQualityPreference = 'chunked';
                 changed = true;
+                log.debug('Modified videoQualityPreference to chunked');
             }
-            */
 
-            // Add supported codecs to avoid IVS ads - this is safe
-            if (!vars.supportedCodecs || !Array.isArray(vars.supportedCodecs)) {
-                vars.supportedCodecs = ['av01', 'avc1', 'vp9', 'hev1', 'hvc1'];
+            // Add supported codecs to avoid IVS ads - normalize and extend
+            const preferredCodecs = ['av1', 'h265', 'h264', 'vp9', 'av01', 'avc1', 'hev1', 'hvc1'];
+            const currentCodecs = Array.isArray(vars.supportedCodecs) ? vars.supportedCodecs : [];
+            const codecSet = new Set();
+            preferredCodecs.forEach(codec => codecSet.add(codec));
+            currentCodecs.forEach(codec => codecSet.add(codec));
+            const normalizedCodecs = Array.from(codecSet);
+
+            if (!Array.isArray(vars.supportedCodecs) ||
+                vars.supportedCodecs.length !== normalizedCodecs.length ||
+                !normalizedCodecs.every((codec, index) => vars.supportedCodecs[index] === codec)) {
+                vars.supportedCodecs = normalizedCodecs;
                 changed = true;
+                log.debug('Modified supportedCodecs');
             }
 
-            // DISABLED: These parameters often cause integrity check failures
-            // if (vars.realtime !== false) {
-            //     vars.realtime = false;
-            //     changed = true;
-            // }
+            // Remove ad-related parameters that Twitch may inject
+            // These can be added when switching countries or connections
+            if (Object.prototype.hasOwnProperty.call(vars, 'adblock')) {
+                delete vars.adblock;
+                changed = true;
+                log.debug('Removed adblock parameter');
+            }
 
-            // if (vars.useReruns !== false) {
-            //     vars.useReruns = false;
-            //     changed = true;
-            // }
+            if (Object.prototype.hasOwnProperty.call(vars, 'adsEnabled')) {
+                delete vars.adsEnabled;
+                changed = true;
+                log.debug('Removed adsEnabled parameter');
+            }
 
-            // if (vars.allowSource !== true) {
-            //     vars.allowSource = true;
-            //     changed = true;
-            // }
+            // Remove any geo-specific ad parameters that can bypass blocking wh
+            const geoKeys = ['geoblock', 'geoBlock', 'geoBlocked', 'geoRestrictions'];
+            geoKeys.forEach((key) => {
+                if (Object.prototype.hasOwnProperty.call(vars, key)) {
+                    delete vars[key];
+                    changed = true;
+                    log.debug(`Removed ${key} parameter`);
+                }
+            });
 
             return { changed, data: { ...payload, variables: vars } };
         } catch (error) {
