@@ -1,0 +1,30 @@
+[33mb6c6947[m[33m ([m[1;34mgrafted[m[33m, [m[1;36mHEAD[m[33m -> [m[1;32madblock-enhance-helpers-restore-video-quality-from-history[m[33m, [m[1;31morigin/main[m[33m, [m[1;31morigin/HEAD[m[33m, [m[1;32mmain[m[33m)[m 
+[33m05fb44b[m[33m ([m[1;31morigin/downgrade/31.4.0[m[33m)[m 
+[33mdbd71d6[m chore: downgrade userscript to 31.4.0 (restore from 78ae02a)
+[33m11a27bf[m Merge branch 'main' of https://github.com/ShmidtS/Twitch-Adblock
+[33mb0600bc[m 
+[33m23c2229[m Merge pull request #9 from ShmidtS/fix-adblock-reliability-optimize-site
+[33m9f2f62e[m[33m ([m[1;31morigin/fix-adblock-reliability-optimize-site[m[33m)[m perf(adblock): optimize video selection and adblocking for Twitch
+[33mec59466[m Merge pull request #8 from ShmidtS/fix-twitch-adblock-video-black-screen
+[33m78ae02a[m[33m ([m[1;31morigin/fix-twitch-adblock-video-black-screen[m[33m)[m fix(adblock): prevent black screen and playback errors during ad breaks
+[33m91019a3[m Merge pull request #7 from ShmidtS/fix-twitch-adblock-black-screen-prev-stream-audio-bleed
+[33m9fe6286[m[33m ([m[1;31morigin/fix-twitch-adblock-black-screen-prev-stream-audio-bleed[m[33m)[m fix(adblock): prevent black screen, React errors, and audio bleed when switching streams
+[33m04f84d4[m Merge pull request #6 from ShmidtS/refactor/script-integrate-best-practices-from-history
+[33ma716b73[m[33m ([m[1;31morigin/refactor/script-integrate-best-practices-from-history[m[33m)[m refactor(adblock,player): integrate caching, batch DOM removal, smarter unmute
+[33m7695327[m feat(adblock): integrate all advanced anti-ad and smart controls from historical improvements
+[33m2d609e7[m 
+[33m379b378[m Merge branch 'main' of https://github.com/ShmidtS/Twitch-Adblock
+[33mfde9b12[m 
+[33m6dc96b4[m Merge pull request #5 from ShmidtS/fix-adblock-not-blocking-ads-twitch
+[33mfb4ddba[m[33m ([m[1;31morigin/fix-adblock-not-blocking-ads-twitch[m[33m)[m fix(adblock): block Twitch 'squeezeback' and persistent player ads
+[33m766f599[m 
+[33mf1506ff[m Merge pull request #4 from ShmidtS/fix-twitch-player-controls-auto-unmute-respect-manual-mute
+[33me1623fc[m[33m ([m[1;31morigin/fix-twitch-player-controls-auto-unmute-respect-manual-mute[m[33m)[m fix(player,css): restore control interactivity and robust smart unmute
+[33m57b4b45[m Merge pull request #3 from ShmidtS/fix-twitch-adblock-restore-controls-disable-auto-unmute-fix-ads
+[33m2b7e782[m[33m ([m[1;31morigin/fix-twitch-adblock-restore-controls-disable-auto-unmute-fix-ads[m[33m)[m fix(player,adblock,volume): restore control panel, prevent forced auto-mute, and improve ad blocking
+[33ma346f60[m Merge pull request #2 from ShmidtS/fix-twitch-adblock-injected-ads-auto-unmute-optimize-iterative
+[33m21fd522[m[33m ([m[1;31morigin/fix-twitch-adblock-injected-ads-auto-unmute-optimize-iterative[m[33m)[m feat(userscript): implement smart auto-unmute, enhanced ad suppression, and performance optimizations
+[33m129249e[m 
+[33mc80fefb[m 
+[33mdc656b1[m 
+[33m037e4fd[m 
