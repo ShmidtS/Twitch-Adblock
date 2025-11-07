@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      33.0.0
-// @description  Twitch ad-blocking with chat protection and aggressive quality management
+// @version      33.1.0
+// @description  Twitch ad-blocking
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -54,7 +54,7 @@
     };
 
     const CONFIG = {
-        SCRIPT_VERSION: '33.0.0',
+        SCRIPT_VERSION: '33.1.0',
         SETTINGS,
         ADVANCED: {
             AD_SERVER_DOMAINS: [
@@ -195,10 +195,11 @@
             ],
         },
         QUALITY_SETTINGS: {
-            PREFERRED_QUALITIES: ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'],
-            QUALITY_CHECK_INTERVAL: SETTINGS.PERFORMANCE_MODE ? 1000 : 500,
-            QUALITY_RESTORE_DELAY: 100,
+            PREFERRED_QUALITIES: ['chunked'],
+            QUALITY_CHECK_INTERVAL: SETTINGS.PERFORMANCE_MODE ? 500 : 200,
+            QUALITY_RESTORE_DELAY: 50,
             CACHE_EXPIRY: 3600000,
+            AGGRESSIVE_MONITORING: true,
         },
         PERFORMANCE: {
             DEBOUNCE_DELAY: SETTINGS.PERFORMANCE_MODE ? 200 : 50,
@@ -526,55 +527,48 @@
 
 
         getBestQuality() {
-            const available = this.detectAvailableQualities();
-            const preferred = CONFIG.QUALITY_SETTINGS.PREFERRED_QUALITIES;
-
-            for (const pref of preferred) {
-                if (available.some(q => q.toLowerCase().includes(pref.toLowerCase()) ||
-                                   pref.toLowerCase().includes(q.toLowerCase()))) {
-                    return pref;
-                }
-            }
-
-            return available[0] || 'chunked';
+            // ALWAYS return chunked - never use other qualities
+            return 'chunked';
         },
 
-        async setQuality(targetQuality) {
+        async setQuality() {
             if (this.isChanging) return;
             this.isChanging = true;
 
             try {
-                // Attempting to set quality
+                // Attempting to set quality to chunked
 
                 // Open quality menu
                 const settingsButton = document.querySelector('[data-a-target="player-settings-menu"]');
                 if (settingsButton && !isChatElement(settingsButton)) {
                     settingsButton.click();
-                    await new Promise(resolve => setTimeout(resolve, 100));
+                    await new Promise(resolve => setTimeout(resolve, 50));
 
                     // Click quality option
                     const qualityButton = document.querySelector('[data-a-target="player-settings-quality"]');
                     if (qualityButton && !isChatElement(qualityButton)) {
                         qualityButton.click();
-                        await new Promise(resolve => setTimeout(resolve, 100));
+                        await new Promise(resolve => setTimeout(resolve, 50));
 
-                        // Find and click target quality
+                        // Find and click chunked quality - ONLY chunked
                         const qualityOptions = document.querySelectorAll('button[data-a-target*="quality-option"], .tw-select-option');
                         for (const option of qualityOptions) {
                             if (isChatElement(option)) continue; // Skip chat elements
-                            
+
                             const text = option.textContent?.trim() || option.getAttribute('aria-label') || '';
-                            if (text.toLowerCase().includes(targetQuality.toLowerCase()) ||
-                                targetQuality.toLowerCase().includes(text.toLowerCase())) {
+                            // ONLY match chunked/source - never auto or other qualities
+                            if ((text.toLowerCase().includes('chunked') || text.toLowerCase().includes('source') || text.toLowerCase().includes('исходник')) &&
+                                !text.toLowerCase().includes('auto') &&
+                                !text.toLowerCase().includes('авто')) {
                                 option.click();
-                                this.currentQuality = targetQuality;
+                                this.currentQuality = 'chunked';
 
                                 // Cache the preference
                                 if (CONFIG.SETTINGS.SMART_QUALITY_PERSISTENCE) {
-                                    QualityCache.set('preferredQuality', targetQuality);
+                                    QualityCache.set('preferredQuality', 'chunked');
                                 }
 
-                                log.info(`Quality set to: ${targetQuality}`);
+                                log.info(`Quality forcefully set to: chunked`);
                                 return true;
                             }
                         }
@@ -979,12 +973,10 @@
                 log.debug('Modified playerBackend to mediaplayer');
             }
 
-            // Prefer source quality
-            if (vars.videoQualityPreference !== 'chunked') {
-                vars.videoQualityPreference = 'chunked';
-                changed = true;
-                log.debug('Modified videoQualityPreference to chunked');
-            }
+            // Force chunked quality - ALWAYS
+            vars.videoQualityPreference = 'chunked';
+            changed = true;
+            log.debug('Forcefully set videoQualityPreference to chunked');
 
             // Add supported codecs to avoid IVS ads - normalize and extend
             const preferredCodecs = ['av1', 'h265', 'h264', 'vp9', 'av01', 'avc1', 'hev1', 'hvc1'];
@@ -1409,15 +1401,19 @@ div[id*="ivs"][id*="ad"] {
                 video.addEventListener('waiting', onStalled, { passive: true });
             }
 
-            // Enhanced quality monitoring with debouncing
-            const qualityCheckFunction = CONFIG.SETTINGS.DEBOUNCED_OBSERVERS
-            ? debounce(() => {
-                forceSourceQuality();
-                if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
-                    QualityManager.restoreQuality();
-                }
-            }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY)
-            : () => {
+            // IMMEDIATE quality restoration on any player event
+            const qualityEvents = ['loadedmetadata', 'loadeddata', 'playing', 'progress', 'canplay', 'canplaythrough'];
+            qualityEvents.forEach(eventType => {
+                video.addEventListener(eventType, () => {
+                    // Force chunked quality immediately on any player event
+                    setTimeout(() => {
+                        QualityManager.setQuality();
+                    }, 25);
+                }, { passive: true });
+            });
+
+            // Ultra-aggressive quality monitoring - checks every 200ms
+            const qualityCheckFunction = () => {
                 forceSourceQuality();
                 if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
                     QualityManager.restoreQuality();
@@ -1450,6 +1446,42 @@ div[id*="ivs"][id*="ad"] {
 
                 video._streamChangeObserver = streamChangeObserver;
             }
+
+            // AGGRESSIVE: Watch for any DOM changes related to quality settings
+            const qualityDOMObserver = new MutationObserver((mutations) => {
+                let shouldCheckQuality = false;
+                mutations.forEach((mutation) => {
+                    // Watch for quality menu changes
+                    if (mutation.type === 'childList' || mutation.type === 'attributes') {
+                        const target = mutation.target;
+                        const className = target.className || '';
+                        const dataTarget = target.getAttribute('data-a-target') || '';
+                        const textContent = target.textContent || '';
+
+                        if ((className && className.toString().toLowerCase().includes('quality')) ||
+                            (dataTarget && dataTarget.toLowerCase().includes('quality')) ||
+                            (textContent && (textContent.toLowerCase().includes('1080p') || textContent.toLowerCase().includes('720p') || textContent.toLowerCase().includes('480p') || textContent.toLowerCase().includes('360p')))) {
+                            shouldCheckQuality = true;
+                        }
+                    }
+                });
+
+                if (shouldCheckQuality) {
+                    // Immediately force chunked quality
+                    setTimeout(() => {
+                        QualityManager.setQuality();
+                    }, 50);
+                }
+            });
+
+            qualityDOMObserver.observe(document.body, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+                attributeFilter: ['class', 'data-a-target', 'textContent']
+            });
+
+            video._qualityDOMObserver = qualityDOMObserver;
         } catch (error) {
             log.error('Player monitor setup error:', error);
         }
@@ -1705,6 +1737,9 @@ div[id*="ivs"][id*="ad"] {
                 }
                 if (video._streamChangeObserver) {
                     video._streamChangeObserver.disconnect();
+                }
+                if (video._qualityDOMObserver) {
+                    video._qualityDOMObserver.disconnect();
                 }
             }
 
