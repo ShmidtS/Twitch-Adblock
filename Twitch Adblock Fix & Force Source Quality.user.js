@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      32.3.0
-// @description  Twitch ad-blocking
+// @version      33.0.0
+// @description  Twitch ad-blocking with chat protection and aggressive quality management
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -54,7 +54,7 @@
     };
 
     const CONFIG = {
-        SCRIPT_VERSION: '32.3.0',
+        SCRIPT_VERSION: '33.0.0',
         SETTINGS,
         ADVANCED: {
             AD_SERVER_DOMAINS: [
@@ -93,6 +93,33 @@
                 'tmi.twitch.tv',
                 'usher.ttvnw.net/api/channel/hls',
                 '/gql POST',
+            ],
+            // Chat DOM selectors - NEVER interact with these
+            CHAT_SELECTORS: [
+                '[data-a-target="chat-input"]',
+                '[data-a-target="chat-message"]',
+                '[data-a-target="chat-welcome-message"]',
+                '[data-a-target="chat-room-selector"]',
+                '[data-a-target="chat-badge"]',
+                '[data-test-selector*="chat"]',
+                '.chat-scrollable-area__message-container',
+                '.chat-line__message',
+                '.chat-line__username',
+                '.chat-input',
+                '.chat-wysiwyg-input',
+                '.stream-chat',
+                '[class*="chat-line"]',
+                '[class*="chat-room"]',
+                '[class*="chat-input"]',
+                '[class*="chat-message"]',
+                '[data-a-target*="chat"]',
+                '[data-test-selector*="chat"]',
+                '.thread-message-container',
+                '[data-a-target="thread-message"]',
+                '[role="log"]',
+                'button[data-a-target*="reply"]',
+                'button[aria-label*="reply" i]',
+                'button[aria-label*="ответ" i]',
             ],
             // M3U8 ad markers
             M3U8_AD_MARKERS: [
@@ -169,14 +196,14 @@
         },
         QUALITY_SETTINGS: {
             PREFERRED_QUALITIES: ['chunked', '1080p60', '1080p30', '720p60', '720p30', '480p30', '360p30', '160p30'],
-            QUALITY_CHECK_INTERVAL: SETTINGS.PERFORMANCE_MODE ? 5000 : 5000,
-            QUALITY_RESTORE_DELAY: 2000,
+            QUALITY_CHECK_INTERVAL: SETTINGS.PERFORMANCE_MODE ? 1000 : 500,
+            QUALITY_RESTORE_DELAY: 100,
             CACHE_EXPIRY: 3600000,
         },
         PERFORMANCE: {
-            DEBOUNCE_DELAY: SETTINGS.PERFORMANCE_MODE ? 500 : 200,
+            DEBOUNCE_DELAY: SETTINGS.PERFORMANCE_MODE ? 200 : 50,
             BATCH_SIZE: 10,
-            OBSERVER_THROTTLE: SETTINGS.PERFORMANCE_MODE ? 1000 : 300,
+            OBSERVER_THROTTLE: SETTINGS.PERFORMANCE_MODE ? 500 : 100,
         },
     };
 
@@ -203,6 +230,60 @@
             }
             return urlLower.includes(pattern.toLowerCase());
         });
+    };
+
+    // Check if element is part of chat - NEVER interact with chat elements
+    const isChatElement = (element) => {
+        if (!element) return false;
+        
+        try {
+            // Check if element matches chat selectors
+            for (const selector of CONFIG.ADVANCED.CHAT_SELECTORS) {
+                if (element.matches && element.matches(selector)) {
+                    return true;
+                }
+            }
+            
+            // Check if any parent matches chat selectors
+            let parent = element.parentElement;
+            while (parent) {
+                for (const selector of CONFIG.ADVANCED.CHAT_SELECTORS) {
+                    if (parent.matches && parent.matches(selector)) {
+                        return true;
+                    }
+                }
+                parent = parent.parentElement;
+            }
+            
+            // Additional heuristics - check classes and attributes
+            const className = element.className || '';
+            const id = element.id || '';
+            const dataTarget = element.getAttribute('data-a-target') || '';
+            const testSelector = element.getAttribute('data-test-selector') || '';
+            const ariaLabel = element.getAttribute('aria-label') || '';
+            
+            const classStr = typeof className === 'string' ? className.toLowerCase() : '';
+            const idStr = typeof id === 'string' ? id.toLowerCase() : '';
+            const dataStr = typeof dataTarget === 'string' ? dataTarget.toLowerCase() : '';
+            const testStr = typeof testSelector === 'string' ? testSelector.toLowerCase() : '';
+            const ariaStr = typeof ariaLabel === 'string' ? ariaLabel.toLowerCase() : '';
+            
+            // Check for chat-related text
+            if (classStr.includes('chat') || 
+                idStr.includes('chat') || 
+                dataStr.includes('chat') || 
+                testStr.includes('chat') ||
+                ariaStr.includes('chat') ||
+                ariaStr.includes('reply') ||
+                ariaStr.includes('ответ')) {
+                return true;
+            }
+            
+            return false;
+        } catch (e) {
+            // If error, assume it might be chat to be safe
+            return true;
+        }
     };
 
     const isAdServerUrl = (url) => {
@@ -346,6 +427,13 @@
         processing: false,
 
         add(element) {
+            if (!element || isChatElement(element)) {
+                if (isChatElement(element)) {
+                    log.debug('Skipping chat element from removal queue');
+                }
+                return;
+            }
+
             if (!CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
                 this.removeNow(element);
                 return;
@@ -357,7 +445,7 @@
 
         removeNow(element) {
             try {
-                if (element && element.parentNode) {
+                if (element && !isChatElement(element) && element.parentNode) {
                     element.parentNode.removeChild(element);
                 }
             } catch (e) {
@@ -378,7 +466,7 @@
             requestAnimationFrame(() => {
                 batch.forEach(element => {
                     try {
-                        if (element && element.parentNode) {
+                        if (element && !isChatElement(element) && element.parentNode) {
                             element.parentNode.removeChild(element);
                         }
                     } catch (e) {
@@ -431,6 +519,11 @@
                 return [];
             }
         },
+        
+        reset() {
+            this.lastCheck = 0;
+        },
+
 
         getBestQuality() {
             const available = this.detectAvailableQualities();
@@ -455,19 +548,21 @@
 
                 // Open quality menu
                 const settingsButton = document.querySelector('[data-a-target="player-settings-menu"]');
-                if (settingsButton) {
+                if (settingsButton && !isChatElement(settingsButton)) {
                     settingsButton.click();
-                    await new Promise(resolve => setTimeout(resolve, 300));
+                    await new Promise(resolve => setTimeout(resolve, 100));
 
                     // Click quality option
                     const qualityButton = document.querySelector('[data-a-target="player-settings-quality"]');
-                    if (qualityButton) {
+                    if (qualityButton && !isChatElement(qualityButton)) {
                         qualityButton.click();
-                        await new Promise(resolve => setTimeout(resolve, 300));
+                        await new Promise(resolve => setTimeout(resolve, 100));
 
                         // Find and click target quality
                         const qualityOptions = document.querySelectorAll('button[data-a-target*="quality-option"], .tw-select-option');
                         for (const option of qualityOptions) {
+                            if (isChatElement(option)) continue; // Skip chat elements
+                            
                             const text = option.textContent?.trim() || option.getAttribute('aria-label') || '';
                             if (text.toLowerCase().includes(targetQuality.toLowerCase()) ||
                                 targetQuality.toLowerCase().includes(text.toLowerCase())) {
@@ -494,11 +589,11 @@
             return false;
         },
 
-        async restoreQuality() {
+        async restoreQuality(force = false) {
             if (!CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) return;
 
             const now = Date.now();
-            if (now - this.lastCheck < CONFIG.QUALITY_SETTINGS.QUALITY_CHECK_INTERVAL) return;
+            if (!force && now - this.lastCheck < CONFIG.QUALITY_SETTINGS.QUALITY_CHECK_INTERVAL) return;
             this.lastCheck = now;
 
             try {
@@ -1074,7 +1169,7 @@ div[id*="ivs"][id*="ad"] {
                 try {
                     const buttons = document.querySelectorAll(selector);
                     buttons.forEach(button => {
-                        if (button && !button.disabled) {
+                        if (button && !button.disabled && !isChatElement(button)) {
                             button.click();
                             removedCount++;
                         }
@@ -1114,41 +1209,112 @@ div[id*="ivs"][id*="ad"] {
 
                 for (const selector of qualitySelectors) {
                     const button = document.querySelector(selector);
-                    if (button) {
+                    if (button && !isChatElement(button)) {
                         // Found quality menu button, attempting to click
                         button.click();
 
                         // Wait a bit then look for chunked/source option
                         setTimeout(() => {
-                            const qualityOptions = [
-                                'button:contains("Source")',
-                                'button:contains("Исходник")',
-                                'button:contains("chunked")',
-                                '[data-a-target="quality-option-chunked"]',
-                                '[data-test-selector="quality-option-chunked"]',
-                                '.tw-core-button:contains("chunked")',
-                                '.tw-core-button:contains("Source")'
-                            ];
+                            const qualityOptions = document.querySelectorAll('button[data-a-target*="quality-option"], .tw-select-option, [data-test-selector*="quality-option"]');
 
                             for (const option of qualityOptions) {
+                                if (isChatElement(option)) continue;
+
                                 try {
-                                    const qualityButton = document.querySelector(option);
-                                    if (qualityButton) {
-                                        log.info('Found source quality option, clicking');
-                                        qualityButton.click();
+                                    const text = option.textContent?.trim() || option.getAttribute('aria-label') || '';
+                                    if (text.toLowerCase().includes('chunked') || text.toLowerCase().includes('source') || text.toLowerCase().includes('исходник')) {
+                                        log.info('Found source quality option (fallback), clicking');
+                                        option.click();
                                         return;
                                     }
-                                } catch (e) {
+                                } catch (error) {
                                     // Continue searching
                                 }
                             }
-                        }, 500);
+                        }, 100);
                         break;
                     }
                 }
             }
         } catch (e) {
             // Quality force error
+        }
+    };
+
+    const VisibilityManager = {
+        initialized: false,
+        lastTrigger: 0,
+        boundVisibilityChange: null,
+        boundFocus: null,
+        boundResume: null,
+
+        trigger(force = false) {
+            const now = Date.now();
+            if (!force && now - this.lastTrigger < CONFIG.QUALITY_SETTINGS.QUALITY_CHECK_INTERVAL) {
+                return;
+            }
+
+            this.lastTrigger = now;
+            QualityManager.reset();
+
+            try {
+                const forcePromise = forceSourceQuality();
+                if (forcePromise && typeof forcePromise.then === 'function') {
+                    forcePromise.catch(() => {});
+                }
+            } catch (error) {
+                log.debug('VisibilityManager forceSourceQuality error:', error);
+            }
+
+            try {
+                const restorePromise = QualityManager.restoreQuality(true);
+                if (restorePromise && typeof restorePromise.then === 'function') {
+                    restorePromise.catch(() => {});
+                }
+            } catch (error) {
+                log.debug('VisibilityManager restoreQuality error:', error);
+            }
+        },
+
+        handleVisibilityChange() {
+            if (!document.hidden) {
+                this.trigger(true);
+            }
+        },
+
+        handleFocus() {
+            this.trigger(true);
+        },
+
+        handleResume() {
+            this.trigger(true);
+        },
+
+        init() {
+            if (this.initialized) return;
+
+            this.boundVisibilityChange = this.handleVisibilityChange.bind(this);
+            this.boundFocus = this.handleFocus.bind(this);
+            this.boundResume = this.handleResume.bind(this);
+
+            document.addEventListener('visibilitychange', this.boundVisibilityChange, { passive: true });
+            window.addEventListener('focus', this.boundFocus, { passive: true });
+            window.addEventListener('pageshow', this.boundResume, { passive: true });
+
+            this.initialized = true;
+        },
+
+        cleanup() {
+            if (!this.initialized) return;
+
+            document.removeEventListener('visibilitychange', this.boundVisibilityChange);
+            window.removeEventListener('focus', this.boundFocus);
+            window.removeEventListener('pageshow', this.boundResume);
+
+            this.boundVisibilityChange = null;
+            this.boundFocus = null;
+            this.boundResume = null;
+            this.initialized = false;
         }
     };
 
@@ -1219,7 +1385,7 @@ div[id*="ivs"][id*="ad"] {
                                             // Restore quality after ad
                                             if (CONFIG.SETTINGS.AUTO_QUALITY_RESTORE) {
                                                 setTimeout(() => {
-                                                    QualityManager.restoreQuality();
+                                                    QualityManager.restoreQuality(true);
                                                 }, CONFIG.QUALITY_SETTINGS.QUALITY_RESTORE_DELAY);
                                             }
                                         }
@@ -1227,7 +1393,7 @@ div[id*="ivs"][id*="ad"] {
                                     } catch (e) {
                                         log.error('Play attempt error:', e);
                                     }
-                                }, 1500 * retryCount); // Exponential backoff
+                                }, 300 * retryCount); // Accelerated exponential backoff
                             } else {
                                 log.warn('Max retries reached, giving up on restore');
                                 adDetected = false;
@@ -1270,8 +1436,8 @@ div[id*="ivs"][id*="ad"] {
                         if (mutation.type === 'attributes' && mutation.attributeName === 'src') {
                             // Stream change detected, restoring quality
                             setTimeout(() => {
-                                QualityManager.restoreQuality();
-                            }, 2000);
+                                QualityManager.restoreQuality(true);
+                            }, 200);
                             break;
                         }
                     }
@@ -1340,16 +1506,16 @@ div[id*="ivs"][id*="ad"] {
             const bannerCheckInterval = setInterval(() => {
                 removeCookieBanners(true); // Use debug mode to reduce log spam
                 bannerCheckCount++;
-                if (bannerCheckCount >= 6) { // 6 times * 10 seconds = 60 seconds total
+                if (bannerCheckCount >= 6) { // Runs for ~18 seconds total
                     clearInterval(bannerCheckInterval);
                 }
-            }, 10000); // Check every 10 seconds instead of 2
+            }, 3000); // Check every 3 seconds for faster cleanup
 
             // Setup enhanced MutationObserver for dynamic cookie banners
             if (typeof MutationObserver !== 'undefined') {
                 // Throttle to prevent excessive calls
                 let lastBannerCheck = 0;
-                const THROTTLE_INTERVAL = 2000; // 2 seconds
+                const THROTTLE_INTERVAL = 500; // Faster response to new banners
 
                 const bannerCheckFunction = CONFIG.SETTINGS.DEBOUNCED_OBSERVERS
                 ? debounce(() => {
@@ -1363,7 +1529,7 @@ div[id*="ivs"][id*="ad"] {
                     const now = Date.now();
                     if (now - lastBannerCheck >= THROTTLE_INTERVAL) {
                         lastBannerCheck = now;
-                        setTimeout(() => removeCookieBanners(true), 500); // Use debug mode
+                        setTimeout(() => removeCookieBanners(true), 100); // Rapid follow-up check
                     }
                 };
 
@@ -1373,6 +1539,9 @@ div[id*="ivs"][id*="ad"] {
                         if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                             for (let node of mutation.addedNodes) {
                                 if (node.nodeType === 1) { // ELEMENT_NODE
+                                    // Skip chat elements
+                                    if (isChatElement(node)) continue;
+                                    
                                     const text = node.textContent || '';
                                     const className = node.className || '';
                                     const id = node.id || '';
@@ -1411,7 +1580,7 @@ div[id*="ivs"][id*="ad"] {
             // Setup IVS ad observer for dynamic elements
             if (typeof MutationObserver !== 'undefined') {
                 let lastIVSCheck = 0;
-                const IVS_THROTTLE_INTERVAL = 1000; // 1 second
+                const IVS_THROTTLE_INTERVAL = 200; // Faster cleanup for IVS ad elements
 
                 const ivsCheckFunction = debounce(() => {
                     const now = Date.now();
@@ -1422,7 +1591,7 @@ div[id*="ivs"][id*="ad"] {
                             try {
                                 const elements = document.querySelectorAll(selector);
                                 elements.forEach(element => {
-                                    if (element && element.parentNode) {
+                                    if (element && !isChatElement(element) && element.parentNode) {
                                         if (CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
                                             BatchDOMRemover.add(element);
                                         } else {
@@ -1443,6 +1612,9 @@ div[id*="ivs"][id*="ad"] {
                         if (mutation.type === 'childList' && mutation.addedNodes.length > 0) {
                             for (let node of mutation.addedNodes) {
                                 if (node.nodeType === 1) { // ELEMENT_NODE
+                                    // Skip chat elements
+                                    if (isChatElement(node)) continue;
+
                                     const className = node.className || '';
                                     const id = node.id || '';
                                     const classNameStr = typeof className === 'string' ? className : '';
@@ -1464,6 +1636,10 @@ div[id*="ivs"][id*="ad"] {
                                 (attrValue.toLowerCase().includes('ivs') ||
                                  attrValue.toLowerCase().includes('amazon') ||
                                  attrValue.toLowerCase().includes('ad'))) {
+                                // Skip chat elements
+                                if (isChatElement(mutation.target)) {
+                                    return;
+                                }
                                 shouldCheck = true;
                             }
                         }
@@ -1481,6 +1657,14 @@ div[id*="ivs"][id*="ad"] {
                 });
             }
 
+            // Initialize VisibilityManager for aggressive quality restoration
+            try {
+                VisibilityManager.init();
+                log.info('VisibilityManager initialized - quality will be restored on tab focus/visibility changes');
+            } catch (e) {
+                log.error('VisibilityManager initialization failed:', e);
+            }
+
             // Setup player monitor with retry
             let retryCount = 0;
             const maxRetries = 5;
@@ -1496,7 +1680,7 @@ div[id*="ivs"][id*="ad"] {
                     clearInterval(retryInterval);
                     log.warn('Player monitor retry limit reached');
                 }
-            }, 1000);
+            }, 500);
         } catch (error) {
             log.error('✗ Initialization failed:', error);
             if (isDebug) {
@@ -1522,6 +1706,12 @@ div[id*="ivs"][id*="ad"] {
                 if (video._streamChangeObserver) {
                     video._streamChangeObserver.disconnect();
                 }
+            }
+
+            try {
+                VisibilityManager.cleanup();
+            } catch (error) {
+                log.debug('VisibilityManager cleanup error:', error);
             }
 
             // Enhanced cleanup completed
