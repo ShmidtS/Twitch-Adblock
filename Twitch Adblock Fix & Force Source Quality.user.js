@@ -63,9 +63,12 @@
                 'ad.twitch.tv',
                 'poster.ad.twitch.tv',
                 'video.ad.twitch.tv',
+                'stream-display-ad.twitch.tv',
+                'samsung-ads.com',
                 'doubleclick.net',
                 'googlesyndication.com',
                 'googletagservices.com',
+                'googleadservices.com',
                 'amazon-adsystem.com',
                 'adservice.google.com',
                 'imasdk.googleapis.com',
@@ -84,6 +87,9 @@
                 'hotjar.com',
                 'fullstory.com',
                 'clarity.ms',
+                'mcs.zemanta.com',
+                'rc.rlcdn.com',
+                'events.lastsecondmedia.com',
             ],
             // Whitelist patterns - NEVER block these
             CHAT_PROTECTION_PATTERNS: [
@@ -133,6 +139,12 @@
                 'EXT-X-SPLICEPOINT-SCTE35',
                 'EXT-X-SEGMENT',
                 'EXT-X-TARGETDURATION',
+                'EXT-X-TWITCH-IS_LOOKHEAD',
+                'EXT-X-TWITCH-IS',
+                'EXT-X-AD',
+                'EXT-X-AD-BREAK',
+                'EXT-X-BIF',
+                'EXT-X-CUE',
             ],
             // Precise DOM selectors
             AD_DOM_SELECTORS: [
@@ -144,6 +156,8 @@
                 '.stream-display-ad__wrapper',
                 '.stream-display-ad__container',
                 '.stream-display-ad',
+                '.stream-display-ad-pushdown',
+                '.stream-display-ad-portal',
                 '.ivs-ad-container',
                 '.ivs-ad-overlay',
                 '.ivs-ad-container__overlay',
@@ -153,6 +167,7 @@
                 '.ivs-ad-skip-button',
                 '.ivs-ad-linear',
                 '.ivs-linear-ad',
+                '.ivs-ad-marker',
                 '[data-a-target="player-ad-label"]',
                 '.player-ad-overlay',
                 '.player-ad-overlay--linear',
@@ -167,6 +182,29 @@
                 '[role="dialog"][aria-label*="ad" i]',
                 '[aria-label*="advertisement" i]',
                 '[aria-label*="commercial" i]',
+                // Pushdown ads
+                '.pushdown-ad',
+                '.pushdown-ad-container',
+                '.pushdown-banner',
+                // PSA (Public Service Ads)
+                '.psa-banner',
+                '.psa-container',
+                // Extension ads
+                '.extension-ad-container',
+                '.extension-sponsored-content',
+                // Bounty board ads
+                '.bounty-board-ad',
+                '.bounty-sponsored-card',
+                // Community points sponsored
+                '.sponsored-upsell',
+                '.sponsored-content-card',
+                // Bits/cheering sponsored
+                '.bits-sponsored',
+                '.cheering-sponsored-content',
+                // Partner plus ads
+                '.partner-plus-ad',
+                '.upsell-banner',
+                // Cookie consent
                 '.consent-banner',
                 '.gdpr-consent-banner',
                 '[data-a-target="consent-banner-accept"]',
@@ -316,6 +354,43 @@
         return false;
     };
 
+    // Enhanced URL pattern matching for ad detection
+    const isLikelyAdUrl = (url) => {
+        if (!url) return false;
+        const urlLower = url.toLowerCase();
+
+        const adPatterns = [
+            /\/ads?\//i,
+            /adserver/i,
+            /sponsor/i,
+            /commercial/i,
+            /promotion/i,
+            /upsell/i,
+            /sponsored/i,
+            /advertisement/i,
+            /doubleclick/i,
+            /googlesyndication/i,
+            /amazon-adsystem/i,
+            /criteo/i,
+            /taboola/i,
+            /outbrain/i,
+            /stream-display-ad/i,
+            /pushdown/i,
+            /preroll/i,
+            /midroll/i,
+            /postroll/i,
+            /bounty/i,
+            /cheering/i,
+            /bits/i,
+            /partner[-\s]?plus/i,
+            /extension/i,
+            /community[-\s]?points/i,
+            /hype[-\s]?train/i,
+        ];
+
+        return adPatterns.some(pattern => pattern.test(urlLower));
+    };
+
     // ====== ENHANCED UTILITIES ======
     // Debounce utility for performance optimization
     const debounce = (func, wait) => {
@@ -328,6 +403,125 @@
             clearTimeout(timeout);
             timeout = setTimeout(later, wait);
         };
+    };
+
+    // Enhanced ad detection for embedded ad elements
+    const detectEmbeddedAds = () => {
+        const adIndicators = [
+            // Class names
+            /ad[-\s]?break/i,
+            /commercial/i,
+            /sponsor/i,
+            /promotion/i,
+            /upsell/i,
+            /sponsored/i,
+            /advertisement/i,
+            /stream-display-ad/i,
+            /pushdown/i,
+            /preroll/i,
+            /midroll/i,
+            /postroll/i,
+            /bounty/i,
+            /cheering/i,
+            /bits/i,
+            /partner[-\s]?plus/i,
+            /extension/i,
+            /community[-\s]?points/i,
+            /hype[-\s]?train/i,
+            // IVS ads
+            /ivs[-\s]?ad/i,
+            /amazon[-\s]?ivs/i,
+            /amzn[-\s]?ivs/i,
+            // PSA (Public Service Ads)
+            /psa/i,
+            // Extension ads
+            /extension[-\s]?ad/i,
+            /extension[-\s]?sponsor/i,
+            // Common ad patterns
+            /google[-\s]?ad/i,
+            /doubleclick/i,
+            /googlesyndication/i,
+        ];
+
+        const suspiciousElements = [];
+
+        // Check all divs and spans for ad-like classes
+        const elements = document.querySelectorAll('div, span, section, article, aside, header, footer, nav, main, figure, picture');
+        elements.forEach(el => {
+            try {
+                const className = el.className || '';
+                const id = el.id || '';
+                const text = el.textContent || '';
+                const ariaLabel = el.getAttribute('aria-label') || '';
+                const dataTarget = el.getAttribute('data-a-target') || '';
+                const role = el.getAttribute('role') || '';
+
+                const combined = `${className} ${id} ${text} ${ariaLabel} ${dataTarget} ${role}`.toLowerCase();
+
+                adIndicators.forEach(pattern => {
+                    if (pattern.test(combined)) {
+                        if (!isChatElement(el) && !suspiciousElements.includes(el)) {
+                            suspiciousElements.push(el);
+                        }
+                    }
+                });
+            } catch (e) {
+                // Skip errors
+            }
+        });
+
+        return suspiciousElements;
+    };
+
+    // Aggressive embedded ad removal
+    const removeEmbeddedAds = () => {
+        try {
+            const suspiciousElements = detectEmbeddedAds();
+            let removedCount = 0;
+
+            suspiciousElements.forEach(el => {
+                try {
+                    if (el && el.parentNode) {
+                        // Additional check: if element has no children or very little content, likely an ad container
+                        const hasMinimalContent = el.children.length === 0 ||
+                                                 (el.textContent && el.textContent.trim().length < 50);
+
+                        // Also check if it has ad-related dimensions
+                        const style = window.getComputedStyle(el);
+                        const isHidden = style.display === 'none' || style.visibility === 'hidden';
+
+                        // More aggressive: remove any element that matches ad patterns
+                        // regardless of content, but skip if it's in a video player or chat
+                        const isInVideoPlayer = el.closest('video, [data-a-target="player"]');
+                        const isInChat = isChatElement(el);
+
+                        // Remove if: minimal content OR hidden OR matches strong ad indicators
+                        const className = (el.className || '').toLowerCase();
+                        const hasStrongAdIndicators = className.includes('ad-') ||
+                                                   className.includes('commercial') ||
+                                                   className.includes('sponsor') ||
+                                                   className.includes('stream-display-ad');
+
+                        if ((hasMinimalContent || isHidden || hasStrongAdIndicators) && !isInVideoPlayer && !isInChat) {
+                            if (CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
+                                BatchDOMRemover.add(el);
+                            } else {
+                                el.parentNode.removeChild(el);
+                            }
+                            removedCount++;
+                        }
+                    }
+                } catch (e) {
+                    // Skip errors
+                }
+            });
+
+            if (removedCount > 0) {
+                log.debug(`Aggressively removed ${removedCount} embedded ad elements`);
+            }
+        } catch (e) {
+            log.debug('Embedded ad removal error:', e);
+        }
     };
 
     // Quality cache for persistence across sessions
@@ -632,6 +826,12 @@
                 return new Response(null, { status: 204, statusText: 'Blocked' });
             }
 
+            // Also block using pattern matching for additional ad URLs
+            if (CONFIG.SETTINGS.ENABLE_AD_SERVER_BLOCKING && isLikelyAdUrl(requestUrl)) {
+                log.info('Blocked ad URL (pattern match):', requestUrl);
+                return new Response(null, { status: 204, statusText: 'Blocked' });
+            }
+
             // Handle M3U8 cleaning
             if (CONFIG.SETTINGS.ENABLE_M3U8_CLEANING &&
                 requestUrl.includes('.m3u8') &&
@@ -649,6 +849,9 @@
                             log.info(`Cleaned M3U8: removed ${cleaned.removedSegments} ad segments`);
                             const newHeaders = new Headers(response.headers);
                             newHeaders.set('Content-Type', 'application/x-mpegURL');
+                            newHeaders.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+                            newHeaders.set('Pragma', 'no-cache');
+                            newHeaders.set('Expires', '0');
                             return new Response(cleaned.text, {
                                 status: response.status,
                                 statusText: response.statusText,
@@ -659,6 +862,24 @@
                 }
 
                 return response;
+            }
+
+            // Block analytics and tracking services that feed ads
+            if (requestUrl.includes('newrelic.com') ||
+                requestUrl.includes('segment.com') ||
+                requestUrl.includes('mixpanel.com') ||
+                requestUrl.includes('hotjar.com') ||
+                requestUrl.includes('fullstory.com') ||
+                requestUrl.includes('clarity.ms') ||
+                requestUrl.endsWith('/events') ||
+                requestUrl.includes('/analytics/') ||
+                requestUrl.includes('/track/') ||
+                requestUrl.includes('/collect') ||
+                requestUrl.includes('/beacon') ||
+                requestUrl.includes('/pixel') ||
+                isLikelyAdUrl(requestUrl)) {
+                log.info('Blocked tracking/analytics/ad service:', requestUrl);
+                return new Response(null, { status: 204, statusText: 'Blocked' });
             }
 
             // Handle GQL modification
@@ -882,6 +1103,21 @@
                     }
                 }
 
+                // Ultra-aggressive: check for ad URLs in segment paths
+                if (line && !line.startsWith('#')) {
+                    const isAdSegment = line.includes('ad') ||
+                                      line.includes('sponsor') ||
+                                      line.includes('commercial') ||
+                                      line.includes('preroll') ||
+                                      line.includes('midroll') ||
+                                      line.includes('postroll');
+
+                    if (isAdSegment) {
+                        removedSegments++;
+                        continue;
+                    }
+                }
+
                 // Keep the line
                 result.push(rawLine);
             }
@@ -1008,8 +1244,8 @@
                 log.debug('Removed adsEnabled parameter');
             }
 
-            // Remove any geo-specific ad parameters that can bypass blocking wh
-            const geoKeys = ['geoblock', 'geoBlock', 'geoBlocked', 'geoRestrictions'];
+            // Remove any geo-specific ad parameters that can bypass blocking
+            const geoKeys = ['geoblock', 'geoBlock', 'geoBlocked', 'geoRestrictions', 'geoEnabled'];
             geoKeys.forEach((key) => {
                 if (Object.prototype.hasOwnProperty.call(vars, key)) {
                     delete vars[key];
@@ -1017,6 +1253,19 @@
                     log.debug(`Removed ${key} parameter`);
                 }
             });
+
+            // Force ad blockers on
+            vars.adblockEnabled = true;
+            vars.adblock = true;
+            vars.adsBlocked = true;
+            changed = true;
+            log.debug('Force-enabled adblock parameters');
+
+            // Set quality options to prevent ad-based quality changes
+            vars.enableAutoQuality = false;
+            vars.enforceVideoQuality = true;
+            changed = true;
+            log.debug('Set quality enforcement options');
 
             return { changed, data: { ...payload, variables: vars } };
         } catch (error) {
@@ -1046,7 +1295,12 @@
                     '[data-test-selector*="ad-overlay"]',
                     '.ad-banner',
                     '.ad-container',
-                    '.ad-overlay'
+                    '.ad-overlay',
+                    // Additional aggressive selectors
+                    '[class*="ad-"]',
+                    '[id*="ad-"]',
+                    '[class*="-ad"]',
+                    '[id*="-ad"]',
                 ];
             }
 
@@ -1060,6 +1314,11 @@ ${selectorChunk1.join(',\n')} {
     display: none !important;
     opacity: 0 !important;
     visibility: hidden !important;
+    height: 0 !important;
+    width: 0 !important;
+    position: absolute !important;
+    left: -9999px !important;
+    pointer-events: none !important;
 }
             `;
 
@@ -1068,6 +1327,11 @@ ${selectorChunk2.join(',\n')} {
     display: none !important;
     opacity: 0 !important;
     visibility: hidden !important;
+    height: 0 !important;
+    width: 0 !important;
+    position: absolute !important;
+    left: -9999px !important;
+    pointer-events: none !important;
 }
 
 video {
@@ -1084,6 +1348,8 @@ video {
 [class*="ivs-ad"], [id*="ivs-ad"] {
     display: none !important;
     visibility: hidden !important;
+    height: 0 !important;
+    width: 0 !important;
 }
 
 [class*="amazon-ivs"], [class*="amzn-ivs"] {
@@ -1110,6 +1376,14 @@ video {
 /* Block IVS ad overlays */
 div[class*="ivs"][class*="ad"],
 div[id*="ivs"][id*="ad"] {
+    display: none !important;
+}
+
+/* Aggressive ad pattern blocking */
+[class*="ad"][class*="break"],
+[class*="commercial"],
+[class*="sponsor"],
+[class*="promo"] {
     display: none !important;
 }
             `;
@@ -1354,6 +1628,33 @@ div[id*="ivs"][id*="ad"] {
                 video.addEventListener('loadeddata', autoUnmute, { once: true });
             }
 
+            // Aggressive ad element detection on video events
+            const adDetectionEvents = ['loadstart', 'loadeddata', 'playing', 'progress', 'stalled', 'waiting', 'suspend', 'abort', 'error'];
+            adDetectionEvents.forEach(eventType => {
+                video.addEventListener(eventType, () => {
+                    // When video shows signs of ad loading, aggressively clean up
+                    if (eventType === 'stalled' || eventType === 'waiting' || eventType === 'suspend') {
+                        setTimeout(() => {
+                            removeEmbeddedAds();
+                            // Also clean M3U8 cache if exists
+                            const allSources = document.querySelectorAll('source[src*=".m3u8"]');
+                            allSources.forEach(source => {
+                                if (source.src && source.src.includes('usher.ttvnw.net')) {
+                                    // Force reload by clearing and re-setting
+                                    const parentVideo = source.parentElement;
+                                    if (parentVideo && parentVideo.tagName === 'VIDEO') {
+                                        const currentSrc = parentVideo.currentSrc;
+                                        if (currentSrc) {
+                                            parentVideo.load(); // Force reload
+                                        }
+                                    }
+                                }
+                            });
+                        }, 100);
+                    }
+                }, { passive: true });
+            });
+
             // Enhanced playback restoration with quality recovery
             if (CONFIG.SETTINGS.RESTORE_ON_AD) {
                 let adDetected = false;
@@ -1533,6 +1834,9 @@ div[id*="ivs"][id*="ad"] {
             // Remove cookie banners immediately
             removeCookieBanners();
 
+            // Run aggressive embedded ad removal immediately
+            removeEmbeddedAds();
+
             // Setup periodic cookie banner removal (every 10 seconds for first 60 seconds)
             let bannerCheckCount = 0;
             const bannerCheckInterval = setInterval(() => {
@@ -1635,6 +1939,9 @@ div[id*="ivs"][id*="ad"] {
                                 // Ignore selector errors
                             }
                         });
+
+                        // Also run aggressive embedded ad removal
+                        removeEmbeddedAds();
                     }
                 }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY);
 
@@ -1654,8 +1961,12 @@ div[id*="ivs"][id*="ad"] {
 
                                     if (classNameStr.toLowerCase().includes('ivs') ||
                                         classNameStr.toLowerCase().includes('amazon') ||
+                                        classNameStr.toLowerCase().includes('ad') ||
+                                        classNameStr.toLowerCase().includes('sponsor') ||
+                                        classNameStr.toLowerCase().includes('promo') ||
                                         idStr.toLowerCase().includes('ivs') ||
-                                        idStr.toLowerCase().includes('amazon')) {
+                                        idStr.toLowerCase().includes('amazon') ||
+                                        idStr.toLowerCase().includes('ad')) {
                                         shouldCheck = true;
                                         break;
                                     }
@@ -1667,7 +1978,9 @@ div[id*="ivs"][id*="ad"] {
                             if (typeof attrValue === 'string' &&
                                 (attrValue.toLowerCase().includes('ivs') ||
                                  attrValue.toLowerCase().includes('amazon') ||
-                                 attrValue.toLowerCase().includes('ad'))) {
+                                 attrValue.toLowerCase().includes('ad') ||
+                                 attrValue.toLowerCase().includes('sponsor') ||
+                                 attrValue.toLowerCase().includes('promo'))) {
                                 // Skip chat elements
                                 if (isChatElement(mutation.target)) {
                                     return;
@@ -1688,6 +2001,22 @@ div[id*="ivs"][id*="ad"] {
                     attributeFilter: ['class', 'id']
                 });
             }
+
+            // Setup aggressive embedded ad removal interval
+            setInterval(() => {
+                removeEmbeddedAds();
+            }, 1500); // Check every 1.5 seconds for embedded ads (more frequent)
+
+            // Additional aggressive cleanup on page visibility changes
+            document.addEventListener('visibilitychange', () => {
+                if (!document.hidden) {
+                    // Page became visible - run all cleanup routines
+                    setTimeout(() => {
+                        removeEmbeddedAds();
+                        removeCookieBanners(true);
+                    }, 100);
+                }
+            }, { passive: true });
 
             // Initialize VisibilityManager for aggressive quality restoration
             try {
