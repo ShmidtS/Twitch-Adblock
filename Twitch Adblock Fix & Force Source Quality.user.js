@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      33.1.0
-// @description  Twitch ad-blocking
+// @version      33.1.2
+// @description  Twitch ad-blocking with performance optimizations and context fix
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
 // @match        https://m.twitch.tv/*
@@ -54,7 +54,7 @@
     };
 
     const CONFIG = {
-        SCRIPT_VERSION: '33.1.0',
+        SCRIPT_VERSION: '33.1.2',
         SETTINGS,
         ADVANCED: {
             AD_SERVER_DOMAINS: [
@@ -397,10 +397,16 @@
         let timeout;
         return function executedFunction(...args) {
             const later = () => {
-                clearTimeout(timeout);
-                func(...args);
+                timeout = undefined;
+                try {
+                    func(...args);
+                } catch (e) {
+                    log.error('Debounce function error:', e);
+                }
             };
-            clearTimeout(timeout);
+            if (timeout) {
+                clearTimeout(timeout);
+            }
             timeout = setTimeout(later, wait);
         };
     };
@@ -445,30 +451,38 @@
 
         const suspiciousElements = [];
 
-        // Check all divs and spans for ad-like classes
-        const elements = document.querySelectorAll('div, span, section, article, aside, header, footer, nav, main, figure, picture');
-        elements.forEach(el => {
-            try {
-                const className = el.className || '';
-                const id = el.id || '';
-                const text = el.textContent || '';
-                const ariaLabel = el.getAttribute('aria-label') || '';
-                const dataTarget = el.getAttribute('data-a-target') || '';
-                const role = el.getAttribute('role') || '';
-
-                const combined = `${className} ${id} ${text} ${ariaLabel} ${dataTarget} ${role}`.toLowerCase();
-
-                adIndicators.forEach(pattern => {
-                    if (pattern.test(combined)) {
-                        if (!isChatElement(el) && !suspiciousElements.includes(el)) {
-                            suspiciousElements.push(el);
-                        }
+        try {
+            // Check all divs and spans for ad-like classes
+            const elements = document.querySelectorAll('div, span, section, article, aside, header, footer, nav, main, figure, picture');
+            elements.forEach(el => {
+                try {
+                    if (!el || !el.className) {
+                        return;
                     }
-                });
-            } catch (e) {
-                // Skip errors
-            }
-        });
+
+                    const className = el.className || '';
+                    const id = el.id || '';
+                    const text = el.textContent || '';
+                    const ariaLabel = el.getAttribute('aria-label') || '';
+                    const dataTarget = el.getAttribute('data-a-target') || '';
+                    const role = el.getAttribute('role') || '';
+
+                    const combined = `${className} ${id} ${text} ${ariaLabel} ${dataTarget} ${role}`.toLowerCase();
+
+                    adIndicators.forEach(pattern => {
+                        if (pattern.test(combined)) {
+                            if (!isChatElement(el) && !suspiciousElements.includes(el)) {
+                                suspiciousElements.push(el);
+                            }
+                        }
+                    });
+                } catch (e) {
+                    // Skip individual element errors
+                }
+            });
+        } catch (e) {
+            log.debug('Detect embedded ads error:', e);
+        }
 
         return suspiciousElements;
     };
@@ -479,40 +493,51 @@
             const suspiciousElements = detectEmbeddedAds();
             let removedCount = 0;
 
+            if (!suspiciousElements || suspiciousElements.length === 0) {
+                return;
+            }
+
             suspiciousElements.forEach(el => {
                 try {
-                    if (el && el.parentNode) {
-                        // Additional check: if element has no children or very little content, likely an ad container
-                        const hasMinimalContent = el.children.length === 0 ||
-                                                 (el.textContent && el.textContent.trim().length < 50);
+                    if (!el || !el.parentNode) {
+                        return;
+                    }
 
-                        // Also check if it has ad-related dimensions
-                        const style = window.getComputedStyle(el);
-                        const isHidden = style.display === 'none' || style.visibility === 'hidden';
+                    // Skip if element is already removed
+                    if (!document.body.contains(el)) {
+                        return;
+                    }
 
-                        // More aggressive: remove any element that matches ad patterns
-                        // regardless of content, but skip if it's in a video player or chat
-                        const isInVideoPlayer = el.closest('video, [data-a-target="player"]');
-                        const isInChat = isChatElement(el);
+                    // Additional check: if element has no children or very little content, likely an ad container
+                    const hasMinimalContent = el.children.length === 0 ||
+                                             (el.textContent && el.textContent.trim().length < 50);
 
-                        // Remove if: minimal content OR hidden OR matches strong ad indicators
-                        const className = (el.className || '').toLowerCase();
-                        const hasStrongAdIndicators = className.includes('ad-') ||
-                                                   className.includes('commercial') ||
-                                                   className.includes('sponsor') ||
-                                                   className.includes('stream-display-ad');
+                    // Also check if it has ad-related dimensions
+                    const style = window.getComputedStyle(el);
+                    const isHidden = style.display === 'none' || style.visibility === 'hidden';
 
-                        if ((hasMinimalContent || isHidden || hasStrongAdIndicators) && !isInVideoPlayer && !isInChat) {
-                            if (CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
-                                BatchDOMRemover.add(el);
-                            } else {
-                                el.parentNode.removeChild(el);
-                            }
-                            removedCount++;
+                    // More aggressive: remove any element that matches ad patterns
+                    // regardless of content, but skip if it's in a video player or chat
+                    const isInVideoPlayer = el.closest('video, [data-a-target="player"]');
+                    const isInChat = isChatElement(el);
+
+                    // Remove if: minimal content OR hidden OR matches strong ad indicators
+                    const className = (el.className || '').toLowerCase();
+                    const hasStrongAdIndicators = className.includes('ad-') ||
+                                               className.includes('commercial') ||
+                                               className.includes('sponsor') ||
+                                               className.includes('stream-display-ad');
+
+                    if ((hasMinimalContent || isHidden || hasStrongAdIndicators) && !isInVideoPlayer && !isInChat) {
+                        if (CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
+                            BatchDOMRemover.add(el);
+                        } else {
+                            el.parentNode.removeChild(el);
                         }
+                        removedCount++;
                     }
                 } catch (e) {
-                    // Skip errors
+                    // Skip errors silently
                 }
             });
 
@@ -622,20 +647,27 @@
         processing: false,
 
         add(element) {
-            if (!element || isChatElement(element)) {
-                if (isChatElement(element)) {
-                    log.debug('Skipping chat element from removal queue');
+            try {
+                if (!element || isChatElement(element)) {
+                    if (isChatElement(element)) {
+                        log.debug('Skipping chat element from removal queue');
+                    }
+                    return;
                 }
-                return;
-            }
 
-            if (!CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
-                this.removeNow(element);
-                return;
-            }
+                if (!CONFIG.SETTINGS.BATCH_DOM_REMOVAL) {
+                    this.removeNow(element);
+                    return;
+                }
 
-            this.queue.push(element);
-            this.scheduleProcess();
+                // Add to queue only if not already in queue
+                if (!this.queue.includes(element)) {
+                    this.queue.push(element);
+                }
+                this.initDebounce()();
+            } catch (e) {
+                log.debug('BatchDOMRemover add error:', e);
+            }
         },
 
         removeNow(element) {
@@ -648,33 +680,45 @@
             }
         },
 
-        scheduleProcess: debounce(() => {
-            this.process();
-        }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY),
+        scheduleProcess: null,
+
+        initDebounce() {
+            if (!this.scheduleProcess) {
+                this.scheduleProcess = debounce(function() {
+                    this.process();
+                }.bind(this), CONFIG.PERFORMANCE.DEBOUNCE_DELAY);
+            }
+            return this.scheduleProcess;
+        },
 
         process() {
-            if (this.processing || this.queue.length === 0) return;
+            try {
+                if (this.processing || this.queue.length === 0) return;
 
-            this.processing = true;
-            const batch = this.queue.splice(0, CONFIG.PERFORMANCE.BATCH_SIZE);
+                this.processing = true;
+                const batch = this.queue.splice(0, CONFIG.PERFORMANCE.BATCH_SIZE);
 
-            requestAnimationFrame(() => {
-                batch.forEach(element => {
-                    try {
-                        if (element && !isChatElement(element) && element.parentNode) {
-                            element.parentNode.removeChild(element);
+                requestAnimationFrame(() => {
+                    batch.forEach(element => {
+                        try {
+                            if (element && !isChatElement(element) && element.parentNode) {
+                                element.parentNode.removeChild(element);
+                            }
+                        } catch (e) {
+                            log.debug('Batch remove error:', e);
                         }
-                    } catch (e) {
-                        log.debug('Batch remove error:', e);
+                    });
+
+                    this.processing = false;
+
+                    if (this.queue.length > 0) {
+                        this.initDebounce()();
                     }
                 });
-
+            } catch (e) {
+                log.error('BatchDOMRemover process error:', e);
                 this.processing = false;
-
-                if (this.queue.length > 0) {
-                    this.scheduleProcess();
-                }
-            });
+            }
         }
     };
 
@@ -1187,85 +1231,89 @@
             let changed = false;
             const vars = { ...payload.variables };
 
-            // Force embed player to avoid ads - this is the key to blocking ads
-            if (vars.playerType !== 'embed') {
-                vars.playerType = 'embed';
-                changed = true;
-                log.debug('Modified playerType to embed');
-            }
-
-            // Ensure web platform
-            if (vars.platform !== 'web') {
-                vars.platform = 'web';
-                changed = true;
-                log.debug('Modified platform to web');
-            }
-
-            // Force HLS mediaplayer backend to avoid IVS ads pipeline
-            // This is critical for blocking ads across country changes
-            if (vars.playerBackend !== 'mediaplayer') {
-                vars.playerBackend = 'mediaplayer';
-                changed = true;
-                log.debug('Modified playerBackend to mediaplayer');
-            }
-
-            // Force chunked quality - ALWAYS
-            vars.videoQualityPreference = 'chunked';
-            changed = true;
-            log.debug('Forcefully set videoQualityPreference to chunked');
-
-            // Add supported codecs to avoid IVS ads - normalize and extend
-            const preferredCodecs = ['av1', 'h265', 'h264', 'vp9', 'av01', 'avc1', 'hev1', 'hvc1'];
-            const currentCodecs = Array.isArray(vars.supportedCodecs) ? vars.supportedCodecs : [];
-            const codecSet = new Set();
-            preferredCodecs.forEach(codec => codecSet.add(codec));
-            currentCodecs.forEach(codec => codecSet.add(codec));
-            const normalizedCodecs = Array.from(codecSet);
-
-            if (!Array.isArray(vars.supportedCodecs) ||
-                vars.supportedCodecs.length !== normalizedCodecs.length ||
-                !normalizedCodecs.every((codec, index) => vars.supportedCodecs[index] === codec)) {
-                vars.supportedCodecs = normalizedCodecs;
-                changed = true;
-                log.debug('Modified supportedCodecs');
-            }
-
-            // Remove ad-related parameters that Twitch may inject
-            // These can be added when switching countries or connections
-            if (Object.prototype.hasOwnProperty.call(vars, 'adblock')) {
-                delete vars.adblock;
-                changed = true;
-                log.debug('Removed adblock parameter');
-            }
-
-            if (Object.prototype.hasOwnProperty.call(vars, 'adsEnabled')) {
-                delete vars.adsEnabled;
-                changed = true;
-                log.debug('Removed adsEnabled parameter');
-            }
-
-            // Remove any geo-specific ad parameters that can bypass blocking
-            const geoKeys = ['geoblock', 'geoBlock', 'geoBlocked', 'geoRestrictions', 'geoEnabled'];
-            geoKeys.forEach((key) => {
-                if (Object.prototype.hasOwnProperty.call(vars, key)) {
-                    delete vars[key];
+            try {
+                // Force embed player to avoid ads - this is the key to blocking ads
+                if (vars.playerType !== 'embed') {
+                    vars.playerType = 'embed';
                     changed = true;
-                    log.debug(`Removed ${key} parameter`);
+                    log.debug('Modified playerType to embed');
                 }
-            });
 
-            // Force ad blockers on
-            vars.adblockEnabled = true;
-            vars.adblock = true;
-            vars.adsBlocked = true;
-            changed = true;
-            log.debug('Force-enabled adblock parameters');
+                // Ensure web platform
+                if (vars.platform !== 'web') {
+                    vars.platform = 'web';
+                    changed = true;
+                    log.debug('Modified platform to web');
+                }
 
-            // Set quality options to prevent ad-based quality changes
-            vars.enableAutoQuality = false;
-            vars.enforceVideoQuality = true;
-            changed = true;
-            log.debug('Set quality enforcement options');
+                // Force HLS mediaplayer backend to avoid IVS ads pipeline
+                // This is critical for blocking ads across country changes
+                if (vars.playerBackend !== 'mediaplayer') {
+                    vars.playerBackend = 'mediaplayer';
+                    changed = true;
+                    log.debug('Modified playerBackend to mediaplayer');
+                }
+
+                // Force chunked quality - ALWAYS
+                vars.videoQualityPreference = 'chunked';
+                changed = true;
+                log.debug('Forcefully set videoQualityPreference to chunked');
+
+                // Add supported codecs to avoid IVS ads - normalize and extend
+                const preferredCodecs = ['av1', 'h265', 'h264', 'vp9', 'av01', 'avc1', 'hev1', 'hvc1'];
+                const currentCodecs = Array.isArray(vars.supportedCodecs) ? vars.supportedCodecs : [];
+                const codecSet = new Set();
+                preferredCodecs.forEach(codec => codecSet.add(codec));
+                currentCodecs.forEach(codec => codecSet.add(codec));
+                const normalizedCodecs = Array.from(codecSet);
+
+                if (!Array.isArray(vars.supportedCodecs) ||
+                    vars.supportedCodecs.length !== normalizedCodecs.length ||
+                    !normalizedCodecs.every((codec, index) => vars.supportedCodecs[index] === codec)) {
+                    vars.supportedCodecs = normalizedCodecs;
+                    changed = true;
+                    log.debug('Modified supportedCodecs');
+                }
+
+                // Remove ad-related parameters that Twitch may inject
+                // These can be added when switching countries or connections
+                if (Object.prototype.hasOwnProperty.call(vars, 'adblock')) {
+                    delete vars.adblock;
+                    changed = true;
+                    log.debug('Removed adblock parameter');
+                }
+
+                if (Object.prototype.hasOwnProperty.call(vars, 'adsEnabled')) {
+                    delete vars.adsEnabled;
+                    changed = true;
+                    log.debug('Removed adsEnabled parameter');
+                }
+
+                // Remove any geo-specific ad parameters that can bypass blocking
+                const geoKeys = ['geoblock', 'geoBlock', 'geoBlocked', 'geoRestrictions', 'geoEnabled'];
+                geoKeys.forEach((key) => {
+                    if (Object.prototype.hasOwnProperty.call(vars, key)) {
+                        delete vars[key];
+                        changed = true;
+                        log.debug(`Removed ${key} parameter`);
+                    }
+                });
+
+                // Force ad blockers on
+                vars.adblockEnabled = true;
+                vars.adblock = true;
+                vars.adsBlocked = true;
+                changed = true;
+                log.debug('Force-enabled adblock parameters');
+
+                // Set quality options to prevent ad-based quality changes
+                vars.enableAutoQuality = false;
+                vars.enforceVideoQuality = true;
+                changed = true;
+                log.debug('Set quality enforcement options');
+            } catch (e) {
+                log.error('Variable modification error:', e);
+            }
 
             return { changed, data: { ...payload, variables: vars } };
         } catch (error) {
@@ -1837,15 +1885,19 @@ div[id*="ivs"][id*="ad"] {
             // Run aggressive embedded ad removal immediately
             removeEmbeddedAds();
 
-            // Setup periodic cookie banner removal (every 10 seconds for first 60 seconds)
+            // Setup periodic cookie banner removal (reduced frequency for performance)
             let bannerCheckCount = 0;
             const bannerCheckInterval = setInterval(() => {
-                removeCookieBanners(true); // Use debug mode to reduce log spam
+                try {
+                    removeCookieBanners(true); // Use debug mode to reduce log spam
+                } catch (e) {
+                    log.debug('Banner check error:', e);
+                }
                 bannerCheckCount++;
                 if (bannerCheckCount >= 6) { // Runs for ~18 seconds total
                     clearInterval(bannerCheckInterval);
                 }
-            }, 3000); // Check every 3 seconds for faster cleanup
+            }, 5000); // Check every 5 seconds for better performance
 
             // Setup enhanced MutationObserver for dynamic cookie banners
             if (typeof MutationObserver !== 'undefined') {
@@ -2002,10 +2054,14 @@ div[id*="ivs"][id*="ad"] {
                 });
             }
 
-            // Setup aggressive embedded ad removal interval
-            setInterval(() => {
-                removeEmbeddedAds();
-            }, 1500); // Check every 1.5 seconds for embedded ads (more frequent)
+            // Setup aggressive embedded ad removal interval (reduced frequency for performance)
+            const embeddedAdInterval = setInterval(() => {
+                try {
+                    removeEmbeddedAds();
+                } catch (e) {
+                    log.debug('Embedded ad interval error:', e);
+                }
+            }, 5000); // Check every 5 seconds for embedded ads (optimized frequency)
 
             // Additional aggressive cleanup on page visibility changes
             document.addEventListener('visibilitychange', () => {
@@ -2070,6 +2126,16 @@ div[id*="ivs"][id*="ad"] {
                 if (video._qualityDOMObserver) {
                     video._qualityDOMObserver.disconnect();
                 }
+            }
+
+            // Clear embedded ad interval
+            if (typeof embeddedAdInterval !== 'undefined') {
+                clearInterval(embeddedAdInterval);
+            }
+
+            // Clear banner check interval
+            if (typeof bannerCheckInterval !== 'undefined') {
+                clearInterval(bannerCheckInterval);
             }
 
             try {
