@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      33.1.2
+// @version      33.1.3
 // @description  Twitch ad-blocking with performance optimizations and context fix
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -54,7 +54,7 @@
     };
 
     const CONFIG = {
-        SCRIPT_VERSION: '33.1.2',
+        SCRIPT_VERSION: '33.1.3',
         SETTINGS,
         ADVANCED: {
             AD_SERVER_DOMAINS: [
@@ -99,6 +99,25 @@
                 'tmi.twitch.tv',
                 'usher.ttvnw.net/api/channel/hls',
                 '/gql POST',
+                // Authentication and authorization URLs - CRITICAL for chat login
+                'passport.twitch.tv',
+                'id.twitch.tv',
+                'api.twitch.tv/kraken/oauth2',
+                'oauth2/token',
+                'oauth2/authorize',
+                '/login',
+                '/auth',
+                'twitch.tv/login',
+                'client_id',
+                'redirect_uri',
+                'access_token',
+                'refresh_token',
+                'scope=chat',
+                'chat:read',
+                'chat:edit',
+                'user:read:email',
+                'openid',
+                'twitch:authorize',
             ],
             // Chat DOM selectors - NEVER interact with these
             CHAT_SELECTORS: [
@@ -126,6 +145,51 @@
                 'button[data-a-target*="reply"]',
                 'button[aria-label*="reply" i]',
                 'button[aria-label*="ответ" i]',
+                // Authentication and login elements - PROTECT THESE
+                '[data-a-target="login-button"]',
+                '[data-a-target="auth-button"]',
+                '[data-a-target="sign-in-button"]',
+                '[data-a-target="user-menu-button"]',
+                '[data-test-selector*="login"]',
+                '[data-test-selector*="auth"]',
+                '[data-test-selector*="signin"]',
+                'button[aria-label*="login" i]',
+                'button[aria-label*="sign in" i]',
+                'button[aria-label*="войти" i]',
+                'button[aria-label*="войти в" i]',
+                'button[aria-label*="авторизац" i]',
+                'a[href*="/login"]',
+                'a[href*="/auth"]',
+                'a[href*="/signup"]',
+                '.login-button',
+                '.auth-button',
+                '.sign-in-button',
+                '.auth-container',
+                '.login-container',
+                '.tw-full-height',
+                '.tw-flex',
+                '.tw-align-items-center',
+                'input[type="text"]',
+                'input[type="password"]',
+                'input[type="email"]',
+                'input[name="username"]',
+                'input[name="password"]',
+                'input[name="email"]',
+                'input[placeholder*="username" i]',
+                'input[placeholder*="password" i]',
+                'input[placeholder*="email" i]',
+                'input[placeholder*="логин" i]',
+                'input[placeholder*="пароль" i]',
+                'input[placeholder*="почта" i]',
+                'form[action*="login"]',
+                'form[action*="auth"]',
+                'form[action*="signin"]',
+                '.modal',
+                '[role="dialog"]',
+                '.overlay',
+                '.backdrop',
+                '[data-a-target*="modal"]',
+                '[data-a-target*="dialog"]',
             ],
             // M3U8 ad markers
             M3U8_AD_MARKERS: [
@@ -271,19 +335,19 @@
         });
     };
 
-    // Check if element is part of chat - NEVER interact with chat elements
+    // Check if element is part of chat or authentication - NEVER interact with these elements
     const isChatElement = (element) => {
         if (!element) return false;
-        
+
         try {
-            // Check if element matches chat selectors
+            // Check if element matches chat/auth selectors
             for (const selector of CONFIG.ADVANCED.CHAT_SELECTORS) {
                 if (element.matches && element.matches(selector)) {
                     return true;
                 }
             }
-            
-            // Check if any parent matches chat selectors
+
+            // Check if any parent matches chat/auth selectors
             let parent = element.parentElement;
             while (parent) {
                 for (const selector of CONFIG.ADVANCED.CHAT_SELECTORS) {
@@ -293,34 +357,77 @@
                 }
                 parent = parent.parentElement;
             }
-            
+
             // Additional heuristics - check classes and attributes
             const className = element.className || '';
             const id = element.id || '';
             const dataTarget = element.getAttribute('data-a-target') || '';
             const testSelector = element.getAttribute('data-test-selector') || '';
             const ariaLabel = element.getAttribute('aria-label') || '';
-            
+            const role = element.getAttribute('role') || '';
+            const action = element.getAttribute('action') || '';
+            const href = element.getAttribute('href') || '';
+            const name = element.getAttribute('name') || '';
+            const type = element.getAttribute('type') || '';
+            const tagName = element.tagName || '';
+
             const classStr = typeof className === 'string' ? className.toLowerCase() : '';
             const idStr = typeof id === 'string' ? id.toLowerCase() : '';
             const dataStr = typeof dataTarget === 'string' ? dataTarget.toLowerCase() : '';
             const testStr = typeof testSelector === 'string' ? testSelector.toLowerCase() : '';
             const ariaStr = typeof ariaLabel === 'string' ? ariaLabel.toLowerCase() : '';
-            
+            const roleStr = typeof role === 'string' ? role.toLowerCase() : '';
+            const actionStr = typeof action === 'string' ? action.toLowerCase() : '';
+            const hrefStr = typeof href === 'string' ? href.toLowerCase() : '';
+            const nameStr = typeof name === 'string' ? name.toLowerCase() : '';
+            const typeStr = typeof type === 'string' ? type.toLowerCase() : '';
+            const tagNameStr = typeof tagName === 'string' ? tagName.toLowerCase() : '';
+
             // Check for chat-related text
-            if (classStr.includes('chat') || 
-                idStr.includes('chat') || 
-                dataStr.includes('chat') || 
+            if (classStr.includes('chat') ||
+                idStr.includes('chat') ||
+                dataStr.includes('chat') ||
                 testStr.includes('chat') ||
                 ariaStr.includes('chat') ||
                 ariaStr.includes('reply') ||
                 ariaStr.includes('ответ')) {
                 return true;
             }
-            
+
+            // Check for authentication-related elements
+            if (classStr.includes('login') || classStr.includes('auth') || classStr.includes('signin') ||
+                idStr.includes('login') || idStr.includes('auth') || idStr.includes('signin') ||
+                dataStr.includes('login') || dataStr.includes('auth') || dataStr.includes('signin') ||
+                testStr.includes('login') || testStr.includes('auth') || testStr.includes('signin') ||
+                ariaStr.includes('login') || ariaStr.includes('sign in') || ariaStr.includes('signin') ||
+                ariaStr.includes('войти') || ariaStr.includes('войти в') || ariaStr.includes('авторизац') ||
+                hrefStr.includes('login') || hrefStr.includes('auth') || hrefStr.includes('signin') ||
+                actionStr.includes('login') || actionStr.includes('auth') || actionStr.includes('signin') ||
+                nameStr.includes('username') || nameStr.includes('password') || nameStr.includes('email') ||
+                nameStr.includes('client_id') || nameStr.includes('access_token') || nameStr.includes('scope')) {
+                return true;
+            }
+
+            // Check for input fields commonly used in authentication
+            if (tagNameStr === 'input' && (
+                typeStr === 'text' || typeStr === 'password' || typeStr === 'email' ||
+                nameStr === 'username' || nameStr === 'password' || nameStr === 'email' ||
+                nameStr === 'client_id' || nameStr === 'redirect_uri'
+            )) {
+                return true;
+            }
+
+            // Check for dialog/modal elements that might contain auth
+            if (roleStr === 'dialog' || roleStr === 'alert' || roleStr === 'alertdialog' ||
+                classStr.includes('modal') || classStr.includes('dialog') ||
+                classStr.includes('overlay') || classStr.includes('backdrop') ||
+                dataStr.includes('modal') || dataStr.includes('dialog')) {
+                return true;
+            }
+
             return false;
         } catch (e) {
-            // If error, assume it might be chat to be safe
+            // If error, assume it might be chat/auth to be safe
             return true;
         }
     };
@@ -337,12 +444,44 @@
     const shouldSkipBlocking = (url) => {
         if (!url) return false;
 
+        // Always skip if it's a chat or auth URL
         if (isChatOrAuthUrl(url)) {
             return true;
         }
 
+        // Additional auth-related URL patterns
+        const urlLower = url.toLowerCase();
+        const authPatterns = [
+            'passport.twitch.tv',
+            'id.twitch.tv',
+            'api.twitch.tv/kraken/oauth2',
+            'oauth2',
+            '/login',
+            '/auth',
+            'twitch.tv/login',
+            'client_id',
+            'redirect_uri',
+            'access_token',
+            'refresh_token',
+            'scope=chat',
+            'chat:read',
+            'chat:edit',
+            'user:read:email',
+            'openid',
+            'twitch:authorize',
+            // Common OAuth and auth endpoints
+            '/authorize',
+            '/token',
+            '/userinfo',
+            'twitch.tv/oauth',
+            '.twitch.tv/auth',
+        ];
+
+        if (authPatterns.some(pattern => urlLower.includes(pattern))) {
+            return true;
+        }
+
         if (CONFIG.SETTINGS.SKIP_AGGRESSIVE_BLOCKING) {
-            const urlLower = url.toLowerCase();
             if (urlLower.includes('ad') && !urlLower.includes('user') && !urlLower.includes('chat')) {
                 if (urlLower.includes('streamdisplayad') || urlLower.includes('commercial')) {
                     return false;
@@ -1390,6 +1529,57 @@ video {
 [data-a-target*="player-controls"] {
     pointer-events: auto !important;
     display: block !important;
+}
+
+/* PROTECT AUTHENTICATION AND LOGIN ELEMENTS - NEVER HIDE THESE */
+[data-a-target="login-button"],
+[data-a-target="auth-button"],
+[data-a-target="sign-in-button"],
+[data-a-target="user-menu-button"],
+[data-test-selector*="login"],
+[data-test-selector*="auth"],
+[data-test-selector*="signin"],
+button[aria-label*="login" i],
+button[aria-label*="sign in" i],
+button[aria-label*="войти" i],
+button[aria-label*="войти в" i],
+button[aria-label*="авторизац" i],
+a[href*="/login"],
+a[href*="/auth"],
+a[href*="/signup"],
+.login-button,
+.auth-button,
+.sign-in-button,
+.auth-container,
+.login-container,
+input[type="text"],
+input[type="password"],
+input[type="email"],
+input[name="username"],
+input[name="password"],
+input[name="email"],
+input[placeholder*="username" i],
+input[placeholder*="password" i],
+input[placeholder*="email" i],
+input[placeholder*="логин" i],
+input[placeholder*="пароль" i],
+input[placeholder*="почта" i],
+form[action*="login"],
+form[action*="auth"],
+form[action*="signin"],
+.modal[role="dialog"],
+.overlay,
+.backdrop,
+[data-a-target*="modal"],
+[data-a-target*="dialog"] {
+    display: block !important;
+    opacity: 1 !important;
+    visibility: visible !important;
+    height: auto !important;
+    width: auto !important;
+    position: static !important;
+    pointer-events: auto !important;
+    left: auto !important;
 }
 
 /* IVS-specific ad blocking */
