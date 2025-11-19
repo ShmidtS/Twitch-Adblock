@@ -37,6 +37,9 @@
         AUTO_RELOAD_MAX_ATTEMPTS: GM_getValue('TTV_AutoReloadMax', 6),
         AUTO_RELOAD_BASE_DELAY_MS: GM_getValue('TTV_AutoReloadBaseDelay', 2000),
         AUTO_RELOAD_MAX_DELAY_MS: GM_getValue('TTV_AutoReloadMaxDelay', 60000),
+        AUTO_RELOAD_ON_AD_DETECTED: GM_getValue('TTV_AutoReloadOnAd', true),
+        AUTO_RELOAD_AD_CHECK_INTERVAL: GM_getValue('TTV_AdCheckInterval', 3000),
+        AUTO_RELOAD_AD_MAX_ATTEMPTS: GM_getValue('TTV_AdReloadMax', 3),
     };
 
     const CONFIG = {
@@ -269,10 +272,64 @@
 
     let reloadAttempts = 0;
     let lastPath = location.pathname;
+    let adReloadAttempts = 0;
+    let lastAdCheckTime = 0;
+    let adDetectionInterval = null;
 
     function resetReloadAttempts() {
         reloadAttempts = 0;
         lastPath = location.pathname;
+    }
+
+    function resetAdReloadAttempts() {
+        adReloadAttempts = 0;
+        lastAdCheckTime = Date.now();
+    }
+
+    function isAdDetected() {
+        const adElements = document.querySelectorAll(CONFIG.AD_DOM_SELECTORS.join(', '));
+        return adElements.length > 0;
+    }
+
+    function handleAdDetection() {
+        if (!SETTINGS.AUTO_RELOAD_ON_AD_DETECTED) return;
+
+        const video = document.querySelector('video');
+        if (video && video.readyState > 0 && !video.paused && !video.ended) {
+            resetAdReloadAttempts();
+            return;
+        }
+
+        if (adReloadAttempts >= SETTINGS.AUTO_RELOAD_AD_MAX_ATTEMPTS) {
+            log.warn('Max ad reload attempts reached, stopping auto-reload');
+            if (adDetectionInterval) {
+                clearInterval(adDetectionInterval);
+                adDetectionInterval = null;
+            }
+            return;
+        }
+
+        const now = Date.now();
+        if (now - lastAdCheckTime < SETTINGS.AUTO_RELOAD_AD_CHECK_INTERVAL) {
+            return;
+        }
+
+        if (isAdDetected()) {
+            log.warn(`Ad detected, attempting reload (${adReloadAttempts + 1}/${SETTINGS.AUTO_RELOAD_AD_MAX_ATTEMPTS})`);
+            adReloadAttempts++;
+            lastAdCheckTime = now;
+
+            setTimeout(() => {
+                if (isAdDetected()) {
+                    log.info('Reloading page due to persistent ad detection');
+                    window.location.reload();
+                } else {
+                    resetAdReloadAttempts();
+                }
+            }, 1000);
+        } else {
+            resetAdReloadAttempts();
+        }
     }
 
     function scheduleReload(reason) {
@@ -334,6 +391,7 @@
         video.addEventListener('playing', () => {
             clearTimeout(stallTimer);
             resetReloadAttempts();
+            resetAdReloadAttempts();
         });
     }
 
@@ -366,6 +424,7 @@
                         v.load();
                     }
                     removeAds();
+                    resetAdReloadAttempts();
                 }, 300);
             }
         }, 150))
@@ -380,6 +439,10 @@
 
         setupSwitchDetector();
         watchForVideo();
+
+        if (SETTINGS.AUTO_RELOAD_ON_AD_DETECTED) {
+            adDetectionInterval = setInterval(handleAdDetection, SETTINGS.AUTO_RELOAD_AD_CHECK_INTERVAL);
+        }
 
         new MutationObserver(removeAds)
             .observe(document.body, { childList: true, subtree: true });
