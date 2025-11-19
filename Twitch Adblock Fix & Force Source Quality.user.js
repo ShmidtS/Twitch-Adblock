@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Twitch Adblock Ultimate
 // @namespace    TwitchAdblockUltimate
-// @version      34.0.6
+// @version      35.0.0
 // @description  Twitch ad-blocking with performance optimizations and context fix
 // @author       ShmidtS
 // @match        https://www.twitch.tv/*
@@ -28,7 +28,6 @@
 (function() {
     'use strict';
 
-    // SETTINGS
     const SETTINGS = {
         ENABLE_DEBUG: GM_getValue('TTV_EnableDebug', false),
         PERFORMANCE_MODE: GM_getValue('TTV_PerformanceMode', false),
@@ -45,41 +44,46 @@
             'edge.ads.twitch.tv', 'amazon-adsystem.com', 'scorecardresearch.com',
             'sq-tungsten-ts.amazon-adsystem.com', 'ads.ttvnw.net', 'ad.twitch.tv',
             'video.ad.twitch.tv', 'stream-display-ad.twitch.tv', 'doubleclick.net',
-            'googlesyndication.com', 'criteo.com', 'taboola.com', 'outbrain.com'
+            'googlesyndication.com', 'criteo.com', 'taboola.com', 'outbrain.com',
+            'imasdk.googleapis.com', 'cdn.segment.com'
         ],
         CHAT_PROTECTION_PATTERNS: [
             'wss://irc-ws.chat.twitch.tv', '/chat/room', 'chat.twitch.tv', 'tmi.twitch.tv',
             'usher.ttvnw.net/api/channel/hls', '/gql POST', 'passport.twitch.tv',
-            'id.twitch.tv', 'oauth2', '/login', '/auth', 'access_token', 'scope=chat'
+            'id.twitch.tv', 'oauth2', '/login', '/auth', 'access_token', 'scope=chat',
+            'login.twitch.tv'
         ],
         CHAT_SELECTORS: [
             '[data-a-target*="chat"]', '[data-test-selector*="chat"]',
             '.chat-line__', '.chat-input', '[role="log"]',
             '[data-a-target="login-button"]', '[data-a-target="auth-button"]',
-            'input[type="password"]', 'a[href*="/login"]'
+            'input[type="password"]', 'a[href*="/login"]',
+            '.tw-channel-status-bar__chat-toggle', '.chat-room__header'
         ],
         AD_DOM_SELECTORS: [
             '[data-test-selector*="ad-"]', '[data-a-target*="ad-"]', '.stream-display-ad',
             '.video-ad-countdown', '.player-ad-overlay', '.player-ad-notice',
             '.consent-banner', '[data-a-target="consent-banner-accept"]',
-            '.ivs-ad-container', '.ivs-ad-overlay', '.ivs-ad-skip-button'
+            '.ivs-ad-container', '.ivs-ad-overlay', '.ivs-ad-skip-button',
+            'div[data-a-target="video-ad-countdown"]',
+            'div.ramp-up-ad-active',
+            '.ad-banner', '.top-ad-banner', '.promo-card', '.prime-takeover'
         ],
-        M3U8_AD_MARKERS: ['CUE-OUT', 'CUE-IN', 'SCTE35', 'EXT-X-TWITCH-AD', 'STREAM-DISPLAY-AD', 'EXT-X-AD'],
+        M3U8_AD_MARKERS: ['CUE-OUT', 'CUE-IN', 'SCTE35', 'EXT-X-TWITCH-AD', 'STREAM-DISPLAY-AD', 'EXT-X-AD',
+                          'EXT-X-DATERANGE', 'EXT-X-ASSET', 'EXT-X-TWITCH-PREROLL-AD'],
         PERFORMANCE: {
             DEBOUNCE_DELAY: SETTINGS.PERFORMANCE_MODE ? 200 : 100,
             INTERVAL: SETTINGS.PERFORMANCE_MODE ? 30000 : 15000,
         },
     };
 
-    // LOGGING
-    const LOG_PREFIX = `[TTV ADBLOCK FIX v34.0.6]`;
+    const LOG_PREFIX = `[TTV ADBLOCK FIX v35.0.0]`;
     const log = {
         info: SETTINGS.ENABLE_DEBUG ? (...a) => console.info(LOG_PREFIX, ...a) : () => {},
         warn: (...a) => console.warn(LOG_PREFIX, ...a),
         error: (...a) => console.error(LOG_PREFIX, ...a),
     };
 
-    // UTILITIES
     const debounce = (fn, d) => {
         let t;
         return (...a) => {
@@ -97,7 +101,6 @@
             (el.parentElement && isChatElement(el.parentElement));
     };
 
-    // Batch element remover
     class BatchRemover {
         static elements = new Set();
         static timeout = null;
@@ -121,7 +124,6 @@
         }
     }
 
-    // GQL modification
     function modifyGQLRequest(body) {
         if (typeof body !== 'object' || !body) return null;
         const ops = Array.isArray(body) ? body : [body];
@@ -130,7 +132,6 @@
         ops.forEach(op => {
             if (!op?.operationName) return;
 
-            // Force no ads & chunked quality
             const needsPatch =
                 op.operationName === 'PlaybackAccessToken' ||
                 op.operationName.includes('Ad') ||
@@ -150,6 +151,11 @@
                 vars.adblock = false;
                 vars.adsEnabled = false;
                 vars.isAd = false;
+                vars.params.client_ad_id = null;
+                vars.params.ad_session_id = null;
+                vars.params.reftoken = null;
+                vars.params.player_ad_id = null;
+
                 op.variables = vars;
                 modified = true;
             }
@@ -158,7 +164,6 @@
         return modified ? ops : null;
     }
 
-    // M3U8 cleaning
     function cleanM3U8(text) {
         let cleaned = text
             .split('\n')
@@ -191,7 +196,6 @@
         return cleaned;
     }
 
-    // FETCH OVERRIDE
     const originalFetch = unsafeWindow.fetch;
     unsafeWindow.fetch = async (input, init = {}) => {
         const url = (input instanceof Request ? input.url : input) + '';
@@ -246,7 +250,6 @@
         return originalFetch(input, init);
     };
 
-    // CSS
     function injectCSS() {
         GM_addStyle(`
             ${CONFIG.AD_DOM_SELECTORS.join(', ')} {
@@ -257,7 +260,6 @@
         `);
     }
 
-    // DOM cleaner
     const removeAds = debounce(() => {
         CONFIG.AD_DOM_SELECTORS.forEach(s =>
             document.querySelectorAll(s).forEach(el => BatchRemover.add(el))
@@ -265,7 +267,6 @@
         BatchRemover.flush();
     }, CONFIG.PERFORMANCE.DEBOUNCE_DELAY);
 
-    // AUTO RELOAD — fixed stable version
     let reloadAttempts = 0;
     let lastPath = location.pathname;
 
@@ -302,7 +303,6 @@
         }, delay);
     }
 
-    // Stable player error handlers
     function attachPlayerErrorHandlers(video) {
         if (!video || video.___ttv_hooked) return;
         video.___ttv_hooked = true;
@@ -349,7 +349,6 @@
             .observe(document.documentElement, { childList: true, subtree: true });
     }
 
-    // Stream switch fix
     function setupSwitchDetector() {
         if (!SETTINGS.SWITCH_FIX) return;
 
