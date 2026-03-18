@@ -1,28 +1,28 @@
 // ==UserScript==
-// @name         Twitch Adblock Ultimate
-// @namespace    TwitchAdblockUltimate
-// @version      35.2.1
-// @description  Twitch ad-blocking
-// @author       ShmidtS
-// @match        https://www.twitch.tv/*
-// @match        https://m.twitch.tv/*
-// @match        https://player.twitch.tv/*
-// @grant        unsafeWindow
-// @grant        GM_addStyle
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_xmlhttpRequest
-// @grant        GM_setClipboard
-// @connect      usher.ttvnw.net
-// @connect      *.ttvnw.net
-// @connect      *.twitch.tv
-// @connect      gql.twitch.tv
-// @connect      assets.twitch.tv
-// @connect      raw.githubusercontent.com
-// @updateURL    https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
-// @downloadURL  https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
-// @run-at       document-start
-// @license      MIT
+// @name Twitch Adblock Ultimate
+// @namespace TwitchAdblockUltimate
+// @version 36.0.0
+// @description Twitch ad-blocking with 2025-2026 selectors and optimized detection
+// @author ShmidtS
+// @match https://www.twitch.tv/*
+// @match https://m.twitch.tv/*
+// @match https://player.twitch.tv/*
+// @grant unsafeWindow
+// @grant GM_addStyle
+// @grant GM_getValue
+// @grant GM_setValue
+// @grant GM_xmlhttpRequest
+// @grant GM_setClipboard
+// @connect usher.ttvnw.net
+// @connect *.ttvnw.net
+// @connect *.twitch.tv
+// @connect gql.twitch.tv
+// @connect assets.twitch.tv
+// @connect raw.githubusercontent.com
+// @updateURL https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
+// @downloadURL https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
+// @run-at document-start
+// @license MIT
 // ==/UserScript==
 
 (function () {
@@ -40,16 +40,16 @@
     AUTO_RELOAD_ON_PLAYER_ERROR: GM_getValue('TTV_AutoReload', true),
     AUTO_RELOAD_ON_AD_DETECTED: GM_getValue('TTV_AutoReloadOnAd', true),
 
-    // Intervals and timeouts
-    DEBOUNCE_DELAY: 100,
+    // Intervals and timeouts (optimized for faster reaction)
+    DEBOUNCE_DELAY: 75,
     MAIN_INTERVAL: 15000,
-    AD_CHECK_INTERVAL: 3000,
+    AD_CHECK_INTERVAL: 2000,
     USER_ACTIVITY_TIMEOUT: 30000,
-    MIN_RELOAD_DELAY: 30000,
+    MIN_RELOAD_DELAY: 15000,
 
     // Limits
     MAX_RELOAD_ATTEMPTS: GM_getValue('TTV_AutoReloadMax', 6),
-    MAX_AD_RELOAD_ATTEMPTS: GM_getValue('TTV_AdReloadMax', 3),
+    MAX_AD_RELOAD_ATTEMPTS: GM_getValue('TTV_AdReloadMax', 2),
     MAX_ELEMENTS_PER_CHECK: 200,
     MAX_AD_ELEMENTS_TO_REMOVE: 50,
 
@@ -72,8 +72,9 @@
       'login.twitch.tv'
     ],
 
-    // Core ad selectors (most common and reliable)
+    // Core ad selectors (most common and reliable) - Updated v36.0.0
     CORE_AD_SELECTORS: [
+      // Legacy selectors
       '[data-test-selector*="ad-"]',
       '[data-a-target*="ad-"]',
       '.stream-display-ad',
@@ -82,21 +83,38 @@
       '.player-ad-notice',
       '.consent-banner',
       '[data-a-target="consent-banner-accept"]',
-      '.ivs-ad-container',
-      '.ivs-ad-overlay',
-      '.ivs-ad-skip-button',
       'div[data-a-target="video-ad-countdown"]',
       'div.ramp-up-ad-active',
       '[data-component="AdContainer"]',
       '.ad-overlay-modern',
       '.sponsored-highlight',
       '.promo-banner-inline',
-      '[data-a-target="ad-content"]',
       '.native-ad-container',
       '.ad-banner',
       '.top-ad-banner',
       '.promo-card',
-      '.prime-takeover'
+      '.prime-takeover',
+      // IVS Ads (Amazon video ads)
+      '.ivs-ad-container',
+      '.ivs-ad-overlay',
+      '.ivs-ad-skip-button',
+      // Stream Display Ad variants (2025-2026)
+      '.stream-display-ad__wrapper',
+      '.stream-display-ad__wrapper_squeezeback',
+      '.stream-display-ad__wrapper-hidden',
+      '.stream-display-ad__container_squeezeback',
+      '.stream-display-ad__transform-container_squeezeback',
+      '.stream-display-ad__frame_squeezeback',
+      // Audio ads
+      '.audio-ad-overlay',
+      // Data attributes (new)
+      '[data-a-target="ad-content"]',
+      '[data-a-target="video-ad-countdown"]',
+      '[data-a-target="outstream-ax-overlay"]',
+      '[data-test-selector="sda-container"]',
+      '[data-test-selector="sda-frame"]',
+      '[data-test-selector="sda-transform"]',
+      '[data-test-selector="sda-wrapper"]'
     ],
 
     // Fallback keywords for text-based detection
@@ -105,11 +123,15 @@
       'advertisement', 'marketing', 'adcontent', 'commercial'
     ],
 
-    // M3U8 ad markers
+    // M3U8 ad markers (updated v36.0.0)
     M3U8_AD_MARKERS: [
       'CUE-OUT', 'CUE-IN', 'SCTE35', 'EXT-X-TWITCH-AD', 'STREAM-DISPLAY-AD',
       'EXT-X-AD', 'EXT-X-DATERANGE', 'EXT-X-ASSET', 'EXT-X-TWITCH-PREROLL-AD',
-      'EXT-X-TWITCH-MIDROLL-AD', 'EXT-X-TWITCH-POSTROLL-AD'
+      'EXT-X-TWITCH-MIDROLL-AD', 'EXT-X-TWITCH-POSTROLL-AD',
+      // New markers (2025-2026)
+      'EXT-X-TWITCH-AD-PLUGIN', 'EXT-X-TWITCH-AD-CREATIVE',
+      'EXT-X-TWITCH-PREROLL', 'EXT-X-TWITCH-MIDROLL', 'EXT-X-TWITCH-POSTROLL',
+      'URI="ad"', 'DURATION=0'
     ]
   };
 
@@ -118,7 +140,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v35.2.1]';
+    const prefix = '[TTV ADBLOCK FIX v36.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -252,7 +274,15 @@
       'CommercialBreak',
       'Sponsorship',
       'Marketing',
-      'Promotion'
+      'Promotion',
+      // New operation types (v36.0.0)
+      'AdRequest',
+      'VideoAd',
+      'Midroll',
+      'Preroll',
+      'Postroll',
+      'AdMetadata',
+      'AdContext'
     ]);
 
     return (body) => {
@@ -287,6 +317,13 @@
             vars.isAd = false;
             vars.adBreaksEnabled = false;
             vars.disableAds = true;
+
+            // New API parameters (v36.0.0)
+            vars.ads_enabled = false;
+            vars.ad_block = true;
+            vars.show_preroll_ads = false;
+            vars.show_midroll_ads = false;
+            vars.force_ads = false;
 
             // Quality and performance parameters
             vars.params = vars.params || {};
@@ -441,10 +478,34 @@
           pointer-events: none !important;
         }
 
+        /* Stream Display Ad variants */
+        .stream-display-ad__wrapper,
+        .stream-display-ad__wrapper_squeezeback,
+        .stream-display-ad__container_squeezeback,
+        .stream-display-ad__transform-container_squeezeback,
+        .stream-display-ad__frame_squeezeback {
+          visibility: hidden !important;
+          height: 0 !important;
+          width: 0 !important;
+          overflow: hidden !important;
+        }
+
+        /* IVS Ads */
+        .ivs-ad-container,
+        .ivs-ad-overlay,
+        .ivs-ad-skip-button {
+          opacity: 0 !important;
+          pointer-events: none !important;
+        }
+
+        /* Audio Ads */
+        .audio-ad-overlay {
+          display: none !important;
+        }
+
         /* Additional performance optimizations */
         .stream-display-ad,
-        .player-ad-overlay,
-        .ivs-ad-container {
+        .player-ad-overlay {
           visibility: hidden !important;
           height: 0 !important;
           width: 0 !important;
@@ -795,7 +856,7 @@
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix...');
+      log.info('Initializing Optimized Twitch Adblock Fix v36.0.0...');
 
       // Inject CSS
       injectCSS();
@@ -829,7 +890,7 @@
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v36.0.0 initialized successfully');
     };
   })();
 
