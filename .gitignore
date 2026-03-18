@@ -30,6 +30,7 @@ htmlcov/
 .mypy_cache/
 .pytest/
 tox.ini
+.serena/
 
 # Jupyter Notebook
 .ipynb_checkpoints/
@@ -128,4 +129,7 @@ crypto_data.lmdb/lock.mdb
 crypto_analyzer_data.lmdb/
 .claude/settings.local.json
 *.html
-
+*.htm
+*Twitch_files/
+context_portal/
+.omc/
