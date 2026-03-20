@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 36.0.0
+// @version 36.3.0
 // @description Twitch ad-blocking with 2025-2026 selectors and optimized detection
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -61,18 +61,19 @@
       'googlesyndication.com', 'criteo.com', 'taboola.com', 'outbrain.com',
       'imasdk.googleapis.com', 'cdn.segment.com',
       'sponsored-content.twitch.tv', 'promotions.twitch.tv', 'marketing.twitch.tv',
-      'partners.twitch.tv', 'sponsors.twitch.tv'
+      'partners.twitch.tv', 'sponsors.twitch.tv',
+      'spade.twitch.tv', 'sb.scorecardresearch.com'
     ],
 
     // Chat protection patterns
     CHAT_PROTECTION_PATTERNS: [
       'wss://irc-ws.chat.twitch.tv', '/chat/room', 'chat.twitch.tv', 'tmi.twitch.tv',
-      'usher.ttvnw.net/api/channel/hls', '/gql POST', 'passport.twitch.tv',
+      '/gql POST', 'passport.twitch.tv',
       'id.twitch.tv', 'oauth2', '/login', '/auth', 'access_token', 'scope=chat',
       'login.twitch.tv'
     ],
 
-    // Core ad selectors (most common and reliable) - Updated v36.0.0
+    // Core ad selectors (most common and reliable) - Updated v36.3.0
     CORE_AD_SELECTORS: [
       // Legacy selectors
       '[data-test-selector*="ad-"]',
@@ -123,15 +124,16 @@
       'advertisement', 'marketing', 'adcontent', 'commercial'
     ],
 
-    // M3U8 ad markers (updated v36.0.0)
+    // M3U8 ad markers (updated v36.3.0)
+    // Removed EXT-X-DATERANGE, EXT-X-ASSET, DURATION=0 — used for legitimate stream metadata
     M3U8_AD_MARKERS: [
       'CUE-OUT', 'CUE-IN', 'SCTE35', 'EXT-X-TWITCH-AD', 'STREAM-DISPLAY-AD',
-      'EXT-X-AD', 'EXT-X-DATERANGE', 'EXT-X-ASSET', 'EXT-X-TWITCH-PREROLL-AD',
+      'EXT-X-AD', 'EXT-X-TWITCH-PREROLL-AD',
       'EXT-X-TWITCH-MIDROLL-AD', 'EXT-X-TWITCH-POSTROLL-AD',
       // New markers (2025-2026)
       'EXT-X-TWITCH-AD-PLUGIN', 'EXT-X-TWITCH-AD-CREATIVE',
       'EXT-X-TWITCH-PREROLL', 'EXT-X-TWITCH-MIDROLL', 'EXT-X-TWITCH-POSTROLL',
-      'URI="ad"', 'DURATION=0'
+      'URI="ad"'
     ]
   };
 
@@ -140,7 +142,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v36.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v36.3.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -163,17 +165,29 @@
 
   const isChatElement = (el) => {
     if (!el) return false;
-
-    // Quick check for common chat selectors
-    const chatSelectors = [
-      '[data-a-target*="chat"]', '[data-test-selector*="chat"]',
-      '.chat-line__', '.chat-input', '[role="log"]',
-      '.tw-chat', '.chat-room', '.chat-container'
-    ];
-
-    return chatSelectors.some(selector => el.matches?.(selector)) ||
-      (el.closest && el.closest('.chat')) ||
-      (el.parentElement && isChatElement(el.parentElement));
+    // Iterative traversal to avoid stack overflow on deep trees
+    let node = el;
+    let depth = 0;
+    while (node && depth < 15) {
+      if (node.matches) {
+        if (
+          node.matches('[data-a-target*="chat"]') ||
+          node.matches('[data-test-selector*="chat"]') ||
+          node.matches('.chat-input') ||
+          node.matches('[role="log"]') ||
+          node.matches('.tw-chat') ||
+          node.matches('.chat-room') ||
+          node.matches('.chat-container') ||
+          node.matches('.chat-shell') ||
+          (node.className && typeof node.className === 'string' && node.className.includes('chat-line__'))
+        ) {
+          return true;
+        }
+      }
+      node = node.parentElement;
+      depth++;
+    }
+    return false;
   };
 
   // Optimized batch remover with throttling
@@ -275,7 +289,7 @@
       'Sponsorship',
       'Marketing',
       'Promotion',
-      // New operation types (v36.0.0)
+      // New operation types (v36.3.0)
       'AdRequest',
       'VideoAd',
       'Midroll',
@@ -318,7 +332,7 @@
             vars.adBreaksEnabled = false;
             vars.disableAds = true;
 
-            // New API parameters (v36.0.0)
+            // New API parameters (v36.3.0)
             vars.ads_enabled = false;
             vars.ad_block = true;
             vars.show_preroll_ads = false;
@@ -585,6 +599,7 @@
   const adDetector = (() => {
     let consecutiveAdChecks = 0;
     let lastAdDetectionTime = 0;
+    let lastReloadTime = 0;
     let lastUserInteractionTime = 0;
     let userActivityTimer = null;
 
@@ -624,7 +639,8 @@
 
     const isAdDetected = () => {
       try {
-        // Check for visible ad elements
+        // Primary: check for visible DOM ad elements only
+        // This is the most reliable signal — video stalls are network issues, not ads
         const adElements = document.querySelectorAll(AD_SELECTOR_STRING);
         if (adElements.length > 0) {
           for (let element of adElements) {
@@ -634,21 +650,13 @@
           }
         }
 
-        // Check video state
+        // Secondary: video was playing before (currentTime > 0) but is now completely frozen
+        // currentTime === 0 means initial load — NOT an ad, just player initializing
+        // readyState < 2 is NOT used — fires on normal network buffering ("Playhead stalling")
         const video = document.querySelector('video');
-        if (video && video.readyState > 0) {
-          // Check for paused state (but not user-initiated)
-          if (video.paused && !video.ended) {
-            const timeSinceInteraction = Date.now() - lastUserInteractionTime;
-
-            if (timeSinceInteraction >= 2000) {
-              return true;
-            }
-          }
-
-          // Check for stalled playback
-          const currentTime = video.currentTime;
-          if (currentTime > 0 && video.readyState < 2) {
+        if (video && video.currentTime > 2 && video.readyState === 0 && video.paused && !video.ended) {
+          const timeSinceInteraction = Date.now() - lastUserInteractionTime;
+          if (timeSinceInteraction >= 5000) {
             return true;
           }
         }
@@ -665,15 +673,21 @@
 
       const now = Date.now();
 
-      // Throttle ad detection
+      // Throttle ad detection polling
       if (now - lastAdDetectionTime < CONFIG.AD_CHECK_INTERVAL) {
         return;
       }
       lastAdDetectionTime = now;
 
-      // Check if video is working normally
       const video = document.querySelector('video');
-      if (video && video.readyState > 0 && !video.paused && !video.ended && video.currentTime > 0) {
+
+      // Skip detection during initial player load — currentTime=0 means stream hasn't started yet
+      if (!video || video.currentTime === 0) {
+        return;
+      }
+
+      // Check if video is working normally
+      if (video.readyState > 0 && !video.paused && !video.ended) {
         resetAdDetection();
         return;
       }
@@ -683,18 +697,20 @@
         log.warn(`Ad detected (${consecutiveAdChecks}/${CONFIG.MAX_AD_RELOAD_ATTEMPTS})`);
 
         if (consecutiveAdChecks >= CONFIG.MAX_AD_RELOAD_ATTEMPTS) {
-          log.warn('Max ad reload attempts reached');
+          log.warn('Max ad reload attempts reached — resetting counter to allow future detection');
+          consecutiveAdChecks = 0;
           return;
         }
 
-        // Check minimum delay between reloads
-        if (now - lastAdDetectionTime < CONFIG.MIN_RELOAD_DELAY) {
+        // Check minimum delay between reloads (use separate lastReloadTime, not lastAdDetectionTime)
+        if (now - lastReloadTime < CONFIG.MIN_RELOAD_DELAY) {
           return;
         }
 
         setTimeout(() => {
           if (isAdDetected()) {
             log.info('Reloading page due to ad detection');
+            lastReloadTime = Date.now();
             window.location.reload();
           } else {
             resetAdDetection();
@@ -794,52 +810,46 @@
     };
   })();
 
-  // Switch detector
-  const switchDetector = (() => {
+  // Unified MutationObserver with debounce — replaces two separate observers
+  // to fix MaxListenersExceededWarning and reduce overhead
+  const domWatcher = (() => {
     let lastPath = location.pathname;
+    let debounceTimer = null;
 
-    const setup = () => {
-      if (!CONFIG.SWITCH_FIX) return;
+    const onMutation = () => {
+      if (debounceTimer) return;
+      debounceTimer = setTimeout(() => {
+        debounceTimer = null;
 
-      new MutationObserver(() => {
-        if (location.pathname !== lastPath) {
+        // Video attachment check
+        const video = document.querySelector('video');
+        if (video) {
+          playerErrorHandler.attachErrorHandlers(video);
+        }
+
+        // SPA navigation check
+        if (CONFIG.SWITCH_FIX && location.pathname !== lastPath) {
           lastPath = location.pathname;
           playerErrorHandler.resetAttempts();
-
           setTimeout(() => {
-            const video = document.querySelector('video');
-            if (video) {
-              video.pause();
-              video.src = '';
-              video.load();
+            const v = document.querySelector('video');
+            if (v) {
+              v.pause();
+              v.src = '';
+              v.load();
             }
             removeAds();
           }, 300);
         }
-      }).observe(document.documentElement, {
-        childList: true,
-        subtree: true
-      });
-    };
-
-    return { setup };
-  })();
-
-  // Video watcher
-  const videoWatcher = (() => {
-    const tryAttach = () => {
-      const video = document.querySelector('video');
-      if (video) {
-        playerErrorHandler.attachErrorHandlers(video);
-      }
+      }, CONFIG.DEBOUNCE_DELAY);
     };
 
     const setup = () => {
-      tryAttach();
+      // Attach to video immediately if already present
+      const video = document.querySelector('video');
+      if (video) playerErrorHandler.attachErrorHandlers(video);
 
-      new MutationObserver(() => {
-        tryAttach();
-      }).observe(document.documentElement, {
+      new MutationObserver(onMutation).observe(document.documentElement, {
         childList: true,
         subtree: true
       });
@@ -847,6 +857,10 @@
 
     return { setup };
   })();
+
+  // Kept for API compatibility
+  const switchDetector = { setup: () => {} };
+  const videoWatcher = { setup: () => {} };
 
   // Main initialization
   const init = (() => {
@@ -856,7 +870,7 @@
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v36.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v36.3.0...');
 
       // Inject CSS
       injectCSS();
@@ -865,8 +879,7 @@
       removeAds();
 
       // Setup detectors and watchers
-      switchDetector.setup();
-      videoWatcher.setup();
+      domWatcher.setup();
       adDetector.setupUserTracking();
 
       // Main cleanup interval
@@ -890,7 +903,7 @@
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v36.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v36.3.0 initialized successfully');
     };
   })();
 
