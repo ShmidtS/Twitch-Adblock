@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 36.3.0
-// @description Twitch ad-blocking with 2025-2026 selectors and optimized detection
+// @version 36.4.0
+// @description Twitch ad-blocking with 2025-2026 selectors, wildcard patterns, and enhanced detection
 // @author ShmidtS
 // @match https://www.twitch.tv/*
 // @match https://m.twitch.tv/*
@@ -73,7 +73,7 @@
       'login.twitch.tv'
     ],
 
-    // Core ad selectors (most common and reliable) - Updated v36.3.0
+    // Core ad selectors (most common and reliable) - Updated v36.4.0
     CORE_AD_SELECTORS: [
       // Legacy selectors
       '[data-test-selector*="ad-"]',
@@ -115,7 +115,12 @@
       '[data-test-selector="sda-container"]',
       '[data-test-selector="sda-frame"]',
       '[data-test-selector="sda-transform"]',
-      '[data-test-selector="sda-wrapper"]'
+      '[data-test-selector="sda-wrapper"]',
+ // New selectors v36.4.0 (from HTML analysis)
+ '.sda-eligibility',
+ '.sda-upsell',
+ '.video-ads',
+ '[class*="video-ad-player"]'
     ],
 
     // Fallback keywords for text-based detection
@@ -124,7 +129,7 @@
       'advertisement', 'marketing', 'adcontent', 'commercial'
     ],
 
-    // M3U8 ad markers (updated v36.3.0)
+    // M3U8 ad markers (updated v36.4.0)
     // Removed EXT-X-DATERANGE, EXT-X-ASSET, DURATION=0 — used for legitimate stream metadata
     M3U8_AD_MARKERS: [
       'CUE-OUT', 'CUE-IN', 'SCTE35', 'EXT-X-TWITCH-AD', 'STREAM-DISPLAY-AD',
@@ -142,7 +147,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v36.3.0]';
+    const prefix = '[TTV ADBLOCK FIX v36.4.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -156,12 +161,14 @@
   const log = createLogger();
 
   // Utility functions
-  const isChatOrAuthUrl = (url) => {
-    const lowerUrl = url.toLowerCase();
-    return CONFIG.CHAT_PROTECTION_PATTERNS.some(pattern =>
-      lowerUrl.includes(pattern.toLowerCase())
-    );
-  };
+  const CHAT_PROTECTION_SET = new Set(CONFIG.CHAT_PROTECTION_PATTERNS.map(p => p.toLowerCase()));
+const isChatOrAuthUrl = (url) => {
+ const lowerUrl = url.toLowerCase();
+ for (const pattern of CHAT_PROTECTION_SET) {
+ if (lowerUrl.includes(pattern)) return true;
+ }
+ return false;
+};
 
   const isChatElement = (el) => {
     if (!el) return false;
@@ -289,7 +296,7 @@
       'Sponsorship',
       'Marketing',
       'Promotion',
-      // New operation types (v36.3.0)
+      // New operation types (v36.4.0)
       'AdRequest',
       'VideoAd',
       'Midroll',
@@ -332,7 +339,7 @@
             vars.adBreaksEnabled = false;
             vars.disableAds = true;
 
-            // New API parameters (v36.3.0)
+            // New API parameters (v36.4.0)
             vars.ads_enabled = false;
             vars.ad_block = true;
             vars.show_preroll_ads = false;
@@ -516,6 +523,17 @@
         .audio-ad-overlay {
           display: none !important;
         }
+
+ /* New v36.4.0 selectors - dynamic ad containers */
+ .sda-eligibility,
+ .sda-upsell,
+ .video-ads,
+ [class*="video-ad-player"] {
+ display: none !important;
+ visibility: hidden !important;
+ height: 0 !important;
+ overflow: hidden !important;
+ }
 
         /* Additional performance optimizations */
         .stream-display-ad,
@@ -870,7 +888,7 @@
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v36.3.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v36.4.0...');
 
       // Inject CSS
       injectCSS();
@@ -903,7 +921,7 @@
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v36.3.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v36.4.0 initialized successfully');
     };
   })();
 
