@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 36.4.0
-// @description Twitch ad-blocking with 2025-2026 selectors, wildcard patterns, and enhanced detection
+// @version 37.0.0
+// @description Twitch ad-blocking with 2025-2026 selectors, wildcard patterns, optimized detection and bug fixes
 // @author ShmidtS
 // @match https://www.twitch.tv/*
 // @match https://m.twitch.tv/*
@@ -43,7 +43,7 @@
     // Intervals and timeouts (optimized for faster reaction)
     DEBOUNCE_DELAY: 75,
     MAIN_INTERVAL: 15000,
-    AD_CHECK_INTERVAL: 2000,
+    AD_CHECK_INTERVAL: 10000,
     USER_ACTIVITY_TIMEOUT: 30000,
     MIN_RELOAD_DELAY: 15000,
 
@@ -62,7 +62,7 @@
       'imasdk.googleapis.com', 'cdn.segment.com',
       'sponsored-content.twitch.tv', 'promotions.twitch.tv', 'marketing.twitch.tv',
       'partners.twitch.tv', 'sponsors.twitch.tv',
-      'spade.twitch.tv', 'sb.scorecardresearch.com'
+      'sb.scorecardresearch.com'
     ],
 
     // Chat protection patterns
@@ -120,13 +120,14 @@
  '.sda-eligibility',
  '.sda-upsell',
  '.video-ads',
- '[class*="video-ad-player"]'
+ '[class*="video-ad-player"]',
+ '#amznidpxl'
     ],
 
     // Fallback keywords for text-based detection
     FALLBACK_KEYWORDS: [
-      'ad', 'sponsor', 'sponsored', 'promotion', 'promotional',
-      'advertisement', 'marketing', 'adcontent', 'commercial'
+      'advertisement', 'sponsored', 'commercial-break', 'commercial break',
+      'adcontent', 'video-ad', 'stream-display-ad', 'audio-ad'
     ],
 
     // M3U8 ad markers (updated v36.4.0)
@@ -147,7 +148,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v36.4.0]';
+    const prefix = '[TTV ADBLOCK FIX v37.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -240,18 +241,15 @@ const isChatOrAuthUrl = (url) => {
       this.elements.clear();
       this.lastFlushTime = Date.now();
 
-      // Use document fragment for better performance
-      const fragment = document.createDocumentFragment();
       let removedCount = 0;
 
       try {
         for (let element of elementsArray) {
           if (element.parentNode && !isChatElement(element)) {
             try {
-              fragment.appendChild(element);
+              element.remove();
               removedCount++;
             } catch (e) {
-              // Element might have been removed by another process
               log.debug('Failed to remove element:', e);
             }
           }
@@ -262,17 +260,6 @@ const isChatOrAuthUrl = (url) => {
         }
       } catch (error) {
         log.error('Batch removal error:', error);
-        // Fallback: remove elements individually
-        for (let element of elementsArray) {
-          try {
-            if (element.parentNode && !isChatElement(element)) {
-              element.remove();
-              removedCount++;
-            }
-          } catch (e) {
-            log.debug('Fallback removal failed:', e);
-          }
-        }
       }
     }
 
@@ -290,7 +277,6 @@ const isChatOrAuthUrl = (url) => {
   // Optimized GQL request modifier
   const modifyGQLRequest = (() => {
     const adOperationNames = new Set([
-      'PlaybackAccessToken',
       'StreamDisplayAd',
       'CommercialBreak',
       'Sponsorship',
@@ -316,6 +302,10 @@ const isChatOrAuthUrl = (url) => {
         for (let operation of operations) {
           if (!operation?.operationName) continue;
 
+          // Safety guard: never modify PlaybackAccessToken (removed from adOperationNames,
+          // but this prevents accidental match if Twitch renames it to include 'Ad' substring)
+          if (operation.operationName === 'PlaybackAccessToken') continue;
+
           // Quick check for ad-related operations
           const opName = operation.operationName;
           const isAdOperation = adOperationNames.has(opName) ||
@@ -329,11 +319,14 @@ const isChatOrAuthUrl = (url) => {
             const vars = operation.variables || {};
 
             // Core ad-blocking parameters
+            // NOTE: adblock=true + enableAdblock=true explicitly declare adblock usage.
+            // Trade-off: consistent values avoid detection via contradictory signals,
+            // but may trigger alternative ad-insertion paths on Twitch's backend.
             vars.isLive = true;
             vars.playerType = 'embed';
             vars.playerBackend = 'mediaplayer';
             vars.platform = 'web';
-            vars.adblock = false;
+            vars.adblock = true;
             vars.adsEnabled = false;
             vars.isAd = false;
             vars.adBreaksEnabled = false;
@@ -365,7 +358,7 @@ const isChatOrAuthUrl = (url) => {
             vars.params.ad_personalization_id = null;
 
             // Additional modern API parameters
-            vars.enableAdblock = false;
+            vars.enableAdblock = true;
             vars.showAds = false;
             vars.skipAds = true;
             vars.personalizedAds = false;
@@ -388,7 +381,7 @@ const isChatOrAuthUrl = (url) => {
 
   // Optimized M3U8 cleaner
   const cleanM3U8 = (() => {
-    const markerRegex = new RegExp(CONFIG.M3U8_AD_MARKERS.join('|'), 'i');
+    const markerRegex = new RegExp(CONFIG.M3U8_AD_MARKERS.join('|'));
 
     return (text) => {
       const lines = text.split('\n');
@@ -524,6 +517,16 @@ const isChatOrAuthUrl = (url) => {
           display: none !important;
         }
 
+        /* Amazon ad tracking pixel */
+        #amznidpxl {
+          display: none !important;
+          visibility: hidden !important;
+          opacity: 0 !important;
+          pointer-events: none !important;
+          height: 0 !important;
+          width: 0 !important;
+        }
+
  /* New v36.4.0 selectors - dynamic ad containers */
  .sda-eligibility,
  .sda-upsell,
@@ -575,7 +578,7 @@ const isChatOrAuthUrl = (url) => {
       }
 
       // Fallback text-based detection (throttled)
-      if (CONFIG.FALLBACK_KEYWORDS.length > 0 && CONFIG.DEBUG) {
+      if (CONFIG.FALLBACK_KEYWORDS.length > 0) {
         try {
           const allElements = document.querySelectorAll('*');
           const maxElements = Math.min(allElements.length, CONFIG.MAX_ELEMENTS_PER_CHECK);
@@ -620,13 +623,19 @@ const isChatOrAuthUrl = (url) => {
     let lastReloadTime = 0;
     let lastUserInteractionTime = 0;
     let userActivityTimer = null;
+    let lastMoveTime = 0;
 
     const resetAdDetection = () => {
       consecutiveAdChecks = 0;
       lastAdDetectionTime = 0;
     };
 
-    const handleUserInteraction = () => {
+    const handleUserInteraction = (e) => {
+      if (e.type === 'mousemove') {
+        const now = Date.now();
+        if (now - lastMoveTime < 150) return;
+        lastMoveTime = now;
+      }
       lastUserInteractionTime = Date.now();
 
       if (userActivityTimer) {
@@ -798,7 +807,8 @@ const isChatOrAuthUrl = (url) => {
 
       const handleStall = () => {
         setTimeout(() => {
-          if (video.readyState === 0) {
+          const currentVideo = document.querySelector('video');
+          if (currentVideo && currentVideo.readyState === 0) {
             scheduleReload('stalled');
           }
         }, 4000);
@@ -806,7 +816,8 @@ const isChatOrAuthUrl = (url) => {
 
       const handleWaiting = () => {
         setTimeout(() => {
-          if (video.readyState === 0) {
+          const currentVideo = document.querySelector('video');
+          if (currentVideo && currentVideo.readyState === 0) {
             scheduleReload('waiting');
           }
         }, 5000);
@@ -835,7 +846,9 @@ const isChatOrAuthUrl = (url) => {
     let debounceTimer = null;
 
     const onMutation = () => {
-      if (debounceTimer) return;
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
       debounceTimer = setTimeout(() => {
         debounceTimer = null;
 
@@ -853,8 +866,6 @@ const isChatOrAuthUrl = (url) => {
             const v = document.querySelector('video');
             if (v) {
               v.pause();
-              v.src = '';
-              v.load();
             }
             removeAds();
           }, 300);
@@ -888,7 +899,7 @@ const isChatOrAuthUrl = (url) => {
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v36.4.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v37.0.0...');
 
       // Inject CSS
       injectCSS();
@@ -921,7 +932,7 @@ const isChatOrAuthUrl = (url) => {
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v36.4.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v37.0.0 initialized successfully');
     };
   })();
 
