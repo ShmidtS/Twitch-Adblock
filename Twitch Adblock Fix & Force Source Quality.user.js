@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 37.0.0
-// @description Twitch ad-blocking with 2025-2026 selectors, wildcard patterns, optimized detection and bug fixes
+// @version 38.0.0
+// @description Twitch ad-blocking with 2025-2026 selectors, wildcard patterns, optimized detection, bug fixes and expanded GQL interception
 // @author ShmidtS
 // @match https://www.twitch.tv/*
 // @match https://m.twitch.tv/*
@@ -106,6 +106,22 @@
       '.stream-display-ad__container_squeezeback',
       '.stream-display-ad__transform-container_squeezeback',
       '.stream-display-ad__frame_squeezeback',
+      '.stream-display-ad__wrapper_left-third',
+      '.stream-display-ad__wrapper_lower-third',
+      '.stream-display-ad__wrapper_skyscraper',
+      '.stream-display-ad__wrapper_pushdown',
+      '.stream-display-ad__container_left-third',
+      '.stream-display-ad__container_lower-third',
+      '.stream-display-ad__container_skyscraper',
+      '.stream-display-ad__container_pushdown',
+      '.stream-display-ad__transform-container_left-third',
+      '.stream-display-ad__transform-container_lower-third',
+      '.stream-display-ad__transform-container_skyscraper',
+      '.stream-display-ad__transform-container_pushdown',
+      '.stream-display-ad__frame_left-third',
+      '.stream-display-ad__frame_lower-third',
+      '.stream-display-ad__frame_skyscraper',
+      '.stream-display-ad__frame_pushdown',
       // Audio ads
       '.audio-ad-overlay',
       // Data attributes (new)
@@ -121,7 +137,24 @@
  '.sda-upsell',
  '.video-ads',
  '[class*="video-ad-player"]',
- '#amznidpxl'
+ '#amznidpxl',
+      // Additional 2025-2026 selectors from HTML analysis
+      '[data-a-target="ax-overlay"]',
+      '[data-a-target="skip-ad-overlay"]',
+      '[data-a-target="video-ad-label"]',
+      '[data-a-target="ad-countdown-progress-bar"]',
+      '.pushdown-sda',
+      '.skip-ad-overlay',
+      '.video-ad-label',
+      '.ad-countdown-progress-bar',
+      '.audio-ax-overlay',
+      '[class*="audio-ax-overlay"]',
+      '[class*="stream-display-ad__wrapper_"]',
+      '[class*="sda-sku"]',
+      '[class*="sda-upsell"]',
+      '[class*="video-player--stream-display-ad"]',
+      '.video-ads-sub-upsell-type',
+      '.content-overlay-gate',
     ],
 
     // Fallback keywords for text-based detection
@@ -130,17 +163,17 @@
       'adcontent', 'video-ad', 'stream-display-ad', 'audio-ad'
     ],
 
-    // M3U8 ad markers (updated v36.4.0)
-    // Removed EXT-X-DATERANGE, EXT-X-ASSET, DURATION=0 — used for legitimate stream metadata
+    // M3U8 ad markers — only ad-specific markers, NOT CUE-OUT/CUE-IN (SCTE35 legit uses)
     M3U8_AD_MARKERS: [
-      'CUE-OUT', 'CUE-IN', 'SCTE35', 'EXT-X-TWITCH-AD', 'STREAM-DISPLAY-AD',
+      'SCTE35-AD', 'EXT-X-TWITCH-AD', 'STREAM-DISPLAY-AD',
       'EXT-X-AD', 'EXT-X-TWITCH-PREROLL-AD',
       'EXT-X-TWITCH-MIDROLL-AD', 'EXT-X-TWITCH-POSTROLL-AD',
-      // New markers (2025-2026)
       'EXT-X-TWITCH-AD-PLUGIN', 'EXT-X-TWITCH-AD-CREATIVE',
       'EXT-X-TWITCH-PREROLL', 'EXT-X-TWITCH-MIDROLL', 'EXT-X-TWITCH-POSTROLL',
       'URI="ad"'
-    ]
+    ],
+    M3U8_CUE_OUT_AD_REGEX: /#EXT-X-DATERANGE:.*SCTE35-OUT.*(?:CLASS|START-DATE).*ad/i,
+    M3U8_CUE_IN_AD_REGEX: /#EXT-X-DATERANGE:.*SCTE35-IN.*(?:CLASS|END-DATE).*ad/i
   };
 
   // Performance optimization: memoized selector string
@@ -148,7 +181,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v37.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v38.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -282,15 +315,53 @@ const isChatOrAuthUrl = (url) => {
       'Sponsorship',
       'Marketing',
       'Promotion',
-      // New operation types (v36.4.0)
       'AdRequest',
       'VideoAd',
       'Midroll',
       'Preroll',
       'Postroll',
       'AdMetadata',
-      'AdContext'
+      'AdContext',
+      'ClientSideVideoAd',
+      'FillClientSideAdFormat',
+      'ProcessClientSideAdFormatRequest',
+      'ReportAdSpike',
+      'VideoAdRequest',
+      'InstreamVideoAd',
+      'OutstreamVideoAd',
+      'GetAdSpike',
+      'TrackAdImpression',
+      'GetAdQuartile',
+      'ReportAdQuartile',
+      'VideoAdBreak',
+      'AdBreakV2',
+      'StreamDisplayAdV2',
+      'VideoAdPod',
+      'AdPodRequest',
+      'SdaEligibility',
+      'SdaRequest',
+      'AudioAdRequest',
+      'GetAudioAd',
+      'AudioAdBreak',
+      'CompanionAd',
+      'DisplayAd',
+      'GetAdOverlay',
+      'AdOverlayImpression',
+      'TrackAdEvent',
+      'PlayerAdInteractions',
+      'GetAdQuartileReporting',
+      'ReportAdMetric',
+      'AdBidRequest',
+      'GetSponsorship',
+      'SponsorshipClip',
+      'SponsorScreen',
     ]);
+
+    const _adPrefixRegex = /^(?:ClientSide|Fill|Process|Video|Stream|Audio|Get|Report|Track|Instream|Outstream)Ad/i;
+    const _commercialRegex = /^Commercial/i;
+    const _sponsorRegex = /^Sponsor(?!shipAccessToken)/i;
+    const _marketingRegex = /^Marketing/i;
+    const _promoRegex = /^Promo(?!tionAccessToken)/i;
 
     return (body) => {
       if (typeof body !== 'object' || !body) return null;
@@ -306,14 +377,15 @@ const isChatOrAuthUrl = (url) => {
           // but this prevents accidental match if Twitch renames it to include 'Ad' substring)
           if (operation.operationName === 'PlaybackAccessToken') continue;
 
-          // Quick check for ad-related operations
+          // Prefix-based matching prevents false positives like PlaybackAccessToken_Ad
           const opName = operation.operationName;
+
           const isAdOperation = adOperationNames.has(opName) ||
-            opName.includes('Ad') ||
-            opName.includes('Commercial') ||
-            opName.includes('Sponsorship') ||
-            opName.includes('Marketing') ||
-            opName.includes('Promotion');
+            _adPrefixRegex.test(opName) ||
+            _commercialRegex.test(opName) ||
+            _sponsorRegex.test(opName) ||
+            _marketingRegex.test(opName) ||
+            _promoRegex.test(opName);
 
           if (isAdOperation) {
             const vars = operation.variables || {};
@@ -386,11 +458,27 @@ const isChatOrAuthUrl = (url) => {
     return (text) => {
       const lines = text.split('\n');
       const filteredLines = [];
+      let skipNext = false;
 
-      for (let line of lines) {
-        if (!markerRegex.test(line)) {
-          filteredLines.push(line);
+      for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+
+        if (markerRegex.test(line)) {
+          skipNext = true;
+          continue;
         }
+
+        if (skipNext && !line.startsWith('#')) {
+          skipNext = false;
+          continue;
+        }
+        skipNext = false;
+
+        if (CONFIG.M3U8_CUE_OUT_AD_REGEX.test(line) || CONFIG.M3U8_CUE_IN_AD_REGEX.test(line)) {
+          continue;
+        }
+
+        filteredLines.push(line);
       }
 
       let cleaned = filteredLines.join('\n');
@@ -409,6 +497,44 @@ const isChatOrAuthUrl = (url) => {
     };
   })();
 
+  // Domain matching helper — exact/suffix matching, no substring false positives
+  const isAdDomain = (url) => {
+    try {
+      const hostname = new URL(url).hostname;
+      return CONFIG.AD_DOMAINS.some(domain =>
+        hostname === domain || hostname.endsWith('.' + domain)
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  // Ad-related HTTP header stripping
+  const stripAdHeaders = (response) => {
+    const headers = new Headers(response.headers);
+    let stripped = false;
+
+    for (const key of headers.keys()) {
+      const lower = key.toLowerCase();
+      if (lower.startsWith('x-tv-twitch-ad') ||
+          lower.startsWith('x-ttv-maf-ad') ||
+          lower.includes('ad-break') ||
+          lower.includes('ad-slot')) {
+        headers.delete(key);
+        stripped = true;
+      }
+    }
+
+    if (stripped) {
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers
+      });
+    }
+    return response;
+  };
+
   // Optimized fetch wrapper
   const originalFetch = unsafeWindow.fetch;
   unsafeWindow.fetch = async (input, init = {}) => {
@@ -419,8 +545,8 @@ const isChatOrAuthUrl = (url) => {
       return originalFetch(input, init);
     }
 
-    // Block ad domains
-    if (CONFIG.AD_DOMAINS.some(domain => url.includes(domain))) {
+    // Block ad domains (exact/suffix matching)
+    if (isAdDomain(url)) {
       return new Response(null, { status: 204 });
     }
 
@@ -447,6 +573,27 @@ const isChatOrAuthUrl = (url) => {
       }
     }
 
+    // GQL response interception: strip ad data from responses
+    if (url.includes('gql.twitch.tv')) {
+      try {
+        const gqlResponse = await originalFetch(input, init);
+        if (CONFIG.DEBUG) {
+          const cloned = gqlResponse.clone();
+          cloned.json().then(data => {
+            const ops = Array.isArray(data) ? data : [data];
+            for (const op of ops) {
+              if (op?.extensions?.adReporting) {
+                log.debug('GQL response contained ad reporting data');
+              }
+            }
+          }).catch(() => {});
+        }
+        return stripAdHeaders(gqlResponse);
+      } catch (error) {
+        log.debug('GQL response interception error:', error);
+      }
+    }
+
     // Handle M3U8 streams
     if (url.includes('.m3u8') || url.includes('usher.ttvnw.net')) {
       const response = await originalFetch(input, init);
@@ -459,6 +606,14 @@ const isChatOrAuthUrl = (url) => {
         const cleaned = cleanM3U8(text);
 
         if (cleaned !== text) {
+          const hasSegments = cleaned.split('\n').some(line =>
+            line.trim() && !line.startsWith('#') && line.includes('://')
+          );
+          if (!hasSegments) {
+            log.warn('M3U8 cleaning removed all segments — returning original');
+            return response;
+          }
+
           return new Response(
             new Blob([cleaned]),
             {
@@ -472,82 +627,38 @@ const isChatOrAuthUrl = (url) => {
         }
       }
 
-      return response;
+      return stripAdHeaders(response);
     }
 
-    return originalFetch(input, init);
+    const response = await originalFetch(input, init);
+    return stripAdHeaders(response);
   };
 
-  // CSS injection
   const injectCSS = (() => {
     let cssInjected = false;
+
+    const FORMAT_OVERRIDES = {
+      '[class*="stream-display-ad__wrapper"]': 'visibility:hidden!important;height:0!important;width:0!important;overflow:hidden!important;',
+      '[class*="stream-display-ad__wrapper_"]': 'visibility:hidden!important;height:0!important;width:0!important;overflow:hidden!important;',
+      '#amznidpxl': 'display:none!important;visibility:hidden!important;opacity:0!important;pointer-events:none!important;height:0!important;width:0!important;',
+      '.ivs-ad-container': 'opacity:0!important;pointer-events:none!important;',
+      '.ivs-ad-overlay': 'opacity:0!important;pointer-events:none!important;',
+      '.ivs-ad-skip-button': 'opacity:0!important;pointer-events:none!important;',
+      '.audio-ad-overlay': 'display:none!important;',
+      '[class*="audio-ax-overlay"]': 'display:none!important;',
+      '[data-a-target="ax-overlay"]': 'display:none!important;visibility:hidden!important;',
+    };
 
     return () => {
       if (cssInjected) return;
 
-      GM_addStyle(`
-        ${AD_SELECTOR_STRING} {
-          display: none !important;
-          opacity: 0 !important;
-          pointer-events: none !important;
-        }
+      let css = `${AD_SELECTOR_STRING} {\n  display:none!important;\n  opacity:0!important;\n  pointer-events:none!important;\n}\n\n`;
 
-        /* Stream Display Ad variants */
-        .stream-display-ad__wrapper,
-        .stream-display-ad__wrapper_squeezeback,
-        .stream-display-ad__container_squeezeback,
-        .stream-display-ad__transform-container_squeezeback,
-        .stream-display-ad__frame_squeezeback {
-          visibility: hidden !important;
-          height: 0 !important;
-          width: 0 !important;
-          overflow: hidden !important;
-        }
+      for (const [selector, rules] of Object.entries(FORMAT_OVERRIDES)) {
+        css += `${selector} {\n  ${rules}\n}\n\n`;
+      }
 
-        /* IVS Ads */
-        .ivs-ad-container,
-        .ivs-ad-overlay,
-        .ivs-ad-skip-button {
-          opacity: 0 !important;
-          pointer-events: none !important;
-        }
-
-        /* Audio Ads */
-        .audio-ad-overlay {
-          display: none !important;
-        }
-
-        /* Amazon ad tracking pixel */
-        #amznidpxl {
-          display: none !important;
-          visibility: hidden !important;
-          opacity: 0 !important;
-          pointer-events: none !important;
-          height: 0 !important;
-          width: 0 !important;
-        }
-
- /* New v36.4.0 selectors - dynamic ad containers */
- .sda-eligibility,
- .sda-upsell,
- .video-ads,
- [class*="video-ad-player"] {
- display: none !important;
- visibility: hidden !important;
- height: 0 !important;
- overflow: hidden !important;
- }
-
-        /* Additional performance optimizations */
-        .stream-display-ad,
-        .player-ad-overlay {
-          visibility: hidden !important;
-          height: 0 !important;
-          width: 0 !important;
-          overflow: hidden !important;
-        }
-      `);
-
+      GM_addStyle(css);
       cssInjected = true;
     };
   })();
@@ -577,33 +688,51 @@ const isChatOrAuthUrl = (url) => {
         log.error('Core ad removal error:', error);
       }
 
-      // Fallback text-based detection (throttled)
+      // Pushdown SDA: collapse parent to prevent layout shift
+      try {
+        const pushdowns = document.querySelectorAll('.pushdown-sda, [class*="pushdown"]');
+        for (const pd of pushdowns) {
+          if (pd.parentElement) {
+            pd.parentElement.style.setProperty('height', '0', 'important');
+            pd.parentElement.style.setProperty('overflow', 'hidden', 'important');
+            pd.parentElement.style.setProperty('transition', 'none', 'important');
+            batchRemover.add(pd);
+          }
+        }
+      } catch (e) {
+        log.debug('Pushdown collapse error:', e);
+      }
+
+      // Fallback text-based detection using TreeWalker (lazy evaluation)
       if (CONFIG.FALLBACK_KEYWORDS.length > 0) {
         try {
-          const allElements = document.querySelectorAll('*');
-          const maxElements = Math.min(allElements.length, CONFIG.MAX_ELEMENTS_PER_CHECK);
+          const walker = document.createTreeWalker(
+            document.body,
+            NodeFilter.SHOW_ELEMENT,
+            {
+              acceptNode: (node) => {
+                if (node.childElementCount > 0) return NodeFilter.FILTER_SKIP;
+                if (!node.textContent || !node.textContent.trim()) return NodeFilter.FILTER_SKIP;
+                if (node.offsetParent === null) return NodeFilter.FILTER_REJECT;
+                return NodeFilter.FILTER_ACCEPT;
+              }
+            }
+          );
 
           let checked = 0;
-
-          for (let element of allElements) {
-            if (checked >= maxElements) break;
+          let node;
+          while ((node = walker.nextNode()) && checked < CONFIG.MAX_ELEMENTS_PER_CHECK) {
             checked++;
 
-            if (element.childElementCount === 0 &&
-              element.textContent &&
-              element.offsetWidth > 0 &&
-              !isChatElement(element)) {
+            if (isChatElement(node)) continue;
 
-              const text = element.textContent.toLowerCase();
-
-              for (let keyword of CONFIG.FALLBACK_KEYWORDS) {
-                if (text.includes(keyword)) {
-                  // Check if it's not already covered by CSS
-                  if (!element.matches(AD_SELECTOR_STRING)) {
-                    batchRemover.add(element);
-                  }
-                  break;
+            const text = node.textContent.toLowerCase();
+            for (let keyword of CONFIG.FALLBACK_KEYWORDS) {
+              if (text.includes(keyword)) {
+                if (!node.matches(AD_SELECTOR_STRING)) {
+                  batchRemover.add(node);
                 }
+                break;
               }
             }
           }
@@ -624,6 +753,8 @@ const isChatOrAuthUrl = (url) => {
     let lastUserInteractionTime = 0;
     let userActivityTimer = null;
     let lastMoveTime = 0;
+    let totalReloads = 0;
+    const MAX_TOTAL_RELOADS = 4;
 
     const resetAdDetection = () => {
       consecutiveAdChecks = 0;
@@ -671,9 +802,22 @@ const isChatOrAuthUrl = (url) => {
         const adElements = document.querySelectorAll(AD_SELECTOR_STRING);
         if (adElements.length > 0) {
           for (let element of adElements) {
-            if (element.offsetParent !== null && element.style.display !== 'none') {
+            const computed = window.getComputedStyle(element);
+            const isVisible = computed.display !== 'none' &&
+                              computed.visibility !== 'hidden' &&
+                              parseFloat(computed.opacity) > 0.01;
+            if (isVisible) {
               return true;
             }
+          }
+        }
+
+        // Audio ad overlay detection
+        const audioOverlay = document.querySelector('[data-a-target="ax-overlay"], .audio-ax-overlay, [class*="audio-ax-overlay"]');
+        if (audioOverlay) {
+          const computed = window.getComputedStyle(audioOverlay);
+          if (computed.display !== 'none' && computed.visibility !== 'hidden') {
+            return true;
           }
         }
 
@@ -724,8 +868,7 @@ const isChatOrAuthUrl = (url) => {
         log.warn(`Ad detected (${consecutiveAdChecks}/${CONFIG.MAX_AD_RELOAD_ATTEMPTS})`);
 
         if (consecutiveAdChecks >= CONFIG.MAX_AD_RELOAD_ATTEMPTS) {
-          log.warn('Max ad reload attempts reached — resetting counter to allow future detection');
-          consecutiveAdChecks = 0;
+          log.warn('Max ad reload attempts reached — counter stays high, totalReloads cap is final guard');
           return;
         }
 
@@ -736,6 +879,12 @@ const isChatOrAuthUrl = (url) => {
 
         setTimeout(() => {
           if (isAdDetected()) {
+            if (totalReloads >= MAX_TOTAL_RELOADS) {
+              log.warn('Total reload cap reached — stopping auto-reload');
+              resetAdDetection();
+              return;
+            }
+            totalReloads++;
             log.info('Reloading page due to ad detection');
             lastReloadTime = Date.now();
             window.location.reload();
@@ -845,20 +994,32 @@ const isChatOrAuthUrl = (url) => {
     let lastPath = location.pathname;
     let debounceTimer = null;
 
-    const onMutation = () => {
+    const onMutation = (mutations) => {
+      let relevant = false;
+      for (const mutation of mutations) {
+        for (const node of mutation.addedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (node.matches?.(AD_SELECTOR_STRING)) { relevant = true; break; }
+          if (node.firstElementChild?.matches?.(AD_SELECTOR_STRING)) { relevant = true; break; }
+          if (mutation.type === 'childList' && mutation.target === document.body) {
+            relevant = true; break;
+          }
+        }
+        if (relevant) break;
+      }
+
       if (debounceTimer) {
         clearTimeout(debounceTimer);
       }
+
       debounceTimer = setTimeout(() => {
         debounceTimer = null;
 
-        // Video attachment check
         const video = document.querySelector('video');
         if (video) {
           playerErrorHandler.attachErrorHandlers(video);
         }
 
-        // SPA navigation check
         if (CONFIG.SWITCH_FIX && location.pathname !== lastPath) {
           lastPath = location.pathname;
           playerErrorHandler.resetAttempts();
@@ -869,6 +1030,10 @@ const isChatOrAuthUrl = (url) => {
             }
             removeAds();
           }, 300);
+        }
+
+        if (relevant) {
+          removeAds();
         }
       }, CONFIG.DEBOUNCE_DELAY);
     };
@@ -899,7 +1064,7 @@ const isChatOrAuthUrl = (url) => {
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v37.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v38.0.0...');
 
       // Inject CSS
       injectCSS();
@@ -932,7 +1097,7 @@ const isChatOrAuthUrl = (url) => {
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v37.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v38.0.0 initialized successfully');
     };
   })();
 
