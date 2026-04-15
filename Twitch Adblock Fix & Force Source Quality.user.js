@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 38.0.0
+// @version 39.1.0
 // @description Twitch ad-blocking with 2025-2026 selectors, wildcard patterns, optimized detection, bug fixes and expanded GQL interception
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -155,6 +155,10 @@
       '[class*="video-player--stream-display-ad"]',
       '.video-ads-sub-upsell-type',
       '.content-overlay-gate',
+      '.audio-ax-overlay-base',
+      '.audio-ax-overlay-link',
+      '.animated-audio-wave',
+      '[class*="animated-audio-wave"]',
     ],
 
     // Fallback keywords for text-based detection
@@ -179,9 +183,24 @@
   // Performance optimization: memoized selector string
   const AD_SELECTOR_STRING = CONFIG.CORE_AD_SELECTORS.join(', ');
 
+  // Suppress MaxListenersExceededWarning from Twitch IVS player (their bug, not ours)
+  // Suppress noisy warnings from Twitch IVS player (their bugs, not ours)
+  const _origWarn = unsafeWindow.console.warn.bind(unsafeWindow.console);
+  unsafeWindow.console.warn = function (...args) {
+    const msg = args.join(' ');
+    if (msg.includes('MaxListenersExceededWarning') ||
+        msg.includes('Possible EventEmitter memory leak') ||
+        msg.includes('Method called on deleted player instance') ||
+        msg.includes('Playhead stalling') ||
+        msg.includes('Moving to buffered region')) {
+      return;
+    }
+    _origWarn(...args);
+  };
+
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v38.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v39.1.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -391,14 +410,10 @@ const isChatOrAuthUrl = (url) => {
             const vars = operation.variables || {};
 
             // Core ad-blocking parameters
-            // NOTE: adblock=true + enableAdblock=true explicitly declare adblock usage.
-            // Trade-off: consistent values avoid detection via contradictory signals,
-            // but may trigger alternative ad-insertion paths on Twitch's backend.
             vars.isLive = true;
             vars.playerType = 'embed';
             vars.playerBackend = 'mediaplayer';
             vars.platform = 'web';
-            vars.adblock = true;
             vars.adsEnabled = false;
             vars.isAd = false;
             vars.adBreaksEnabled = false;
@@ -406,7 +421,6 @@ const isChatOrAuthUrl = (url) => {
 
             // New API parameters (v36.4.0)
             vars.ads_enabled = false;
-            vars.ad_block = true;
             vars.show_preroll_ads = false;
             vars.show_midroll_ads = false;
             vars.force_ads = false;
@@ -430,7 +444,6 @@ const isChatOrAuthUrl = (url) => {
             vars.params.ad_personalization_id = null;
 
             // Additional modern API parameters
-            vars.enableAdblock = true;
             vars.showAds = false;
             vars.skipAds = true;
             vars.personalizedAds = false;
@@ -550,7 +563,12 @@ const isChatOrAuthUrl = (url) => {
       return new Response(null, { status: 204 });
     }
 
-    // Handle GQL requests
+    // Block Amazon tracking pixel + ad forensics script
+    if (url.includes('amznidpxl') || url.includes('amazon-adsystem.com/cb') || url.includes('adforensics')) {
+      return new Response(null, { status: 204 });
+    }
+
+    // Handle GQL requests — single block for request modification + response processing
     if (url.includes('gql.twitch.tv')) {
       try {
         const bodyText = input instanceof Request
@@ -571,10 +589,7 @@ const isChatOrAuthUrl = (url) => {
       } catch (error) {
         log.debug('GQL processing error:', error);
       }
-    }
 
-    // GQL response interception: strip ad data from responses
-    if (url.includes('gql.twitch.tv')) {
       try {
         const gqlResponse = await originalFetch(input, init);
         if (CONFIG.DEBUG) {
@@ -647,6 +662,10 @@ const isChatOrAuthUrl = (url) => {
       '.audio-ad-overlay': 'display:none!important;',
       '[class*="audio-ax-overlay"]': 'display:none!important;',
       '[data-a-target="ax-overlay"]': 'display:none!important;visibility:hidden!important;',
+      '.audio-ax-overlay-base': 'display:none!important;',
+      '.audio-ax-overlay-link': 'display:none!important;',
+      '.animated-audio-wave': 'display:none!important;',
+      '[class*="animated-audio-wave"]': 'display:none!important;',
     };
 
     return () => {
@@ -755,6 +774,7 @@ const isChatOrAuthUrl = (url) => {
     let lastMoveTime = 0;
     let totalReloads = 0;
     const MAX_TOTAL_RELOADS = 4;
+    let readyStateZeroSince = 0;
 
     const resetAdDetection = () => {
       consecutiveAdChecks = 0;
@@ -823,13 +843,20 @@ const isChatOrAuthUrl = (url) => {
 
         // Secondary: video was playing before (currentTime > 0) but is now completely frozen
         // currentTime === 0 means initial load — NOT an ad, just player initializing
-        // readyState < 2 is NOT used — fires on normal network buffering ("Playhead stalling")
+        // readyState === 0 must persist for 10 seconds to avoid false positives from buffering
         const video = document.querySelector('video');
         if (video && video.currentTime > 2 && video.readyState === 0 && video.paused && !video.ended) {
-          const timeSinceInteraction = Date.now() - lastUserInteractionTime;
-          if (timeSinceInteraction >= 5000) {
-            return true;
+          const now = Date.now();
+          if (readyStateZeroSince === 0) {
+            readyStateZeroSince = now;
+            return false; // Don't trigger immediately
           }
+          if (now - readyStateZeroSince >= 10000) { // Must persist 10 seconds
+            const timeSinceInteraction = now - lastUserInteractionTime;
+            if (timeSinceInteraction >= 5000) return true;
+          }
+        } else {
+          readyStateZeroSince = 0;
         }
 
         return false;
@@ -909,6 +936,7 @@ const isChatOrAuthUrl = (url) => {
     let reloadAttempts = 0;
     let lastPath = location.pathname;
     let lastReloadTime = 0;
+    let currentAbortController = null;
 
     const resetAttempts = () => {
       reloadAttempts = 0;
@@ -945,9 +973,15 @@ const isChatOrAuthUrl = (url) => {
     };
 
     const attachErrorHandlers = (video) => {
-      if (!video || video.___ttv_hooked) return;
+      if (!video) return;
 
-      video.___ttv_hooked = true;
+      // Abort previous listeners to prevent MaxListenersExceededWarning
+      if (currentAbortController) {
+        currentAbortController.abort();
+      }
+
+      const controller = new AbortController();
+      currentAbortController = controller;
 
       const handleVideoError = () => {
         log.warn('Video error detected, scheduling reload');
@@ -976,10 +1010,10 @@ const isChatOrAuthUrl = (url) => {
         resetAttempts();
       };
 
-      video.addEventListener('error', handleVideoError);
-      video.addEventListener('stalled', handleStall);
-      video.addEventListener('waiting', handleWaiting);
-      video.addEventListener('playing', handlePlaying);
+      video.addEventListener('error', handleVideoError, { signal: controller.signal });
+      video.addEventListener('stalled', handleStall, { signal: controller.signal });
+      video.addEventListener('waiting', handleWaiting, { signal: controller.signal });
+      video.addEventListener('playing', handlePlaying, { signal: controller.signal });
     };
 
     return {
@@ -999,6 +1033,14 @@ const isChatOrAuthUrl = (url) => {
       for (const mutation of mutations) {
         for (const node of mutation.addedNodes) {
           if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          // Remove tracking pixels/scripts from ad domains (bypass fetch wrapper)
+          if (node.tagName === 'IMG' || node.tagName === 'SCRIPT' || node.tagName === 'IFRAME') {
+            const src = node.src || '';
+            if (src && (isAdDomain(src) || src.includes('adforensics') || src.includes('amznidpxl') || src.includes('amazon-adsystem.com/cb'))) {
+              node.remove();
+              continue;
+            }
+          }
           if (node.matches?.(AD_SELECTOR_STRING)) { relevant = true; break; }
           if (node.firstElementChild?.matches?.(AD_SELECTOR_STRING)) { relevant = true; break; }
           if (mutation.type === 'childList' && mutation.target === document.body) {
@@ -1024,10 +1066,6 @@ const isChatOrAuthUrl = (url) => {
           lastPath = location.pathname;
           playerErrorHandler.resetAttempts();
           setTimeout(() => {
-            const v = document.querySelector('video');
-            if (v) {
-              v.pause();
-            }
             removeAds();
           }, 300);
         }
@@ -1064,7 +1102,7 @@ const isChatOrAuthUrl = (url) => {
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v38.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v39.1.0...');
 
       // Inject CSS
       injectCSS();
@@ -1097,7 +1135,7 @@ const isChatOrAuthUrl = (url) => {
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v38.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v39.1.0 initialized successfully');
     };
   })();
 
