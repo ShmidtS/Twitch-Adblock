@@ -192,7 +192,8 @@
         msg.includes('Possible EventEmitter memory leak') ||
         msg.includes('Method called on deleted player instance') ||
         msg.includes('Playhead stalling') ||
-        msg.includes('Moving to buffered region')) {
+        msg.includes('Moving to buffered region') ||
+        msg.includes('jumping') && msg.includes('gap')) {
       return;
     }
     _origWarn(...args);
