@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 39.1.0
+// @version 40.0.0
 // @description Twitch ad-blocking with 2025-2026 selectors, wildcard patterns, optimized detection, bug fixes and expanded GQL interception
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -62,7 +62,8 @@
       'imasdk.googleapis.com', 'cdn.segment.com',
       'sponsored-content.twitch.tv', 'promotions.twitch.tv', 'marketing.twitch.tv',
       'partners.twitch.tv', 'sponsors.twitch.tv',
-      'sb.scorecardresearch.com'
+      'sb.scorecardresearch.com',
+      'imrworldwide.com', 'secure-sts-prod.imrworldwide.com'
     ],
 
     // Chat protection patterns
@@ -159,6 +160,22 @@
       '.audio-ax-overlay-link',
       '.animated-audio-wave',
       '[class*="animated-audio-wave"]',
+      // v40.0.0 additional selectors
+      '.outstreamVideoAd',
+      '[class*="OUTSTREAM_"]',
+      '.pushdown-sda__landscape-upsell',
+      '.sda-iframe',
+      '[class*="sda-iframe"]',
+      '.sda-nudge-overlay',
+      '.hideAdOverlay',
+      '[class*="videoAd"]',
+      '.chan-sub-sda-upsell-live-pill',
+      '[class*="chan-sub-sda-upsell"]',
+      '.prime-offers-upsell',
+      '[class*="prime-offers-upsell"]',
+      '.ad-banner-default-text',
+      '[class*="playAd"]',
+      '[class*="outstream"]',
     ],
 
     // Fallback keywords for text-based detection
@@ -167,8 +184,21 @@
       'adcontent', 'video-ad', 'stream-display-ad', 'audio-ad'
     ],
 
-    // M3U8 ad markers — only ad-specific markers, NOT CUE-OUT/CUE-IN (SCTE35 legit uses)
+    // M3U8 ad markers — pattern-based detection for ad breaks
     M3U8_AD_MARKERS: [
+      /#EXT-X-DATERANGE:.*CLASS="com\.twitch\.ttv\.pts\.dai"/,
+      /#EXT-X-DATERANGE:.*CLASS="twitch_ad"/,
+      /#EXT-X-CUE-OUT/,
+      /#EXT-X-SCTE35-OUT.*ad/i,
+      /#EXT-X-TWITCH-ADS/,
+    ],
+    M3U8_AD_END_MARKERS: [
+      /#EXT-X-DATERANGE:.*END-DATE/,
+      /#EXT-X-CUE-IN/,
+      /#EXT-X-SCTE35-IN/,
+    ],
+    // Legacy string markers for direct matching
+    M3U8_AD_STRINGS: [
       'SCTE35-AD', 'EXT-X-TWITCH-AD', 'STREAM-DISPLAY-AD',
       'EXT-X-AD', 'EXT-X-TWITCH-PREROLL-AD',
       'EXT-X-TWITCH-MIDROLL-AD', 'EXT-X-TWITCH-POSTROLL-AD',
@@ -176,8 +206,6 @@
       'EXT-X-TWITCH-PREROLL', 'EXT-X-TWITCH-MIDROLL', 'EXT-X-TWITCH-POSTROLL',
       'URI="ad"'
     ],
-    M3U8_CUE_OUT_AD_REGEX: /#EXT-X-DATERANGE:.*SCTE35-OUT.*(?:CLASS|START-DATE).*ad/i,
-    M3U8_CUE_IN_AD_REGEX: /#EXT-X-DATERANGE:.*SCTE35-IN.*(?:CLASS|END-DATE).*ad/i
   };
 
   // Performance optimization: memoized selector string
@@ -467,28 +495,35 @@ const isChatOrAuthUrl = (url) => {
 
   // Optimized M3U8 cleaner
   const cleanM3U8 = (() => {
-    const markerRegex = new RegExp(CONFIG.M3U8_AD_MARKERS.join('|'));
+    const markerRegex = new RegExp(CONFIG.M3U8_AD_STRINGS.join('|'));
 
     return (text) => {
       const lines = text.split('\n');
       const filteredLines = [];
-      let skipNext = false;
+      let inAdBreak = false;
 
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
 
+        // Check for ad break start markers
+        if (CONFIG.M3U8_AD_MARKERS.some(regex => regex.test(line))) {
+          inAdBreak = true;
+          continue;
+        }
+
+        // Check for ad break end markers
+        if (CONFIG.M3U8_AD_END_MARKERS.some(regex => regex.test(line))) {
+          inAdBreak = false;
+          continue;
+        }
+
+        // Check for direct string ad markers
         if (markerRegex.test(line)) {
-          skipNext = true;
           continue;
         }
 
-        if (skipNext && !line.startsWith('#')) {
-          skipNext = false;
-          continue;
-        }
-        skipNext = false;
-
-        if (CONFIG.M3U8_CUE_OUT_AD_REGEX.test(line) || CONFIG.M3U8_CUE_IN_AD_REGEX.test(line)) {
+        // Skip all lines while inside an ad break
+        if (inAdBreak) {
           continue;
         }
 
@@ -549,6 +584,45 @@ const isChatOrAuthUrl = (url) => {
     return response;
   };
 
+  // Clean ad scheduling data from GQL response bodies
+  const AD_RESPONSE_FIELDS = new Set([
+    'commercialBreaks', 'midrollSchedule', 'adBreaks', 'displayAds',
+    'adMetadata', 'adSlot', 'adReporting', 'adContext', 'adSchedule',
+    'adForecast', 'playerAdvertisement', 'adSlotMetadata',
+    'commercialBreakTimestamps', 'forcedAdBreaks',
+  ]);
+
+  const cleanGQLResponse = (data) => {
+    const ops = Array.isArray(data) ? data : [data];
+    let modified = false;
+
+    for (const op of ops) {
+      if (!op || typeof op !== 'object') continue;
+
+      // Walk the response object recursively
+      const walk = (obj) => {
+        if (!obj || typeof obj !== 'object') return;
+        for (const key of Object.keys(obj)) {
+          const lower = key.toLowerCase();
+          if (AD_RESPONSE_FIELDS.has(key) ||
+              (lower.includes('ad') && (lower.includes('break') || lower.includes('schedule') || lower.includes('slot') || lower.includes('metadata')))) {
+            if (obj[key] !== null && obj[key] !== false) {
+              obj[key] = Array.isArray(obj[key]) ? [] : null;
+              modified = true;
+            }
+          }
+          if (typeof obj[key] === 'object') {
+            walk(obj[key]);
+          }
+        }
+      };
+
+      walk(op);
+    }
+
+    return modified ? data : null;
+  };
+
   // Optimized fetch wrapper
   const originalFetch = unsafeWindow.fetch;
   unsafeWindow.fetch = async (input, init = {}) => {
@@ -593,6 +667,24 @@ const isChatOrAuthUrl = (url) => {
 
       try {
         const gqlResponse = await originalFetch(input, init);
+
+        // Clean ad scheduling data from GQL response body
+        try {
+          const cloned = gqlResponse.clone();
+          const data = await cloned.json();
+          const cleaned = cleanGQLResponse(data);
+          if (cleaned) {
+            const cleanBody = JSON.stringify(cleaned);
+            return new Response(cleanBody, {
+              status: gqlResponse.status,
+              statusText: gqlResponse.statusText,
+              headers: gqlResponse.headers
+            });
+          }
+        } catch (e) {
+          log.debug('GQL response clean error:', e);
+        }
+
         if (CONFIG.DEBUG) {
           const cloned = gqlResponse.clone();
           cloned.json().then(data => {
@@ -650,6 +742,48 @@ const isChatOrAuthUrl = (url) => {
     return stripAdHeaders(response);
   };
 
+  // Intercept XMLHttpRequest for ad blocking
+  const _origXHROpen = unsafeWindow.XMLHttpRequest.prototype.open;
+  const _origXHRSend = unsafeWindow.XMLHttpRequest.prototype.send;
+
+  unsafeWindow.XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this._ttvUrl = url;
+    this._ttvMethod = method;
+    return _origXHROpen.call(this, method, url, ...rest);
+  };
+
+  unsafeWindow.XMLHttpRequest.prototype.send = function (body) {
+    const url = this._ttvUrl || '';
+
+    // Block ad domains
+    if (isAdDomain(url) || url.includes('adforensics') || url.includes('amznidpxl') || url.includes('amazon-adsystem.com/cb')) {
+      this.abort();
+      return;
+    }
+
+    // Modify GQL requests via XHR
+    if (url.includes('gql.twitch.tv') && body && typeof body === 'string') {
+      try {
+        const parsed = JSON.parse(body);
+        const modified = modifyGQLRequest(parsed);
+        if (modified) {
+          arguments[0] = JSON.stringify(modified);
+        }
+      } catch (e) {}
+    }
+
+    return _origXHRSend.apply(this, arguments);
+  };
+
+  // Block sendBeacon to ad domains
+  const _origSendBeacon = unsafeWindow.navigator.sendBeacon.bind(unsafeWindow.navigator);
+  unsafeWindow.navigator.sendBeacon = function (url, data) {
+    if (isAdDomain(url) || url.includes('adforensics') || url.includes('amznidpxl')) {
+      return false;
+    }
+    return _origSendBeacon(url, data);
+  };
+
   const injectCSS = (() => {
     let cssInjected = false;
 
@@ -667,6 +801,19 @@ const isChatOrAuthUrl = (url) => {
       '.audio-ax-overlay-link': 'display:none!important;',
       '.animated-audio-wave': 'display:none!important;',
       '[class*="animated-audio-wave"]': 'display:none!important;',
+      '.outstreamVideoAd': 'display:none!important;',
+      '[class*="OUTSTREAM_"]': 'display:none!important;',
+      '.pushdown-sda__landscape-upsell': 'display:none!important;',
+      '.sda-iframe': 'display:none!important;',
+      '.sda-nudge-overlay': 'display:none!important;',
+      '.hideAdOverlay': 'display:none!important;',
+      '[class*="videoAd"]': 'display:none!important;',
+      '.chan-sub-sda-upsell-live-pill': 'display:none!important;',
+      '.prime-offers-upsell': 'display:none!important;',
+      '[class*="prime-offers-upsell"]': 'display:none!important;',
+      '.ad-banner-default-text': 'display:none!important;',
+      '[class*="playAd"]': 'display:none!important;',
+      '[class*="outstream"]': 'display:none!important;',
     };
 
     return () => {
