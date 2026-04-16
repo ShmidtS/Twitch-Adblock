@@ -243,7 +243,9 @@
     const msg = args.join(' ');
     if (msg.includes('Unable to parse response json') ||
         msg.includes('Failed to record ad event') ||
-        msg.includes('WithVideoAdTrackingComponent')) {
+        msg.includes('WithVideoAdTrackingComponent') ||
+        msg.includes('no operations in query document') ||
+        (msg.includes('GraphQL errors') && /VideoAd|ClientSideAd|AdEvent|AdBanner|TrackAd|ReportAd|AdOverlay|AdImpression/i.test(msg))) {
       return;
     }
     _origError(...args);
@@ -427,21 +429,6 @@ const isChatOrAuthUrl = (url) => {
       'SponsorScreen',
     ]);
 
-    // GQL operations that should be completely blocked (not modified) —
-    // ad reporting/event operations must never reach Twitch servers
-    const BLOCKED_GQL_OPERATIONS = new Set([
-      'ClientSideAdEventHandling_RecordAdEvent',
-      'ClientSideAdEventHandling_ReportAdSpike',
-      'VideoAdBanner',
-      'TrackAdImpression',
-      'ReportAdMetric',
-      'ReportAdSpike',
-      'AdOverlayImpression',
-      'PlayerAdInteractions',
-      'GetAdQuartileReporting',
-      'AdBidRequest',
-    ]);
-
     const _adPrefixRegex = /^(?:ClientSide|Fill|Process|Video|Stream|Audio|Get|Report|Track|Instream|Outstream)Ad/i;
     const _commercialRegex = /^Commercial/i;
     const _sponsorRegex = /^Sponsor(?!shipAccessToken)/i;
@@ -463,18 +450,6 @@ const isChatOrAuthUrl = (url) => {
           if (operation.operationName === 'PlaybackAccessToken') continue;
 
           const opName = operation.operationName;
-
-          // Neutralize blocked ad-reporting operations — keep operationName
-          // so server returns parseable JSON, but strip all variables
-          if (BLOCKED_GQL_OPERATIONS.has(opName)) {
-            operation.variables = {};
-            operation.extensions = {};
-            modified = true;
-            if (CONFIG.DEBUG) {
-              log.debug(`Neutralized GQL operation: ${opName}`);
-            }
-            continue;
-          }
 
           const isAdOperation = adOperationNames.has(opName) ||
             _adPrefixRegex.test(opName) ||
