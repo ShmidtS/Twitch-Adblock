@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 40.0.0
+// @version 41.0.0
 // @description Twitch ad-blocking with 2025-2026 selectors, wildcard patterns, optimized detection, bug fixes and expanded GQL interception
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -55,15 +55,25 @@
 
     // Domains and patterns
     AD_DOMAINS: [
-      'edge.ads.twitch.tv', 'amazon-adsystem.com', 'scorecardresearch.com',
+      'edge.ads.twitch.tv', 'amazon-adsystem.com',
       'sq-tungsten-ts.amazon-adsystem.com', 'ads.ttvnw.net', 'ad.twitch.tv',
       'video.ad.twitch.tv', 'stream-display-ad.twitch.tv', 'doubleclick.net',
       'googlesyndication.com', 'criteo.com', 'taboola.com', 'outbrain.com',
       'imasdk.googleapis.com', 'cdn.segment.com',
       'sponsored-content.twitch.tv', 'promotions.twitch.tv', 'marketing.twitch.tv',
       'partners.twitch.tv', 'sponsors.twitch.tv',
+      'adforensics.twitch.tv'
+    ],
+
+    // Tracking/analytics domains to block (not ad-specific but leak user data)
+    TRACKING_DOMAINS: [
+      'spade.twitch.tv',
       'sb.scorecardresearch.com',
-      'imrworldwide.com', 'secure-sts-prod.imrworldwide.com'
+      'secure-sts-prod.imrworldwide.com',
+      'imrworldwide.com',
+      'api.sprig.com',
+      'sprig.com',
+      'amazon-adsystem.com',
     ],
 
     // Chat protection patterns
@@ -221,15 +231,27 @@
         msg.includes('Method called on deleted player instance') ||
         msg.includes('Playhead stalling') ||
         msg.includes('Moving to buffered region') ||
+        msg.includes('SpadeClient') ||
         msg.includes('jumping') && msg.includes('gap')) {
       return;
     }
     _origWarn(...args);
   };
 
+  const _origError = unsafeWindow.console.error.bind(unsafeWindow.console);
+  unsafeWindow.console.error = function (...args) {
+    const msg = args.join(' ');
+    if (msg.includes('Unable to parse response json') ||
+        msg.includes('Failed to record ad event') ||
+        msg.includes('WithVideoAdTrackingComponent')) {
+      return;
+    }
+    _origError(...args);
+  };
+
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v39.1.0]';
+    const prefix = '[TTV ADBLOCK FIX v41.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -405,6 +427,21 @@ const isChatOrAuthUrl = (url) => {
       'SponsorScreen',
     ]);
 
+    // GQL operations that should be completely blocked (not modified) —
+    // ad reporting/event operations must never reach Twitch servers
+    const BLOCKED_GQL_OPERATIONS = new Set([
+      'ClientSideAdEventHandling_RecordAdEvent',
+      'ClientSideAdEventHandling_ReportAdSpike',
+      'VideoAdBanner',
+      'TrackAdImpression',
+      'ReportAdMetric',
+      'ReportAdSpike',
+      'AdOverlayImpression',
+      'PlayerAdInteractions',
+      'GetAdQuartileReporting',
+      'AdBidRequest',
+    ]);
+
     const _adPrefixRegex = /^(?:ClientSide|Fill|Process|Video|Stream|Audio|Get|Report|Track|Instream|Outstream)Ad/i;
     const _commercialRegex = /^Commercial/i;
     const _sponsorRegex = /^Sponsor(?!shipAccessToken)/i;
@@ -412,21 +449,32 @@ const isChatOrAuthUrl = (url) => {
     const _promoRegex = /^Promo(?!tionAccessToken)/i;
 
     return (body) => {
-      if (typeof body !== 'object' || !body) return null;
+      if (typeof body !== 'object' || !body) return 'pass';
 
-      const operations = Array.isArray(body) ? body : [body];
+      const isBatch = Array.isArray(body);
+      const operations = isBatch ? body : [body];
       let modified = false;
 
       try {
-        for (let operation of operations) {
+        for (let i = 0; i < operations.length; i++) {
+          const operation = operations[i];
           if (!operation?.operationName) continue;
 
-          // Safety guard: never modify PlaybackAccessToken (removed from adOperationNames,
-          // but this prevents accidental match if Twitch renames it to include 'Ad' substring)
           if (operation.operationName === 'PlaybackAccessToken') continue;
 
-          // Prefix-based matching prevents false positives like PlaybackAccessToken_Ad
           const opName = operation.operationName;
+
+          // Neutralize blocked ad-reporting operations — keep operationName
+          // so server returns parseable JSON, but strip all variables
+          if (BLOCKED_GQL_OPERATIONS.has(opName)) {
+            operation.variables = {};
+            operation.extensions = {};
+            modified = true;
+            if (CONFIG.DEBUG) {
+              log.debug(`Neutralized GQL operation: ${opName}`);
+            }
+            continue;
+          }
 
           const isAdOperation = adOperationNames.has(opName) ||
             _adPrefixRegex.test(opName) ||
@@ -438,7 +486,6 @@ const isChatOrAuthUrl = (url) => {
           if (isAdOperation) {
             const vars = operation.variables || {};
 
-            // Core ad-blocking parameters
             vars.isLive = true;
             vars.playerType = 'embed';
             vars.playerBackend = 'mediaplayer';
@@ -448,13 +495,11 @@ const isChatOrAuthUrl = (url) => {
             vars.adBreaksEnabled = false;
             vars.disableAds = true;
 
-            // New API parameters (v36.4.0)
             vars.ads_enabled = false;
             vars.show_preroll_ads = false;
             vars.show_midroll_ads = false;
             vars.force_ads = false;
 
-            // Quality and performance parameters
             vars.params = vars.params || {};
             vars.params.allow_source = true;
             vars.params.allow_audio_only = true;
@@ -463,7 +508,6 @@ const isChatOrAuthUrl = (url) => {
             vars.params.include_denylist_categories = false;
             vars.params.include_optional = true;
 
-            // Clear ad identifiers
             vars.params.client_ad_id = null;
             vars.params.ad_session_id = null;
             vars.params.reftoken = null;
@@ -472,7 +516,6 @@ const isChatOrAuthUrl = (url) => {
             vars.params.ad_conv_id = null;
             vars.params.ad_personalization_id = null;
 
-            // Additional modern API parameters
             vars.showAds = false;
             vars.skipAds = true;
             vars.personalizedAds = false;
@@ -487,9 +530,10 @@ const isChatOrAuthUrl = (url) => {
         }
       } catch (error) {
         log.error('GQL modification error:', error);
+        return 'pass';
       }
 
-      return modified ? operations : null;
+      return modified ? (isBatch ? operations : operations[0]) : 'pass';
     };
   })();
 
@@ -551,6 +595,17 @@ const isChatOrAuthUrl = (url) => {
     try {
       const hostname = new URL(url).hostname;
       return CONFIG.AD_DOMAINS.some(domain =>
+        hostname === domain || hostname.endsWith('.' + domain)
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  const isTrackingDomain = (url) => {
+    try {
+      const hostname = new URL(url).hostname;
+      return CONFIG.TRACKING_DOMAINS.some(domain =>
         hostname === domain || hostname.endsWith('.' + domain)
       );
     } catch {
@@ -651,10 +706,10 @@ const isChatOrAuthUrl = (url) => {
           : init.body || '{}';
 
         const body = JSON.parse(bodyText);
-        const modified = modifyGQLRequest(body);
+        const result = modifyGQLRequest(body);
 
-        if (modified) {
-          const newBody = JSON.stringify(modified);
+        if (result !== 'pass') {
+          const newBody = JSON.stringify(result);
           init = { ...init, body: newBody };
 
           if (input instanceof Request) {
@@ -698,6 +753,9 @@ const isChatOrAuthUrl = (url) => {
         }
         return stripAdHeaders(gqlResponse);
       } catch (error) {
+        if (error?.name === 'AbortError') {
+          return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+        }
         log.debug('GQL response interception error:', error);
       }
     }
@@ -765,9 +823,9 @@ const isChatOrAuthUrl = (url) => {
     if (url.includes('gql.twitch.tv') && body && typeof body === 'string') {
       try {
         const parsed = JSON.parse(body);
-        const modified = modifyGQLRequest(parsed);
-        if (modified) {
-          arguments[0] = JSON.stringify(modified);
+        const result = modifyGQLRequest(parsed);
+        if (result !== 'pass') {
+          arguments[0] = JSON.stringify(result);
         }
       } catch (e) {}
     }
@@ -778,7 +836,7 @@ const isChatOrAuthUrl = (url) => {
   // Block sendBeacon to ad domains
   const _origSendBeacon = unsafeWindow.navigator.sendBeacon.bind(unsafeWindow.navigator);
   unsafeWindow.navigator.sendBeacon = function (url, data) {
-    if (isAdDomain(url) || url.includes('adforensics') || url.includes('amznidpxl')) {
+    if (isAdDomain(url) || isTrackingDomain(url) || url.includes('adforensics') || url.includes('amznidpxl')) {
       return false;
     }
     return _origSendBeacon(url, data);
@@ -1250,7 +1308,7 @@ const isChatOrAuthUrl = (url) => {
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v39.1.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v41.0.0...');
 
       // Inject CSS
       injectCSS();
@@ -1283,7 +1341,7 @@ const isChatOrAuthUrl = (url) => {
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v39.1.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v41.0.0 initialized successfully');
     };
   })();
 
