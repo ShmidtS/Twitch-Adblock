@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 46.0.0
+// @version 47.0.0
 // @description Twitch ad-blocking with window.__vat interception, playerType cascade, M3U8 stitched-ad replacement, PBYP blocking, fake ad-quartile
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -258,7 +258,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v46.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v47.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -389,6 +389,8 @@ const isChatOrAuthUrl = (url) => {
   let currentPlayerTypeIdx = 0;
   let consecutiveAdM3U8 = 0;
   const MAX_CONSECUTIVE_AD_M3U8 = 3;
+  let globalReloadCount = 0;
+  const GLOBAL_MAX_RELOADS = 6;
   let currentUsherUrl = null;
   let pendingReplacement = null;
 
@@ -403,32 +405,37 @@ const isChatOrAuthUrl = (url) => {
       sentForSession = true;
       setTimeout(() => { sentForSession = false; }, 60000);
       try {
-        const fakeEvent = {
-          operationName: 'ClientSideAdEventHandling_RecordAdEvent',
-          variables: {
-            input: {
-              eventName: 'video_ad_quartile_complete',
-              eventPayload: JSON.stringify({
-                adQuartile: 4,
-                adMediaType: 'video',
-                playerMute: false,
-                playerVolume: 0.5,
-                videoHeight: 1080,
-                videoWidth: 1920,
-              }),
-            }
-          }
-        };
-        originalFetch('https://gql.twitch.tv/gql', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Client-ID': savedGQLHeaders['Client-ID'],
-            ...(savedGQLHeaders['Authorization'] && { 'Authorization': savedGQLHeaders['Authorization'] }),
-          },
-          body: JSON.stringify(fakeEvent),
-        }).catch(() => {});
-        log.info('Sent fake ad-quartile event');
+        for (let q = 1; q <= 4; q++) {
+          const quartile = q;
+          setTimeout(() => {
+            const fakeEvent = {
+              operationName: 'ClientSideAdEventHandling_RecordAdEvent',
+              variables: {
+                input: {
+                  eventName: 'video_ad_quartile_complete',
+                  eventPayload: JSON.stringify({
+                    adQuartile: quartile,
+                    adMediaType: 'video',
+                    playerMute: false,
+                    playerVolume: 0.5,
+                    videoHeight: 1080,
+                    videoWidth: 1920,
+                  }),
+                }
+              }
+            };
+            originalFetch('https://gql.twitch.tv/gql', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Client-ID': savedGQLHeaders['Client-ID'],
+                ...(savedGQLHeaders['Authorization'] && { 'Authorization': savedGQLHeaders['Authorization'] }),
+              },
+              body: JSON.stringify(fakeEvent),
+            }).catch(() => {});
+          }, quartile * 1500);
+        }
+        log.info('Sending fake ad-quartile sequence 1-4');
       } catch (e) {}
     };
   })();
@@ -438,13 +445,10 @@ const isChatOrAuthUrl = (url) => {
   // and skips our GQL cleaning. Strategy: change playerType to force cache MISS, so
   // the player re-fetches VAT through our intercepted fetch with playerType="embed".
   const interceptVAT = (() => {
-    let intercepted = false;
-
     const patchVATRequest = (vat) => {
-      if (!vat || intercepted) return;
-      intercepted = true;
-
+      if (!vat) return;
       const desiredPlayerType = PLAYER_TYPE_CASCADE[currentPlayerTypeIdx] || 'embed';
+      if (vat.playerType === desiredPlayerType && vat.request && typeof vat.request === 'object') return;
 
       if (vat.playerType !== desiredPlayerType) {
         log.info(`__vat playerType=${vat.playerType}, changing to ${desiredPlayerType} to force cache miss`);
@@ -557,6 +561,7 @@ const isChatOrAuthUrl = (url) => {
     const _sponsorRegex = /^Sponsor(?!shipAccessToken)/i;
     const _marketingRegex = /^Marketing/i;
     const _promoRegex = /^Promo(?!tionAccessToken)/i;
+    const LEGITIMATE_OPS = new Set(['PlaybackAccessToken', 'VideoPlayerStreamOverlay', 'VideoPlayerStreamInfo', 'StreamMetadata']);
     const _pbypRegex = /^(?:Video)?PictureByPicture|^Midroll/i;
 
     return (body) => {
@@ -582,13 +587,18 @@ const isChatOrAuthUrl = (url) => {
 
           const opName = operation.operationName;
 
-          const isAdOperation = adOperationNames.has(opName) ||
+          let isAdOperation = adOperationNames.has(opName) ||
             _adPrefixRegex.test(opName) ||
             _commercialRegex.test(opName) ||
             _sponsorRegex.test(opName) ||
             _marketingRegex.test(opName) ||
             _promoRegex.test(opName) ||
             _pbypRegex.test(opName);
+
+          if (!isAdOperation && !LEGITIMATE_OPS.has(opName) && /\bAd[A-Z]/.test(opName)) {
+            isAdOperation = true;
+            log.info(`Catch-all matched unknown ad operation: ${opName}`);
+          }
 
           if (isAdOperation) {
             // Completely remove ad operations instead of modifying them
@@ -641,7 +651,7 @@ const isChatOrAuthUrl = (url) => {
 
         // Skip all lines while inside an ad break (auto-reset on content segment)
         if (inAdBreak) {
-          if (line.startsWith('#EXT-X-DISCONTINUITY') ||
+          if (line === '#EXT-X-DISCONTINUITY' ||
               (line.trim() && !line.startsWith('#') && line.includes('://'))) {
             inAdBreak = false;
             if (line.startsWith('#EXT-X-DISCONTINUITY')) continue;
@@ -656,6 +666,17 @@ const isChatOrAuthUrl = (url) => {
 
       let cleaned = filteredLines.join('\n');
 
+      // Safety net: if cleaning removed all content segments, return original
+      const hasContentSegments = filteredLines.some(line =>
+        line.trim() && !line.startsWith('#') && line.includes('://')
+      );
+      if (!hasContentSegments && text.split('\n').some(line =>
+        line.trim() && !line.startsWith('#') && line.includes('://')
+      )) {
+        log.warn('M3U8 cleaning removed all segments — returning original');
+        return text;
+      }
+
       // Force chunked quality if enabled
       if (CONFIG.FORCE_CHUNKED) {
         const chunkedMatch = cleaned.match(/#EXT-X-STREAM-INF:[^\n]*?(?:VIDEO="chunked"|NAME="Source"|исходное)[^\n]*\n([^\n]+)/i);
@@ -663,6 +684,8 @@ const isChatOrAuthUrl = (url) => {
         if (chunkedMatch) {
           const chunkedUrl = chunkedMatch[1].trim();
           cleaned = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO="chunked"\n${chunkedUrl}`;
+        } else {
+          log.warn('FORCE_CHUNKED: no chunked/Source stream found in M3U8');
         }
       }
 
@@ -762,6 +785,11 @@ const isChatOrAuthUrl = (url) => {
         } else {
           log.warn(`PlaybackAccessToken forbidden (${reason}), cascade exhausted`);
         }
+      } else if (op.data?.streamPlaybackAccessToken?.authorization) {
+        if (currentPlayerTypeIdx > 0) {
+          currentPlayerTypeIdx = 0;
+          log.info('PlaybackAccessToken OK, resetting cascade to embed');
+        }
       }
 
       walk(op);
@@ -779,7 +807,7 @@ var _wf=self.fetch;
 self.fetch=function(input,init){
 var url=(input instanceof Request?input.url:input)+"";
 try{var h=new URL(url).hostname;
-var bd=["edge.ads.twitch.tv","amazon-adsystem.com","ads.ttvnw.net","ad.twitch.tv",
+var bd=["edge.ads.twitch.tv","amazon-adsystem.com","sq-tungsten-ts.amazon-adsystem.com","ads.ttvnw.net","ad.twitch.tv",
 "video.ad.twitch.tv","stream-display-ad.twitch.tv","doubleclick.net","googlesyndication.com",
 "criteo.com","taboola.com","outbrain.com","imasdk.googleapis.com","cdn.segment.com",
 "sponsored-content.twitch.tv","promotions.twitch.tv","marketing.twitch.tv",
@@ -807,7 +835,8 @@ var em=[/#EXT-X-DATERANGE:.*END-DATE/,/#EXT-X-CUE-IN/,/#EXT-X-SCTE35-IN/];
 var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
 "EXT-X-TWITCH-PREROLL-AD","EXT-X-TWITCH-MIDROLL-AD","EXT-X-TWITCH-POSTROLL-AD",
 "EXT-X-TWITCH-AD-PLUGIN","EXT-X-TWITCH-AD-CREATIVE","EXT-X-TWITCH-PREROLL",
-"EXT-X-TWITCH-MIDROLL","EXT-X-TWITCH-POSTROLL",'URI="ad"',"stitched-ad"].join("|"));
+"EXT-X-TWITCH-MIDROLL","EXT-X-TWITCH-POSTROLL",'URI="ad"',"stitched-ad",
+"EXT-X-DATERANGE"].join("|"));
 for(var i=0;i<ls.length;i++){var l=ls[i],isS=false,isE=false;
 for(var j=0;j<am.length;j++){if(am[j].test(l)){isS=true;break}}
 if(isS){iab=true;continue}
@@ -819,7 +848,7 @@ if(iab){if(l.indexOf("#EXT-X-DISCONTINUITY")===0||
 iab=false;if(l.indexOf("#EXT-X-DISCONTINUITY")===0)continue;fl.push(l);continue}continue}
 fl.push(l)}
 var c=fl.join("\\n");
-var cm=c.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source")[^\\n]*\\n([^\\n]+)/i);
+var cm=c.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\u0438\u0441\u0445\u043e\u0434\u043d\u043e\u0435)[^\\n]*\\n([^\\n]+)/i);
 if(cm)c="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
 if(c!==text){try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
 return new Response(new Blob([c]),{status:r.status,
@@ -866,11 +895,12 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
 
     if (url.startsWith('blob:')) {
       try {
-        const bootstrapCode = workerInjection + '\nimportScripts("' + url + '");\n';
+        const safeUrl = url.replace(/[^a-zA-Z0-9\-:/?.&=_]/g, '');
+        const bootstrapCode = workerInjection + '\nimportScripts("' + safeUrl + '");\n';
         const bootstrapBlob = new Blob([bootstrapCode], { type: 'application/javascript' });
         const bootstrapUrl = URL.createObjectURL(bootstrapBlob);
         const worker = new _OriginalWorker(bootstrapUrl, options);
-        URL.revokeObjectURL(bootstrapUrl);
+        setTimeout(() => URL.revokeObjectURL(bootstrapUrl), 1000);
         attachWorkerListener(worker);
         log.info('Worker proxy installed (importScripts) for blob: URL');
         return worker;
@@ -1188,7 +1218,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       log.debug('Blocked postMessage to tracking domain:', targetOrigin);
       return;
     }
-    if (message && typeof message === 'object' && message.type && /ad|tracking|spade|supervisor/i.test(message.type)) {
+    if (message && typeof message === 'object' && message.type && /\bad\b|tracking|spade|supervisor/i.test(message.type)) {
       log.debug('Blocked tracking postMessage:', message.type);
       return;
     }
@@ -1529,11 +1559,12 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
 
         setTimeout(() => {
           if (isAdDetected()) {
-            if (totalReloads >= MAX_TOTAL_RELOADS) {
-              log.warn('Total reload cap reached — stopping auto-reload');
+            if (globalReloadCount >= GLOBAL_MAX_RELOADS) {
+              log.warn('Global reload cap reached — stopping auto-reload');
               resetAdDetection();
               return;
             }
+            globalReloadCount++;
             totalReloads++;
             log.info('Reloading page due to ad detection');
             lastReloadTime = Date.now();
@@ -1565,6 +1596,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       reloadAttempts = 0;
       lastPath = location.pathname;
       lastReloadTime = 0;
+      globalReloadCount = 0;
     };
 
     const scheduleReload = (reason) => {
@@ -1576,7 +1608,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
         return;
       }
 
-      if (reloadAttempts >= CONFIG.MAX_RELOAD_ATTEMPTS) return;
+      if (reloadAttempts >= CONFIG.MAX_RELOAD_ATTEMPTS || globalReloadCount >= GLOBAL_MAX_RELOADS) return;
 
       const delay = Math.min(
         2000 * Math.pow(2, reloadAttempts),
@@ -1591,6 +1623,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
           resetAttempts();
           return;
         }
+        globalReloadCount++;
         window.location.reload();
       }, delay);
     };
@@ -1734,7 +1767,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v46.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v47.0.0...');
 
       // Inject CSS
       injectCSS();
@@ -1767,7 +1800,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v46.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v47.0.0 initialized successfully');
     };
   })();
 
