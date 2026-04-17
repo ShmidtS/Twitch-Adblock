@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 48.0.0
+// @version 49.0.4
 // @description Twitch ad-blocking with window.__vat interception, playerType cascade, M3U8 stitched-ad replacement, PBYP blocking, fake ad-quartile
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -62,13 +62,18 @@
       'imasdk.googleapis.com', 'cdn.segment.com',
       'sponsored-content.twitch.tv', 'promotions.twitch.tv', 'marketing.twitch.tv',
       'partners.twitch.tv', 'sponsors.twitch.tv',
-      'adforensics.twitch.tv'
+      'adforensics.twitch.tv',
+      'vaes.amazon-adsystem.com', 'aax.amazon-adsystem.com',
+      'aax-us.amazon-adsystem.com', 'c.amazon-adsystem.com',
+      'gin.twitch.tv', 'imprint.twitch.tv',
+      'client-event.twitch.tv',
     ],
 
     // Tracking/analytics domains to block (not ad-specific but leak user data)
     TRACKING_DOMAINS: [
       'spade.twitch.tv',
       'sb.scorecardresearch.com',
+      'scorecardresearch.com',
       'secure-sts-prod.imrworldwide.com',
       'imrworldwide.com',
       'api.sprig.com',
@@ -76,6 +81,21 @@
       'amazon-adsystem.com',
       'supervisor.ext-twitch.tv',
       'science-output.s3.amazonaws.com',
+      'client-event.twitch.tv',
+      'gin.twitch.tv',
+      'imprint.twitch.tv',
+    ],
+
+    // URL path patterns for precise ad blocking (checked before domain-level)
+    AD_URL_PATTERNS: [
+      { domain: 'amazon-adsystem.com', path: '/iu3' },
+      { domain: 'amazon-adsystem.com', path: '/iui3' },
+      { domain: 'amazon-adsystem.com', path: '/noop/' },
+      { domain: 'amazon-adsystem.com', path: '/e/ipb/' },
+      { domain: 'amazon-adsystem.com', path: '/x/px/' },
+      { domain: 'amazon-adsystem.com', path: '/e/dtb/' },
+      { domain: 'amazon-adsystem.com', path: '/g/' },
+      { domain: 'amazon-adsystem.com', path: '/cb' },
     ],
 
     // Chat protection patterns
@@ -212,14 +232,12 @@
       /#EXT-X-DATERANGE:.*CLASS="com\.twitch\.ttv\.pts\.dai"/,
       /#EXT-X-DATERANGE:.*CLASS="twitch_ad"/,
       /#EXT-X-DATERANGE:.*ID="stitched-ad-/,
-      /#EXT-X-CUE-OUT/,
       /#EXT-X-SCTE35-OUT.*ad/i,
       /#EXT-X-TWITCH-ADS/,
-      /#EXT-X-DATERANGE:.*CLASS=".*ad.*"/i,
+      /#EXT-X-DATERANGE:.*CLASS="[^"]*ad[^"]*"/i,
     ],
     M3U8_AD_END_MARKERS: [
       /#EXT-X-DATERANGE:.*END-DATE/,
-      /#EXT-X-CUE-IN/,
       /#EXT-X-SCTE35-IN/,
     ],
     // Legacy string markers for direct matching
@@ -229,7 +247,7 @@
       'EXT-X-TWITCH-MIDROLL-AD', 'EXT-X-TWITCH-POSTROLL-AD',
       'EXT-X-TWITCH-AD-PLUGIN', 'EXT-X-TWITCH-AD-CREATIVE',
       'EXT-X-TWITCH-PREROLL', 'EXT-X-TWITCH-MIDROLL', 'EXT-X-TWITCH-POSTROLL',
-      'URI="ad"', 'stitched-ad', 'EXT-X-DATERANGE:.*CLASS=".*ad.*"',
+      'URI="ad"', 'stitched-ad',
     ],
   };
 
@@ -268,7 +286,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v47.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v49.0.4]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -395,7 +413,7 @@ const isChatOrAuthUrl = (url) => {
   const batchRemover = new OptimizedBatchRemover();
 
   // Stream ad bypass state — playerType cascade + M3U8 replacement
-  const PLAYER_TYPE_CASCADE = ['embed', 'site', 'thunderdome'];
+  const PLAYER_TYPE_CASCADE = ['site', 'embed', 'thunderdome'];
   let currentPlayerTypeIdx = 0;
   let consecutiveAdM3U8 = 0;
   const MAX_CONSECUTIVE_AD_M3U8 = 3;
@@ -455,25 +473,24 @@ const isChatOrAuthUrl = (url) => {
   // and skips our GQL cleaning. Strategy: change playerType to force cache MISS, so
   // the player re-fetches VAT through our intercepted fetch with playerType="embed".
   const interceptVAT = (() => {
+    const patchedVATs = new WeakSet();
     const patchVATRequest = (vat) => {
-      if (!vat) return;
+      if (!vat || patchedVATs.has(vat)) return;
+      patchedVATs.add(vat);
+
       const desiredPlayerType = PLAYER_TYPE_CASCADE[currentPlayerTypeIdx] || 'embed';
-      if (vat.playerType === desiredPlayerType && vat.request && typeof vat.request === 'object') return;
 
       if (vat.playerType !== desiredPlayerType) {
         log.info(`__vat playerType=${vat.playerType}, changing to ${desiredPlayerType} to force cache miss`);
         vat.playerType = desiredPlayerType;
       }
 
-      // Invalidate the cached request so player code re-fetches through our intercepted fetch
-      // The player code checks: window.__vat.playerType === expected -> if mismatch, skips cache
-      if (vat.request) {
-        vat.request = Promise.resolve(new Response('{}', {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' }
-        }));
-        log.info('Invalidated __vat.request cache — player will re-fetch through our pipeline');
-      }
+      // Do NOT modify vat.request or its response body.
+      // The PlaybackAccessToken value is cryptographically signed by Twitch.
+      // Any modification (even adblock/http_only flags) invalidates the signature,
+      // causing 403 nauth_sig_invalid on M3U8 requests.
+      // The M3U8 cleaning pipeline handles ad removal at the stream level instead.
+      log.info('VAT playerType patched — M3U8 cleaning handles ads');
     };
 
     // Intercept the property setter — catches __vat assignment in real-time
@@ -509,6 +526,35 @@ const isChatOrAuthUrl = (url) => {
         clearInterval(pollInterval);
       }
     }, 200);
+  })();
+
+  // Intercept window.__playerBootstrap — Twitch IVS player bootstrap may carry
+  // ad-related configuration before our fetch wrapper processes requests.
+  const interceptPlayerBootstrap = (() => {
+    let bootstrapValue = null;
+    try {
+      Object.defineProperty(unsafeWindow, '__playerBootstrap', {
+        get() { return bootstrapValue; },
+        set(val) {
+          bootstrapValue = val;
+          if (val && typeof val === 'object') {
+            if (val.adConfig) {
+              val.adConfig = {};
+              log.info('__playerBootstrap: stripped adConfig');
+            }
+            if (val.forceAds) {
+              val.forceAds = false;
+              log.info('__playerBootstrap: disabled forceAds');
+            }
+          }
+        },
+        configurable: true,
+        enumerable: true
+      });
+      log.info('Installed __playerBootstrap interceptor');
+    } catch (e) {
+      log.debug('__playerBootstrap interceptor install failed:', e);
+    }
   })();
 
   // Optimized GQL request modifier
@@ -671,8 +717,15 @@ const isChatOrAuthUrl = (url) => {
   // Optimized M3U8 cleaner
   const cleanM3U8 = (() => {
     const markerRegex = new RegExp(CONFIG.M3U8_AD_STRINGS.join('|'));
+    const markersCombined = new RegExp(CONFIG.M3U8_AD_MARKERS.map(r => r.source).join('|'));
+    const endMarkersCombined = new RegExp(CONFIG.M3U8_AD_END_MARKERS.map(r => r.source).join('|'));
 
     return (text) => {
+      // Early bailout: skip processing if no ad markers present
+      if (!markerRegex.test(text) && !markersCombined.test(text)) {
+        return text;
+      }
+
       const lines = text.split('\n');
       const filteredLines = [];
       let inAdBreak = false;
@@ -680,14 +733,14 @@ const isChatOrAuthUrl = (url) => {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
 
-        // Check for ad break start markers
-        if (CONFIG.M3U8_AD_MARKERS.some(regex => regex.test(line))) {
+        // Check for ad break start markers (compiled single regex)
+        if (markersCombined.test(line)) {
           inAdBreak = true;
           continue;
         }
 
-        // Check for ad break end markers
-        if (CONFIG.M3U8_AD_END_MARKERS.some(regex => regex.test(line))) {
+        // Check for ad break end markers (compiled single regex)
+        if (endMarkersCombined.test(line)) {
           inAdBreak = false;
           continue;
         }
@@ -809,10 +862,12 @@ const isChatOrAuthUrl = (url) => {
     for (const op of ops) {
       if (!op || typeof op !== 'object') continue;
 
-      // Walk the response object recursively
+      // Walk the response object recursively — but NEVER touch streamPlaybackAccessToken
+      // (its value is cryptographically signed; any modification = 403 nauth_sig_invalid)
       const walk = (obj) => {
         if (!obj || typeof obj !== 'object') return;
         for (const key of Object.keys(obj)) {
+          if (key === 'streamPlaybackAccessToken') continue;
           const lower = key.toLowerCase();
           if (AD_RESPONSE_FIELDS.has(key) ||
               (lower.includes('ad') && (lower.includes('break') || lower.includes('schedule') || lower.includes('slot') || lower.includes('metadata')))) {
@@ -855,15 +910,22 @@ const isChatOrAuthUrl = (url) => {
 
   const workerInjection = `(function(){
 var _wf=self.fetch;
+var _mc={};
+if(typeof SpadeClient!=='undefined'){SpadeClient.prototype.send=function(){return -1};}
 self.fetch=function(input,init){
 var url=(input instanceof Request?input.url:input)+"";
+var _uk=url.split("?")[0];
+var _now=Date.now();
+if(_mc[_uk]&&_now-_mc[_uk]<2000){return _wf(input,init)}
 try{var h=new URL(url).hostname;
 var bd=["edge.ads.twitch.tv","amazon-adsystem.com","sq-tungsten-ts.amazon-adsystem.com","ads.ttvnw.net","ad.twitch.tv",
 "video.ad.twitch.tv","stream-display-ad.twitch.tv","doubleclick.net","googlesyndication.com",
 "criteo.com","taboola.com","outbrain.com","imasdk.googleapis.com","cdn.segment.com",
 "sponsored-content.twitch.tv","promotions.twitch.tv","marketing.twitch.tv",
 "partners.twitch.tv","sponsors.twitch.tv","adforensics.twitch.tv",
-"spade.twitch.tv","sb.scorecardresearch.com","supervisor.ext-twitch.tv",
+"vaes.amazon-adsystem.com","aax.amazon-adsystem.com","aax-us.amazon-adsystem.com",
+"c.amazon-adsystem.com","gin.twitch.tv","imprint.twitch.tv","client-event.twitch.tv",
+"spade.twitch.tv","sb.scorecardresearch.com","scorecardresearch.com","supervisor.ext-twitch.tv",
 "secure-sts-prod.imrworldwide.com","imrworldwide.com","api.sprig.com","sprig.com",
 "science-output.s3.amazonaws.com"];
 for(var i=0;i<bd.length;i++){if(h===bd[i]||h.endsWith("."+bd[i]))
@@ -880,14 +942,13 @@ var ls=text.split("\\n"),fl=[],iab=false;
 var am=[/#EXT-X-DATERANGE:.*CLASS="com\\.twitch\\.ttv\\.pts\\.dai"/,
 /#EXT-X-DATERANGE:.*CLASS="twitch_ad"/,
 /#EXT-X-DATERANGE:.*ID="stitched-ad-/,
-/#EXT-X-CUE-OUT/,/#EXT-X-SCTE35-OUT.*ad/i,/#EXT-X-TWITCH-ADS/,
-/#EXT-X-DATERANGE:.*CLASS=".*ad.*"/i];
-var em=[/#EXT-X-DATERANGE:.*END-DATE/,/#EXT-X-CUE-IN/,/#EXT-X-SCTE35-IN/];
+/#EXT-X-SCTE35-OUT.*ad/i,/#EXT-X-TWITCH-ADS/,
+/#EXT-X-DATERANGE:.*CLASS="[^"]*ad[^"]*"/i];
+var em=[/#EXT-X-DATERANGE:.*END-DATE/,/#EXT-X-SCTE35-IN/];
 var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
 "EXT-X-TWITCH-PREROLL-AD","EXT-X-TWITCH-MIDROLL-AD","EXT-X-TWITCH-POSTROLL-AD",
 "EXT-X-TWITCH-AD-PLUGIN","EXT-X-TWITCH-AD-CREATIVE","EXT-X-TWITCH-PREROLL",
-"EXT-X-TWITCH-MIDROLL","EXT-X-TWITCH-POSTROLL",'URI="ad"',"stitched-ad",
-"EXT-X-DATERANGE"].join("|"));
+"EXT-X-TWITCH-MIDROLL","EXT-X-TWITCH-POSTROLL",'URI="ad"',"stitched-ad"].join("|"));
 for(var i=0;i<ls.length;i++){var l=ls[i],isS=false,isE=false;
 for(var j=0;j<am.length;j++){if(am[j].test(l)){isS=true;break}}
 if(isS){iab=true;continue}
@@ -900,9 +961,10 @@ iab=false;fl.push("#EXT-X-DISCONTINUITY");
 if(l.trim()&&l.charAt(0)!=="#"&&l.indexOf("://")!==-1)fl.push(l);continue}continue}
 fl.push(l)}
 var c=fl.join("\\n");
+if(!c.match(/https?:\\/\\//))return r;
 var cm=c.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\u0438\u0441\u0445\u043e\u0434\u043d\u043e\u0435)[^\\n]*\\n([^\\n]+)/i);
 if(cm)c="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
-if(c!==text){try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
+if(c!==text){_mc[_uk]=_now;try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
 return new Response(new Blob([c]),{status:r.status,
 headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
 })();`;
@@ -1088,7 +1150,11 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
         return stripAdHeaders(gqlResponse);
       } catch (error) {
         if (error?.name === 'AbortError') {
-          return new Response('{}', { status: 200, headers: { 'Content-Type': 'application/json' } });
+          const abortBody = JSON.stringify([{ data: null, errors: [{ message: 'Aborted' }] }]);
+          return new Response(abortBody, {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' }
+          });
         }
         log.debug('GQL response interception error:', error);
       }
@@ -1393,6 +1459,12 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       '[class*="playAd"]': 'display:none!important;',
       '[class*="outstream"]': 'display:none!important;',
       '.picture-by-picture-player': 'display:none!important;visibility:hidden!important;height:0!important;width:0!important;overflow:hidden!important;',
+      '[class*="channel_skin"]': 'display:none!important;',
+      '[class*="vertical-video"]': 'display:none!important;',
+      '[class*="squeezeback"]': 'display:none!important;height:0!important;overflow:hidden!important;',
+      '[class*="lower-third"]': 'display:none!important;height:0!important;overflow:hidden!important;',
+      '[class*="left-third"]': 'display:none!important;width:0!important;overflow:hidden!important;',
+      '[class*="skyscraper"]': 'display:none!important;width:0!important;overflow:hidden!important;',
     };
 
     return () => {
@@ -1428,25 +1500,41 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
         const adElements = document.querySelectorAll(AD_SELECTOR_STRING);
 
         for (let element of adElements) {
+          if (element.querySelector('video')) continue;
           batchRemover.add(element);
         }
       } catch (error) {
         log.error('Core ad removal error:', error);
       }
 
-      // Pushdown SDA: collapse parent to prevent layout shift
+      // SDA collapse: all formats — pushdown, squeezeback, lower-third, left-third, skyscraper
       try {
-        const pushdowns = document.querySelectorAll('.pushdown-sda, [class*="pushdown"]');
-        for (const pd of pushdowns) {
-          if (pd.parentElement) {
-            pd.parentElement.style.setProperty('height', '0', 'important');
-            pd.parentElement.style.setProperty('overflow', 'hidden', 'important');
-            pd.parentElement.style.setProperty('transition', 'none', 'important');
-            batchRemover.add(pd);
+        const sdaSelectors = [
+          '.pushdown-sda', '[class*="pushdown"]',
+          '[class*="squeezeback"]', '[class*="lower-third"]',
+          '[class*="left-third"]', '[class*="skyscraper"]',
+          '[class*="vertical-video"]', '[class*="channel_skin"]',
+          '.stream-display-ad', '[class*="stream-display-ad"]',
+        ];
+        const sdaElements = document.querySelectorAll(sdaSelectors.join(','));
+        for (const sda of sdaElements) {
+          if (sda.querySelector('video')) continue;
+          sda.style.setProperty('display', 'none', 'important');
+          sda.style.setProperty('visibility', 'hidden', 'important');
+          sda.style.setProperty('opacity', '0', 'important');
+          if (sda.parentElement) {
+            if (sda.parentElement.querySelector('video') && !sda.parentElement.matches('[class*="stream-display-ad"],[class*="sda"]')) {
+              sda.parentElement.style.setProperty('overflow', 'hidden', 'important');
+            } else {
+              sda.parentElement.style.setProperty('height', '0', 'important');
+              sda.parentElement.style.setProperty('overflow', 'hidden', 'important');
+              sda.parentElement.style.setProperty('transition', 'none', 'important');
+            }
+            batchRemover.add(sda);
           }
         }
       } catch (e) {
-        log.debug('Pushdown collapse error:', e);
+        log.debug('SDA collapse error:', e);
       }
 
       // Fallback text-based detection using TreeWalker (lazy evaluation)
@@ -1782,6 +1870,18 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
             relevant = true; break;
           }
         }
+        // Detect SDA class mutations on existing elements
+        if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+          const target = mutation.target;
+          if (target.classList) {
+            for (const cls of target.classList) {
+              if (cls.includes('stream-display-ad') || cls.includes('sda-') || cls.includes('pushdown') || cls.includes('video-ad') || cls.includes('ad-')) {
+                relevant = true;
+                break;
+              }
+            }
+          }
+        }
         if (relevant) break;
       }
 
@@ -1803,6 +1903,11 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
           currentPlayerTypeIdx = 0;
           consecutiveAdM3U8 = 0;
           currentUsherUrl = null;
+          if (unsafeWindow.__vat) {
+            const vat = unsafeWindow.__vat;
+            vat.playerType = PLAYER_TYPE_CASCADE[0];
+            log.info('SPA navigation: reset __vat playerType');
+          }
           log.info('SPA navigation detected — reset cascade state');
           setTimeout(() => {
             removeAds();
@@ -1822,7 +1927,9 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
 
       new MutationObserver(onMutation).observe(document.documentElement, {
         childList: true,
-        subtree: true
+        subtree: true,
+        attributes: true,
+        attributeFilter: ['class']
       });
     };
 
@@ -1841,7 +1948,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v48.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v49.0.4...');
 
       // Initial ad removal
       removeAds();
@@ -1871,7 +1978,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v48.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v49.0.4 initialized successfully');
     };
   })();
 
@@ -1944,6 +2051,44 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
     };
     Object.defineProperty.toString = () => origDefineProperty.toString();
   } catch (e) {}
+
+  // Inject experiment_overrides cookie to disable ad experiments before Twitch JS loads
+  try {
+    const adExperiments = JSON.stringify({
+      player_ad: 'off',
+      sda_upsell: 'off',
+      midroll_enabled: 'off',
+      preroll_enabled: 'off',
+      postroll_enabled: 'off',
+      maf_enabled: 'off',
+      force_maf: 'off',
+      enableClientSideAdInsertion: 'off',
+      video_ad_event_tracking: 'off',
+    });
+    document.cookie = `experiment_overrides=${encodeURIComponent(adExperiments)};path=/;max-age=86400;SameSite=Lax`;
+    log.info('Injected experiment_overrides cookie');
+  } catch (e) {
+    log.debug('experiment_overrides cookie injection failed:', e);
+  }
+
+  // Inject eppo_overrides via URL parameter
+  try {
+    const url = new URL(unsafeWindow.location.href);
+    if (!url.searchParams.has('eppo_overrides')) {
+      const overrides = JSON.stringify({
+        player_ad: { assignment: 'off' },
+        sda_upsell: { assignment: 'off' },
+        midroll_enabled: { assignment: 'off' },
+        preroll_enabled: { assignment: 'off' },
+        maf_enabled: { assignment: 'off' },
+      });
+      url.searchParams.set('eppo_overrides', overrides);
+      unsafeWindow.history.replaceState(null, '', url.toString());
+      log.info('Injected eppo_overrides URL parameter');
+    }
+  } catch (e) {
+    log.debug('eppo_overrides injection failed:', e);
+  }
 
   // Start initialization
   if (document.readyState === 'loading') {
