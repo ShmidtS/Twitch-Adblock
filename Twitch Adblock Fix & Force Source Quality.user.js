@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 47.0.0
+// @version 48.0.0
 // @description Twitch ad-blocking with window.__vat interception, playerType cascade, M3U8 stitched-ad replacement, PBYP blocking, fake ad-quartile
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -189,6 +189,16 @@
       '[class*="playAd"]',
       '[class*="outstream"]',
       '.picture-by-picture-player',
+      // v48.0.0 additional selectors
+      '.pause-ad-container',
+      '[class*="pause-ad"]',
+      '[data-a-target="outstream-ax-overlay"]',
+      '.outstream-vertical-video',
+      '[class*="outstream-vertical"]',
+      '.stream-display-ad__iframe',
+      '[data-test-selector="sda-wrapper"]',
+      '[data-test-selector="sda-container"]',
+      '[data-test-selector="sda-frame"]',
     ],
 
     // Fallback keywords for text-based detection
@@ -554,6 +564,31 @@ const isChatOrAuthUrl = (url) => {
       'MidrollService',
       'GetMidroll',
       'TriggerMidroll',
+      'AdRequestHandling',
+      'AdRequestContext',
+      'AdRequestBroadcaster',
+      'AdRequestGame',
+      'AdRequestContentLabel',
+      'AdRequestTag',
+      'AdRequestProp',
+      'AdRequestVOD',
+      'AdRequested',
+      'AdRequester',
+      'AdRequestDecline',
+      'AdRequestDeclined',
+      'AdRequestBlocked',
+      'AdRequestError',
+      'RateLimitPreroll',
+      'ForcePreroll',
+      'ForceMidroll',
+      'ForcePostroll',
+      'ForceWeaverAds',
+      'AdQuartile',
+      'CommercialCommandHandler_ChannelData',
+      'ChannelCommercialBreakUpdate',
+      'CommercialBreakUpdate',
+      'SdaRenderingEntrypoint',
+      'PlayerDisplayAdRequest',
     ]);
 
     const _adPrefixRegex = /^(?:ClientSide|Fill|Process|Video|Stream|Audio|Get|Report|Track|Instream|Outstream)Ad/i;
@@ -601,12 +636,25 @@ const isChatOrAuthUrl = (url) => {
           }
 
           if (isAdOperation) {
-            // Completely remove ad operations instead of modifying them
-            // Twitch ignores variable modifications and still returns ad data
+            // Neutralize ad operations: preserve variable names with safe values
+            // to prevent GraphQL schema errors that trigger Twitch retry/fallback
             operation.extensions = operation.extensions || {};
             operation.extensions.operationMask = { id: 0 };
-            operation.variables = {};
-            operation.query = '';
+            const safeVars = {};
+            if (operation.variables && typeof operation.variables === 'object') {
+              for (const key of Object.keys(operation.variables)) {
+                const val = operation.variables[key];
+                if (val === null || val === undefined) {
+                  safeVars[key] = '';
+                } else if (typeof val === 'string') {
+                  safeVars[key] = '';
+                } else {
+                  safeVars[key] = val;
+                }
+              }
+            }
+            operation.variables = safeVars;
+            operation.query = `query ${opName}{__typename}`;
             modified = true;
             log.info(`Blocked GQL ad operation: ${opName}`);
           }
@@ -654,8 +702,11 @@ const isChatOrAuthUrl = (url) => {
           if (line === '#EXT-X-DISCONTINUITY' ||
               (line.trim() && !line.startsWith('#') && line.includes('://'))) {
             inAdBreak = false;
-            if (line.startsWith('#EXT-X-DISCONTINUITY')) continue;
-            filteredLines.push(line);
+            // Re-insert DISCONTINUITY at transition to signal decoder stream change
+            filteredLines.push('#EXT-X-DISCONTINUITY');
+            if (line.trim() && !line.startsWith('#') && line.includes('://')) {
+              filteredLines.push(line);
+            }
             continue;
           }
           continue;
@@ -845,7 +896,8 @@ if(isE){iab=false;continue}
 if(as.test(l))continue;
 if(iab){if(l.indexOf("#EXT-X-DISCONTINUITY")===0||
 (l.trim()&&l.charAt(0)!=="#"&&l.indexOf("://")!==-1)){
-iab=false;if(l.indexOf("#EXT-X-DISCONTINUITY")===0)continue;fl.push(l);continue}continue}
+iab=false;fl.push("#EXT-X-DISCONTINUITY");
+if(l.trim()&&l.charAt(0)!=="#"&&l.indexOf("://")!==-1)fl.push(l);continue}continue}
 fl.push(l)}
 var c=fl.join("\\n");
 var cm=c.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\u0438\u0441\u0445\u043e\u0434\u043d\u043e\u0435)[^\\n]*\\n([^\\n]+)/i);
@@ -862,17 +914,39 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       return new _OriginalWorker(scriptUrl, options);
     }
 
-    if (options && options.type === 'module') {
-      return new _OriginalWorker(scriptUrl, options);
-    }
-
-    const attachWorkerListener = (worker) => {
+    function attachWorkerListener(worker) {
       worker.addEventListener('message', (e) => {
         if (e.data?.__ttv_adblock && e.data.type === 'm3u8_cleaned') {
           log.info('Worker M3U8 cleaned:', e.data.url?.substring(0, 60));
         }
       });
-    };
+    }
+
+    if (options && options.type === 'module') {
+      try {
+        const xhr = new XMLHttpRequest();
+        xhr.open('GET', url, false);
+        xhr.send();
+        if (xhr.status === 200 || xhr.status === 0) {
+          const src = xhr.responseText;
+          if (/^import\s/m.test(src)) {
+            log.warn('Module Worker has top-level imports, skipping proxy:', url.substring(0, 80));
+            return new _OriginalWorker(scriptUrl, options);
+          }
+          const patchedCode = workerInjection + '\n' + src;
+          const patchedBlob = new Blob([patchedCode], { type: 'application/javascript' });
+          const patchedUrl = URL.createObjectURL(patchedBlob);
+          const worker = new _OriginalWorker(patchedUrl, options);
+          setTimeout(() => URL.revokeObjectURL(patchedUrl), 1000);
+          attachWorkerListener(worker);
+          log.info('Module Worker proxy installed for:', url.substring(0, 80));
+          return worker;
+        }
+      } catch (e) {
+        log.warn('Module Worker proxy failed, using original:', e.message);
+      }
+      return new _OriginalWorker(scriptUrl, options);
+    }
 
     try {
       const xhr = new XMLHttpRequest();
@@ -1767,10 +1841,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v47.0.0...');
-
-      // Inject CSS
-      injectCSS();
+      log.info('Initializing Optimized Twitch Adblock Fix v48.0.0...');
 
       // Initial ad removal
       removeAds();
@@ -1800,7 +1871,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v47.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v48.0.0 initialized successfully');
     };
   })();
 
@@ -1808,6 +1879,71 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
   window.addEventListener('beforeunload', () => {
     batchRemover.clear();
   });
+
+  // Inject CSS immediately at document-start to prevent ad flash
+  injectCSS();
+
+  // Override enableStreamDisplayAds feature flag to disable SDA overlays
+  const patchTwSettings = (el) => {
+    try {
+      const settings = JSON.parse(el.textContent);
+      if (settings) {
+        const adFlags = ['enableStreamDisplayAds', 'enablePauseAds', 'enableMidrollAds',
+          'enableOutstreamVideoAds', 'enableAudioAds', 'enableSdaEligibility'];
+        for (const key of Object.keys(settings)) {
+          if (adFlags.includes(key)) settings[key] = false;
+        }
+        el.textContent = JSON.stringify(settings);
+      }
+    } catch (e) {}
+  };
+  try {
+    const settingsEl = document.querySelector('script[type="application/json"][id="tw-settings"]');
+    if (settingsEl) {
+      patchTwSettings(settingsEl);
+    } else {
+      const obs = new MutationObserver((mutations) => {
+        for (const m of mutations) {
+          for (const node of m.addedNodes) {
+            if (node.nodeType === 1 && node.matches?.('script[type="application/json"][id="tw-settings"]')) {
+              patchTwSettings(node);
+              obs.disconnect();
+              return;
+            }
+          }
+        }
+      });
+      obs.observe(document.documentElement || document, { childList: true, subtree: true });
+    }
+  } catch (e) {}
+
+  // Patch tw-settings via Object.defineProperty to intercept future reads
+  try {
+    const origDefineProperty = Object.defineProperty;
+    const _seen = new WeakSet();
+    const patchSettings = (obj) => {
+      if (_seen.has(obj)) return;
+      _seen.add(obj);
+      const adFlags = ['enableStreamDisplayAds', 'enablePauseAds', 'enableMidrollAds',
+        'enableOutstreamVideoAds', 'enableAudioAds', 'enableSdaEligibility'];
+      for (const flag of adFlags) {
+        if (flag in obj) {
+          try { obj[flag] = false; } catch (e) {}
+        }
+      }
+    };
+    Object.defineProperty = function (obj, prop, desc) {
+      if (prop === 'twSettings' || prop === 'settings') {
+        if (desc && typeof desc.value === 'object' && desc.value !== null) patchSettings(desc.value);
+        if (desc && desc.get) {
+          const origGet = desc.get;
+          desc.get = function () { const v = origGet.call(this); if (v && typeof v === 'object') patchSettings(v); return v; };
+        }
+      }
+      return origDefineProperty.call(this, obj, prop, desc);
+    };
+    Object.defineProperty.toString = () => origDefineProperty.toString();
+  } catch (e) {}
 
   // Start initialization
   if (document.readyState === 'loading') {
