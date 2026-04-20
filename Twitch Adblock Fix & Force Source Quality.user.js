@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 51.0.0
+// @version 52.0.0
 // @description Twitch ad-blocking with window.__vat interception, playerType cascade, M3U8 stitched-ad replacement, PBYP blocking, fake ad-quartile
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -219,6 +219,9 @@
       '[data-test-selector="sda-wrapper"]',
       '[data-test-selector="sda-container"]',
       '[data-test-selector="sda-frame"]',
+      '.side-nav-card-sponsored-loading-bottom',
+      '[class*="sda-lshape"]',
+      '[class*="sda-ad-edge"]',
     ],
 
     // Fallback keywords for text-based detection
@@ -240,6 +243,8 @@
       /#EXT-X-TWITCH-ADS/,
       /#EXT-X-DATERANGE:.*CLASS="[^"]*_ad"/i,
       /#EXT-X-DATERANGE:.*CLASS="twitch-[^"]*ad[^"]*"/i,
+      /#EXT-X-DATERANGE:.*CLASS="AD_BREAK"/,
+      /#EXT-X-DATERANGE:.*CLASS="FREEWHEEL"/,
     ],
     M3U8_AD_END_MARKERS: [
       /#EXT-X-DATERANGE:.*END-DATE/,
@@ -258,6 +263,7 @@
       'X-TTV-MAF-AD-PRIMARY-POD', 'X-TTV-MAF-AD-RADS-TOKEN',
       'X-TTV-MAF-AD-DECISION', 'X-TTV-MAF-AD-SDA-SEQUENCE-LENGTH',
       'X-TTV-MAF-AD-FALLBACK-FORMATS',
+      'CLASS="AD_BREAK"', 'CLASS="FREEWHEEL"',
     ],
   };
 
@@ -296,7 +302,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v51.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v52.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -748,6 +754,12 @@ const isChatOrAuthUrl = (url) => {
       'TurboAdsUpsell',
       'ClientSideAdSelection',
       'VodArchiveMidroll',
+      'WithVideoAdEvents',
+      'AdImpressionComplete',
+      'AdOverlayContainer',
+      'AdTrackingURLsComplete',
+      'AdTrackingURLsStart',
+      'AdTrackingUrls',
     ]);
 
     const _adPrefixRegex = /^(?:ClientSide|Fill|Process|Video|Stream|Audio|Get|Report|Track|Instream|Outstream)Ad/i;
@@ -863,16 +875,13 @@ const isChatOrAuthUrl = (url) => {
           continue;
         }
 
-        // Skip all lines while inside an ad break (auto-reset on content segment)
+        // Skip all lines while inside an ad break — only exit on DISCONTINUITY
+        // (content-URL heuristic was removed: ad segment URLs are indistinguishable
+        //  from content URLs and caused premature ad-break exit, leaking ad segments)
         if (inAdBreak) {
-          if (line === '#EXT-X-DISCONTINUITY' ||
-              (line.trim() && !line.startsWith('#') && line.includes('://'))) {
+          if (line === '#EXT-X-DISCONTINUITY') {
             inAdBreak = false;
-            // Re-insert DISCONTINUITY at transition to signal decoder stream change
             filteredLines.push('#EXT-X-DISCONTINUITY');
-            if (line.trim() && !line.startsWith('#') && line.includes('://')) {
-              filteredLines.push(line);
-            }
             continue;
           }
           continue;
@@ -1076,7 +1085,8 @@ var hasAd=text.indexOf("stitched")!==-1||text.indexOf("X-TTV-MAF-AD")!==-1||
 text.indexOf("twitch-maf-ad")!==-1||text.indexOf("twitch-ad-quartile")!==-1||
 text.indexOf("X-TV-TWITCH-AD")!==-1||text.indexOf("SCTE35-AD")!==-1||
 /#EXT-X-DATERANGE:.*CLASS="(com\\.twitch\\.ttv\\.pts\\.dai|twitch_ad|twitch-maf-ad|twitch-ad-quartile|stitched_ad)"/.test(text)||
-/#EXT-X-DATERANGE:.*ID="stitched-ad-/.test(text)||/#EXT-X-TWITCH-ADS/.test(text);
+/#EXT-X-DATERANGE:.*ID="stitched-ad-/.test(text)||/#EXT-X-TWITCH-ADS/.test(text)||
+text.indexOf("AD_BREAK")!==-1||text.indexOf("FREEWHEEL")!==-1;
 if(hasAd){
 self.postMessage({__ttv_adblock:true,type:"ad_detected",url:url});
 return reqCleanM3U8(url).then(function(cleanText){
@@ -1093,7 +1103,9 @@ var am=[/#EXT-X-DATERANGE:.*CLASS="com\\.twitch\\.ttv\\.pts\\.dai"/,
 /#EXT-X-DATERANGE:.*ID="stitched-ad-/,
 /#EXT-X-SCTE35-OUT.*ad/i,/#EXT-X-TWITCH-ADS/,
 /#EXT-X-DATERANGE:.*CLASS="[^"]*_ad"/i,
-/#EXT-X-DATERANGE:.*CLASS="twitch-[^"]*ad[^"]*"/i];
+/#EXT-X-DATERANGE:.*CLASS="twitch-[^"]*ad[^"]*"/i,
+/#EXT-X-DATERANGE:.*CLASS="AD_BREAK"/,
+/#EXT-X-DATERANGE:.*CLASS="FREEWHEEL"/];
 var em=[/#EXT-X-DATERANGE:.*END-DATE/,/#EXT-X-SCTE35-IN/];
 var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
 "EXT-X-TWITCH-PREROLL-AD","EXT-X-TWITCH-MIDROLL-AD","EXT-X-TWITCH-POSTROLL-AD",
@@ -1103,17 +1115,15 @@ var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
 "X-TTV-MAF-AD-COMMERCIAL-ID","X-TTV-MAF-AD-AD-SESSION-ID",
 "X-TTV-MAF-AD-PRIMARY-POD","X-TTV-MAF-AD-RADS-TOKEN",
 "X-TTV-MAF-AD-DECISION","X-TTV-MAF-AD-SDA-SEQUENCE-LENGTH",
-"X-TTV-MAF-AD-FALLBACK-FORMATS"].join("|"));
+"X-TTV-MAF-AD-FALLBACK-FORMATS",'CLASS="AD_BREAK"','CLASS="FREEWHEEL"'].join("|"));
 for(var i=0;i<ls.length;i++){var l=ls[i],isS=false,isE=false;
 for(var j=0;j<am.length;j++){if(am[j].test(l)){isS=true;break}}
 if(isS){iab=true;continue}
 for(var j=0;j<em.length;j++){if(em[j].test(l)){isE=true;break}}
 if(isE){iab=false;continue}
 if(as.test(l))continue;
-if(iab){if(l.indexOf("#EXT-X-DISCONTINUITY")===0||
-(l.trim()&&l.charAt(0)!=="#"&&l.indexOf("://")!==-1)){
-iab=false;fl.push("#EXT-X-DISCONTINUITY");
-if(l.trim()&&l.charAt(0)!=="#"&&l.indexOf("://")!==-1)fl.push(l);continue}continue}
+if(iab){if(l.indexOf("#EXT-X-DISCONTINUITY")===0){
+iab=false;fl.push("#EXT-X-DISCONTINUITY");continue}continue}
 fl.push(l)}
 var c=fl.join("\\n");
 if(!c.match(/https?:\\/\\//))return r;
@@ -1131,7 +1141,7 @@ return r;})})};
   unsafeWindow.Worker = function (scriptUrl, options) {
     const url = String(scriptUrl);
 
-    if (!url.includes('twitch') && !url.includes('ttvnw') && !url.startsWith('blob:')) {
+    if (!url.includes('twitch') && !url.includes('ttvnw') && !url.includes('amazon-ivs') && !url.startsWith('blob:')) {
       return new _OriginalWorker(scriptUrl, options);
     }
 
@@ -1748,6 +1758,9 @@ return r;})})};
       '[class*="lower-third"]': 'display:none!important;height:0!important;overflow:hidden!important;',
       '[class*="left-third"]': 'display:none!important;width:0!important;overflow:hidden!important;',
       '[class*="skyscraper"]': 'display:none!important;width:0!important;overflow:hidden!important;',
+      '[class*="sda-lshape"]': 'display:none!important;width:0!important;overflow:hidden!important;',
+      '[class*="sda-ad-edge"]': 'display:none!important;overflow:hidden!important;',
+      '.side-nav-card-sponsored-loading-bottom': 'display:none!important;',
     };
 
     return () => {
@@ -2231,7 +2244,7 @@ return r;})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v51.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v52.0.0...');
 
       // Initial ad removal
       removeAds();
@@ -2261,7 +2274,7 @@ return r;})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v51.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v52.0.0 initialized successfully');
     };
   })();
 
@@ -2281,7 +2294,9 @@ return r;})})};
         const adFlags = ['enableStreamDisplayAds', 'enablePauseAds', 'enableMidrollAds',
           'enableOutstreamVideoAds', 'enableAudioAds', 'enableSdaEligibility',
           'enableVlmHlsMidrolls', 'enableNabGate', 'enableSdaDynamicDurations',
-          'enableMafs', 'enableClientSideAdInsertion'];
+          'enableMafs', 'enableClientSideAdInsertion',
+          'sda_ad_edge_web', 'sda_lowerthird_web', 'sda_lshape_web', 'sda_squeezeback_web',
+          'sda_squeeze_reduction', 'AdTrackingEnabled', 'COMMERCIAL_IN_PROGRESS', 'AD_ENABLED'];
         for (const key of Object.keys(settings)) {
           if (adFlags.includes(key)) settings[key] = false;
         }
@@ -2319,7 +2334,9 @@ return r;})})};
       const adFlags = ['enableStreamDisplayAds', 'enablePauseAds', 'enableMidrollAds',
         'enableOutstreamVideoAds', 'enableAudioAds', 'enableSdaEligibility',
         'enableVlmHlsMidrolls', 'enableNabGate', 'enableSdaDynamicDurations',
-        'enableMafs', 'enableClientSideAdInsertion'];
+        'enableMafs', 'enableClientSideAdInsertion',
+        'sda_ad_edge_web', 'sda_lowerthird_web', 'sda_lshape_web', 'sda_squeezeback_web',
+        'sda_squeeze_reduction', 'AdTrackingEnabled', 'COMMERCIAL_IN_PROGRESS', 'AD_ENABLED'];
       for (const flag of adFlags) {
         if (flag in obj) {
           try { obj[flag] = false; } catch (e) {}
@@ -2351,6 +2368,15 @@ return r;})})};
       force_maf: 'off',
       enableClientSideAdInsertion: 'off',
       video_ad_event_tracking: 'off',
+      sda_ad_edge_web: 'off',
+      sda_lowerthird_web: 'off',
+      sda_lshape_web: 'off',
+      sda_squeezeback_web: 'off',
+      sda_dynamic_durations: 'off',
+      sda_squeeze_reduction: 'off',
+      AdTrackingEnabled: 'off',
+      COMMERCIAL_IN_PROGRESS: 'off',
+      AD_ENABLED: 'off',
     });
     document.cookie = `experiment_overrides=${encodeURIComponent(adExperiments)};path=/;max-age=86400;SameSite=Lax`;
     log.info('Injected experiment_overrides cookie');
