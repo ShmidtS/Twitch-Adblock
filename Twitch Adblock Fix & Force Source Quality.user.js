@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 52.0.0
+// @version 53.0.0
 // @description Twitch ad-blocking with window.__vat interception, playerType cascade, M3U8 stitched-ad replacement, PBYP blocking, fake ad-quartile
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -302,7 +302,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v52.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v53.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -860,6 +860,11 @@ const isChatOrAuthUrl = (url) => {
 
         // Check for ad break start markers (compiled single regex)
         if (markersCombined.test(line)) {
+          // Self-contained marker: if this line also matches end markers, skip it
+          // without entering ad-break mode (both START-DATE and END-DATE on same line)
+          if (endMarkersCombined.test(line)) {
+            continue;
+          }
           inAdBreak = true;
           continue;
         }
@@ -1089,6 +1094,7 @@ text.indexOf("X-TV-TWITCH-AD")!==-1||text.indexOf("SCTE35-AD")!==-1||
 text.indexOf("AD_BREAK")!==-1||text.indexOf("FREEWHEEL")!==-1;
 if(hasAd){
 self.postMessage({__ttv_adblock:true,type:"ad_detected",url:url});
+_mc[_uk]=_now;
 return reqCleanM3U8(url).then(function(cleanText){
 if(cleanText){_mc[_uk]=_now;
 try{self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url})}catch(e){}
@@ -1118,7 +1124,7 @@ var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
 "X-TTV-MAF-AD-FALLBACK-FORMATS",'CLASS="AD_BREAK"','CLASS="FREEWHEEL"'].join("|"));
 for(var i=0;i<ls.length;i++){var l=ls[i],isS=false,isE=false;
 for(var j=0;j<am.length;j++){if(am[j].test(l)){isS=true;break}}
-if(isS){iab=true;continue}
+if(isS){for(var j=0;j<em.length;j++){if(em[j].test(l)){isE=true;break}}if(isE){continue}iab=true;continue}
 for(var j=0;j<em.length;j++){if(em[j].test(l)){isE=true;break}}
 if(isE){iab=false;continue}
 if(as.test(l))continue;
@@ -2244,7 +2250,7 @@ return r;})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v52.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v53.0.0...');
 
       // Initial ad removal
       removeAds();
@@ -2274,7 +2280,7 @@ return r;})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v52.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v53.0.0 initialized successfully');
     };
   })();
 
