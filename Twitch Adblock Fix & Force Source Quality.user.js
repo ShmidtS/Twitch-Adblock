@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 49.0.4
+// @version 51.0.0
 // @description Twitch ad-blocking with window.__vat interception, playerType cascade, M3U8 stitched-ad replacement, PBYP blocking, fake ad-quartile
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -231,10 +231,15 @@
     M3U8_AD_MARKERS: [
       /#EXT-X-DATERANGE:.*CLASS="com\.twitch\.ttv\.pts\.dai"/,
       /#EXT-X-DATERANGE:.*CLASS="twitch_ad"/,
+      /#EXT-X-DATERANGE:.*CLASS="twitch-maf-ad"/,
+      /#EXT-X-DATERANGE:.*CLASS="twitch-ad-quartile"/,
+      /#EXT-X-DATERANGE:.*CLASS="twitch-stream-source"/,
+      /#EXT-X-DATERANGE:.*CLASS="stitched_ad"/,
       /#EXT-X-DATERANGE:.*ID="stitched-ad-/,
       /#EXT-X-SCTE35-OUT.*ad/i,
       /#EXT-X-TWITCH-ADS/,
-      /#EXT-X-DATERANGE:.*CLASS="[^"]*ad[^"]*"/i,
+      /#EXT-X-DATERANGE:.*CLASS="[^"]*_ad"/i,
+      /#EXT-X-DATERANGE:.*CLASS="twitch-[^"]*ad[^"]*"/i,
     ],
     M3U8_AD_END_MARKERS: [
       /#EXT-X-DATERANGE:.*END-DATE/,
@@ -248,6 +253,11 @@
       'EXT-X-TWITCH-AD-PLUGIN', 'EXT-X-TWITCH-AD-CREATIVE',
       'EXT-X-TWITCH-PREROLL', 'EXT-X-TWITCH-MIDROLL', 'EXT-X-TWITCH-POSTROLL',
       'URI="ad"', 'stitched-ad',
+      'X-TTV-MAF-AD', 'X-TV-TWITCH-AD', 'twitch-maf-ad', 'twitch-ad-quartile',
+      'X-TTV-MAF-AD-COMMERCIAL-ID', 'X-TTV-MAF-AD-AD-SESSION-ID',
+      'X-TTV-MAF-AD-PRIMARY-POD', 'X-TTV-MAF-AD-RADS-TOKEN',
+      'X-TTV-MAF-AD-DECISION', 'X-TTV-MAF-AD-SDA-SEQUENCE-LENGTH',
+      'X-TTV-MAF-AD-FALLBACK-FORMATS',
     ],
   };
 
@@ -286,7 +296,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v49.0.4]';
+    const prefix = '[TTV ADBLOCK FIX v51.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -414,6 +424,7 @@ const isChatOrAuthUrl = (url) => {
 
   // Stream ad bypass state — playerType cascade + M3U8 replacement
   const PLAYER_TYPE_CASCADE = ['site', 'embed', 'thunderdome'];
+  const BACKUP_PLAYER_TYPES = ['embed', 'popout', 'autoplay'];
   let currentPlayerTypeIdx = 0;
   let consecutiveAdM3U8 = 0;
   const MAX_CONSECUTIVE_AD_M3U8 = 3;
@@ -421,6 +432,92 @@ const isChatOrAuthUrl = (url) => {
   const GLOBAL_MAX_RELOADS = 6;
   let currentUsherUrl = null;
   let pendingReplacement = null;
+  let currentChannelName = null;
+  let backupEncodingsCache = {};
+  const GQL_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
+  let gqlDeviceId = null;
+  let gqlAuthorization = undefined;
+
+  // Fetch a clean PlaybackAccessToken independently (vaft approach)
+  const getAccessToken = async (channelName, playerType) => {
+    try {
+      if (!gqlDeviceId) {
+        gqlDeviceId = '';
+        const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+        for (let i = 0; i < 32; i++) gqlDeviceId += chars.charAt(Math.floor(Math.random() * chars.length));
+      }
+      const headers = {
+        'Client-ID': GQL_CLIENT_ID,
+        'X-Device-Id': gqlDeviceId,
+        'Content-Type': 'application/json',
+      };
+      if (gqlAuthorization) headers['Authorization'] = gqlAuthorization;
+      const body = {
+        operationName: 'PlaybackAccessToken',
+        variables: {
+          isLive: true,
+          login: channelName,
+          isVod: false,
+          vodID: '',
+          playerType: playerType,
+          platform: playerType === 'autoplay' ? 'android' : 'web',
+        },
+        extensions: {
+          persistedQuery: {
+            version: 1,
+            sha256Hash: 'ed230aa1e33e07eebb8928504583da78a5173989fadfb1ac94be06a04f3cdbe9',
+          },
+        },
+      };
+      const resp = await originalFetch('https://gql.twitch.tv/gql', {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+      if (resp.ok) return await resp.json();
+    } catch (e) {
+      log.debug('getAccessToken failed:', e);
+    }
+    return null;
+  };
+
+  // Fetch a clean M3U8 via independent GQL + Usher (vaft approach)
+  const fetchCleanM3U8 = async (channelName, playerType) => {
+    try {
+      const accessTokenResp = await getAccessToken(channelName, playerType);
+      if (!accessTokenResp?.data?.streamPlaybackAccessToken) return null;
+      const token = accessTokenResp.data.streamPlaybackAccessToken;
+      const isV2 = currentUsherUrl?.includes('/api/v2/');
+      const usherBase = isV2
+        ? `https://usher.ttvnw.net/api/v2/channel/hls/${channelName}.m3u8`
+        : `https://usher.ttvnw.net/api/channel/hls/${channelName}.m3u8`;
+      const usherUrl = new URL(usherBase);
+      usherUrl.searchParams.set('sig', token.signature);
+      usherUrl.searchParams.set('token', token.value);
+      // Copy existing Usher params except sig/token/player_type
+      if (currentUsherUrl) {
+        try {
+          const existingParams = new URL(currentUsherUrl).searchParams;
+          for (const [key, value] of existingParams) {
+            if (!['sig', 'token', 'player_type', 'parent_domains'].includes(key)) {
+              usherUrl.searchParams.set(key, value);
+            }
+          }
+        } catch (e) {}
+      }
+      // Remove parent_domains — Twitch uses it to determine embed context and inject ads
+      usherUrl.searchParams.delete('parent_domains');
+      usherUrl.searchParams.set('player_type', playerType);
+      const m3u8Resp = await originalFetch(usherUrl.toString());
+      if (m3u8Resp.ok) {
+        const text = await m3u8Resp.text();
+        if (text.includes('#EXTM3U')) return text;
+      }
+    } catch (e) {
+      log.debug('fetchCleanM3U8 failed:', e);
+    }
+    return null;
+  };
 
   // Saved GQL headers for authenticated fake quartile
   let savedGQLHeaders = { 'Client-ID': 'kimne78kx3ncx6brgo4mv6wki5h1ko' };
@@ -635,6 +732,22 @@ const isChatOrAuthUrl = (url) => {
       'CommercialBreakUpdate',
       'SdaRenderingEntrypoint',
       'PlayerDisplayAdRequest',
+      'VlmMidroll',
+      'MafsDecision',
+      'AdOpportunityStart',
+      'AdOpportunityAbort',
+      'AdClientPodCompletion',
+      'AdClientQuartile',
+      'AdClientImpression',
+      'AdFormatRequest',
+      'VideoAdError',
+      'AudioAdFormat',
+      'StandardAudioAd',
+      'LowerThirdAd',
+      'MirrorPbyPAd',
+      'TurboAdsUpsell',
+      'ClientSideAdSelection',
+      'VodArchiveMidroll',
     ]);
 
     const _adPrefixRegex = /^(?:ClientSide|Fill|Process|Video|Stream|Audio|Get|Report|Track|Instream|Outstream)Ad/i;
@@ -642,7 +755,7 @@ const isChatOrAuthUrl = (url) => {
     const _sponsorRegex = /^Sponsor(?!shipAccessToken)/i;
     const _marketingRegex = /^Marketing/i;
     const _promoRegex = /^Promo(?!tionAccessToken)/i;
-    const LEGITIMATE_OPS = new Set(['PlaybackAccessToken', 'VideoPlayerStreamOverlay', 'VideoPlayerStreamInfo', 'StreamMetadata']);
+    const LEGITIMATE_OPS = new Set(['PlaybackAccessToken', 'VideoPlayerStreamOverlay', 'VideoPlayerStreamInfo', 'StreamMetadata', 'AddChannel', 'AdjustPlayback', 'AddStreamTag']);
     const _pbypRegex = /^(?:Video)?PictureByPicture|^Midroll/i;
 
     return (body) => {
@@ -853,6 +966,12 @@ const isChatOrAuthUrl = (url) => {
     'adForecast', 'playerAdvertisement', 'adSlotMetadata',
     'commercialBreakTimestamps', 'forcedAdBreaks',
     'playerAds', 'adPod', 'adPods', 'adQuartile',
+    'vodArchiveMidrolls', 'hasVodAdsEnabled', 'adFormatMetadata',
+    'adFormatRequest', 'videoAdMetadata', 'videoAdRequest',
+    'feedAdMetadata', 'mirrorPbyPAdMetadata', 'isShowingMirrorPbyPAdPod',
+    'isShowingTurboAdsUpsell', 'triggerAfterAdBreakTurboUpsell',
+    'mafsDecision', 'radsToken', 'adSessionID',
+    'clientSideAdSelectionParams', 'broadcasterInitiated',
   ]);
 
   const cleanGQLResponse = (data) => {
@@ -911,7 +1030,22 @@ const isChatOrAuthUrl = (url) => {
   const workerInjection = `(function(){
 var _wf=self.fetch;
 var _mc={};
+var _ac=new Map();
+var _rid=0;
+var _adSegCache=new Map();
+var _tinyVid='data:video/mp4;base64,AAAAKGZ0eXBtcDQyAAAAAWlzb21tcDQyZGFzaGF2YzFpc282aGxzZgAABEltb292AAAAbG12aGQAAAAAAAAAAAAAAAAAAYagAAAAAAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADAAABqHRyYWsAAABcdGtoZAAAAAMAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAURtZGlhAAAAIG1kaGQAAAAAAAAAAAAAAAAAALuAAAAAAFXEAAAAAAAtaGRscgAAAAAAAAAAc291bgAAAAAAAAAAAAAAAFNvdW5kSGFuZGxlcgAAAADvbWluZgAAABBzbWhkAAAAAAAAAAAAAAAkZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAACzc3RibAAAAGdzdHNkAAAAAAAAAAEAAABXbXA0YQAAAAAAAAABAAAAAAAAAAAAAgAQAAAAALuAAAAAAAAzZXNkcwAAAAADgICAIgABAASAgIAUQBUAAAAAAAAAAAAAAAWAgIACEZAGgICAAQIAAAAQc3R0cwAAAAAAAAAAAAAAEHN0c2MAAAAAAAAAAAAAABRzdHN6AAAAAAAAAAAAAAAAAAAAEHN0Y28AAAAAAAAAAAAAAeV0cmFrAAAAXHRraGQAAAADAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAoAAAAFoAAAAAAGBbWRpYQAAACBtZGhkAAAAAAAAAAAAAAAAAA9CQAAAAABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABLG1pbmYAAAAUdm1oZAAAAAEAAAAAAAAAAAAAACRkaW5mAAAAHGRyZWYAAAAAAAAAAQAAAAx1cmwgAAAAAQAAAOxzdGJsAAAAoHN0c2QAAAAAAAAAAQAAAJBhdmMxAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAoABaABIAAAASAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGP//AAAAOmF2Y0MBTUAe/+EAI2dNQB6WUoFAX/LgLUBAQFAAAD6AAA6mDgAAHoQAA9CW7y4KAQAEaOuPIAAAABBzdHRzAAAAAAAAAAAAAAAQc3RzYwAAAAAAAAAAAAAAFHN0c3oAAAAAAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAASG12ZXgAAAAgdHJleAAAAAAAAAABAAAAAQAAAC4AAAAAAoAAAAAAACB0cmV4AAAAAAAAAAIAAAABAACCNQAAAAACQAAA';
 if(typeof SpadeClient!=='undefined'){SpadeClient.prototype.send=function(){return -1};}
+self.addEventListener('message',function(e){
+if(e.data&&e.data.__ttv_adblock&&e.data.type==='clean_m3u8_response'){
+var id=e.data.requestId;
+if(_ac.has(id)){var cb=_ac.get(id);_ac.delete(id);cb(e.data.m3u8);}}
+});
+function reqCleanM3U8(url){
+return new Promise(function(resolve){
+var id=++_rid;
+_ac.set(id,resolve);
+self.postMessage({__ttv_adblock:true,type:'clean_m3u8_request',url:url,requestId:id});});
+}
 self.fetch=function(input,init){
 var url=(input instanceof Request?input.url:input)+"";
 var _uk=url.split("?")[0];
@@ -938,17 +1072,38 @@ return _wf(input,init).then(function(r){
 if(!(url.indexOf(".m3u8")!==-1||url.indexOf("usher.ttvnw.net")!==-1)||!r.ok)return r;
 return r.clone().text().then(function(text){
 if(text.indexOf("#EXTM3U")===-1)return r;
+var hasAd=text.indexOf("stitched")!==-1||text.indexOf("X-TTV-MAF-AD")!==-1||
+text.indexOf("twitch-maf-ad")!==-1||text.indexOf("twitch-ad-quartile")!==-1||
+text.indexOf("X-TV-TWITCH-AD")!==-1||text.indexOf("SCTE35-AD")!==-1||
+/#EXT-X-DATERANGE:.*CLASS="(com\\.twitch\\.ttv\\.pts\\.dai|twitch_ad|twitch-maf-ad|twitch-ad-quartile|stitched_ad)"/.test(text)||
+/#EXT-X-DATERANGE:.*ID="stitched-ad-/.test(text)||/#EXT-X-TWITCH-ADS/.test(text);
+if(hasAd){
+self.postMessage({__ttv_adblock:true,type:"ad_detected",url:url});
+return reqCleanM3U8(url).then(function(cleanText){
+if(cleanText){_mc[_uk]=_now;
+try{self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url})}catch(e){}
+return new Response(new Blob([cleanText]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
 var ls=text.split("\\n"),fl=[],iab=false;
 var am=[/#EXT-X-DATERANGE:.*CLASS="com\\.twitch\\.ttv\\.pts\\.dai"/,
 /#EXT-X-DATERANGE:.*CLASS="twitch_ad"/,
+/#EXT-X-DATERANGE:.*CLASS="twitch-maf-ad"/,
+/#EXT-X-DATERANGE:.*CLASS="twitch-ad-quartile"/,
+/#EXT-X-DATERANGE:.*CLASS="twitch-stream-source"/,
+/#EXT-X-DATERANGE:.*CLASS="stitched_ad"/,
 /#EXT-X-DATERANGE:.*ID="stitched-ad-/,
 /#EXT-X-SCTE35-OUT.*ad/i,/#EXT-X-TWITCH-ADS/,
-/#EXT-X-DATERANGE:.*CLASS="[^"]*ad[^"]*"/i];
+/#EXT-X-DATERANGE:.*CLASS="[^"]*_ad"/i,
+/#EXT-X-DATERANGE:.*CLASS="twitch-[^"]*ad[^"]*"/i];
 var em=[/#EXT-X-DATERANGE:.*END-DATE/,/#EXT-X-SCTE35-IN/];
 var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
 "EXT-X-TWITCH-PREROLL-AD","EXT-X-TWITCH-MIDROLL-AD","EXT-X-TWITCH-POSTROLL-AD",
 "EXT-X-TWITCH-AD-PLUGIN","EXT-X-TWITCH-AD-CREATIVE","EXT-X-TWITCH-PREROLL",
-"EXT-X-TWITCH-MIDROLL","EXT-X-TWITCH-POSTROLL",'URI="ad"',"stitched-ad"].join("|"));
+"EXT-X-TWITCH-MIDROLL","EXT-X-TWITCH-POSTROLL",'URI="ad"',"stitched-ad",
+"X-TTV-MAF-AD","X-TV-TWITCH-AD","twitch-maf-ad","twitch-ad-quartile",
+"X-TTV-MAF-AD-COMMERCIAL-ID","X-TTV-MAF-AD-AD-SESSION-ID",
+"X-TTV-MAF-AD-PRIMARY-POD","X-TTV-MAF-AD-RADS-TOKEN",
+"X-TTV-MAF-AD-DECISION","X-TTV-MAF-AD-SDA-SEQUENCE-LENGTH",
+"X-TTV-MAF-AD-FALLBACK-FORMATS"].join("|"));
 for(var i=0;i<ls.length;i++){var l=ls[i],isS=false,isE=false;
 for(var j=0;j<am.length;j++){if(am[j].test(l)){isS=true;break}}
 if(isS){iab=true;continue}
@@ -962,11 +1117,15 @@ if(l.trim()&&l.charAt(0)!=="#"&&l.indexOf("://")!==-1)fl.push(l);continue}contin
 fl.push(l)}
 var c=fl.join("\\n");
 if(!c.match(/https?:\\/\\//))return r;
-var cm=c.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\u0438\u0441\u0445\u043e\u0434\u043d\u043e\u0435)[^\\n]*\\n([^\\n]+)/i);
+var cm=c.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\\u0438\\u0441\\u0445\\u043e\\u0434\\u043d\\u043e\\u0435)[^\\n]*\\n([^\\n]+)/i);
 if(cm)c="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
-if(c!==text){_mc[_uk]=_now;try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
-return new Response(new Blob([c]),{status:r.status,
-headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
+_mc[_uk]=_now;try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
+return new Response(new Blob([c]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});});
+}
+var cm=text.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\\u0438\\u0441\\u0445\\u043e\\u0434\\u043d\\u043e\\u0435)[^\\n]*\\n([^\\n]+)/i);
+if(cm){var cs="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
+if(cs!==text){_mc[_uk]=_now;return new Response(new Blob([cs]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}}
+return r;})})};
 })();`;
 
   unsafeWindow.Worker = function (scriptUrl, options) {
@@ -978,8 +1137,70 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
 
     function attachWorkerListener(worker) {
       worker.addEventListener('message', (e) => {
-        if (e.data?.__ttv_adblock && e.data.type === 'm3u8_cleaned') {
-          log.info('Worker M3U8 cleaned:', e.data.url?.substring(0, 60));
+        if (!e.data?.__ttv_adblock) return;
+        const msg = e.data;
+
+        if (msg.type === 'm3u8_cleaned') {
+          log.info('Worker M3U8 cleaned:', msg.url?.substring(0, 60));
+        } else if (msg.type === 'ad_detected') {
+          log.info('Worker ad detected in M3U8:', msg.url?.substring(0, 60));
+        } else if (msg.type === 'm3u8_replaced') {
+          log.info('Worker M3U8 replaced with clean stream:', msg.url?.substring(0, 60));
+        } else if (msg.type === 'clean_m3u8_request') {
+          // Worker requests a clean M3U8 — use vaft approach (independent GQL + Usher)
+          (async () => {
+            let cleanText = null;
+            if (currentChannelName) {
+              for (const backupType of BACKUP_PLAYER_TYPES) {
+                try {
+                  const encodings = await fetchCleanM3U8(currentChannelName, backupType);
+                  if (encodings) {
+                    const backupHasAd = encodings.includes('stitched') ||
+                      encodings.includes('X-TTV-MAF-AD') ||
+                      CONFIG.M3U8_AD_MARKERS.some(regex => regex.test(encodings));
+                    if (!backupHasAd) {
+                      // For media playlist requests, find matching resolution
+                      if (msg.url && !msg.url.includes('usher.ttvnw.net') && msg.url.endsWith('.m3u8')) {
+                        const currentResolution = msg.url.match(/RESOLUTION=([^,]+)/)?.[1];
+                        const lines = encodings.replaceAll('\r', '').split('\n');
+                        for (let i = 0; i < lines.length - 1; i++) {
+                          if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('.m3u8')) {
+                            const streamUrl = lines[i + 1].trim();
+                            if (streamUrl.includes('://')) {
+                              const streamResp = await originalFetch(streamUrl);
+                              if (streamResp.ok) {
+                                const streamText = await streamResp.text();
+                                if (streamText.includes('#EXTM3U') && !streamText.includes('stitched')) {
+                                  cleanText = streamText;
+                                  log.info(`Worker backup stream found (${backupType})`);
+                                  break;
+                                }
+                              }
+                            }
+                          }
+                        }
+                        // If no resolution match found, return full encodings M3U8
+                        if (!cleanText && !encodings.includes('stitched')) {
+                          cleanText = encodings;
+                        }
+                      } else {
+                        cleanText = encodings;
+                      }
+                      if (cleanText) break;
+                    }
+                  }
+                } catch (e) {
+                  log.debug(`Worker backup fetch failed for ${backupType}:`, e);
+                }
+              }
+            }
+            worker.postMessage({
+              __ttv_adblock: true,
+              type: 'clean_m3u8_response',
+              requestId: msg.requestId,
+              m3u8: cleanText,
+            });
+          })();
         }
       });
     }
@@ -1101,7 +1322,10 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
           const cid = headers['Client-ID'] || headers['client-id'];
           const auth = headers['Authorization'] || headers['authorization'];
           if (cid) savedGQLHeaders['Client-ID'] = cid;
-          if (auth && auth !== 'undefined') savedGQLHeaders['Authorization'] = auth;
+          if (auth && auth !== 'undefined') {
+            savedGQLHeaders['Authorization'] = auth;
+            gqlAuthorization = auth;
+          }
         }
 
         if (result !== 'pass') {
@@ -1163,9 +1387,13 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
     // Handle M3U8 streams
     if (url.includes('.m3u8') || url.includes('usher.ttvnw.net')) {
       log.info('M3U8 fetch intercepted:', url.substring(0, 80));
-      // Store Usher URL for stream replacement
+      // Store Usher URL and extract channel name for stream replacement
       if (url.includes('usher.ttvnw.net')) {
         currentUsherUrl = url;
+        try {
+          const pathMatch = url.match(/channel\/hls\/([^/.]+)/);
+          if (pathMatch) currentChannelName = pathMatch[1];
+        } catch (e) {}
       }
 
       const response = await originalFetch(input, init);
@@ -1177,21 +1405,79 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       if (text.includes('#EXTM3U')) {
         // Detect stitched-ad in media playlist — trigger stream replacement
         const hasStitchedAd = text.includes('stitched-ad') ||
+          text.includes('stitched_ad') ||
           /#EXT-X-DATERANGE:.*ID="stitched-ad/.test(text) ||
+          /#EXT-X-DATERANGE:.*CLASS="stitched_ad"/.test(text) ||
           /#EXT-X-DATERANGE:.*CLASS=".*stitched.*ad.*"/i.test(text);
         const hasAdMarkers = CONFIG.M3U8_AD_MARKERS.some(regex => regex.test(text)) ||
           CONFIG.M3U8_AD_STRINGS.some(s => text.includes(s));
+        const hasAnyAd = hasStitchedAd || hasAdMarkers;
 
-        if (hasStitchedAd) {
+        if (hasAnyAd && currentChannelName) {
           consecutiveAdM3U8++;
-          log.info(`M3U8 stitched-ad detected (count: ${consecutiveAdM3U8})`);
+          log.info(`M3U8 ad detected (count: ${consecutiveAdM3U8})`);
           sendFakeAdQuartile();
 
-          // Try stream replacement via next playerType in cascade
+          // vaft approach: try backup player types with independent GQL + Usher fetch
+          let replaced = false;
+          for (const backupType of BACKUP_PLAYER_TYPES) {
+            try {
+              const cleanEncodings = await fetchCleanM3U8(currentChannelName, backupType);
+              if (cleanEncodings) {
+                // Check if this backup stream actually has no ads
+                const backupHasAd = cleanEncodings.includes('stitched-ad') ||
+                  cleanEncodings.includes('stitched_ad') ||
+                  CONFIG.M3U8_AD_MARKERS.some(regex => regex.test(cleanEncodings)) ||
+                  CONFIG.M3U8_AD_STRINGS.some(s => cleanEncodings.includes(s));
+
+                if (!backupHasAd) {
+                  // For media playlists: find matching resolution URL in the clean encodings M3U8
+                  if (!url.includes('usher.ttvnw.net') && url.endsWith('.m3u8')) {
+                    // This is a media playlist — try to get the same resolution from backup
+                    const currentResolution = text.match(/RESOLUTION=([^,]+)/)?.[1];
+                    if (currentResolution) {
+                      const lines = cleanEncodings.replaceAll('\r', '').split('\n');
+                      for (let i = 0; i < lines.length - 1; i++) {
+                        if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i].includes(currentResolution) && lines[i + 1].includes('.m3u8')) {
+                          const mediaUrl = lines[i + 1].trim();
+                          const mediaResp = await originalFetch(mediaUrl);
+                          if (mediaResp.ok) {
+                            const mediaText = await mediaResp.text();
+                            if (mediaText.includes('#EXTM3U') && !mediaText.includes('stitched')) {
+                              log.info(`Replaced with clean stream (${backupType}, ${currentResolution})`);
+                              consecutiveAdM3U8 = 0;
+                              return new Response(
+                                new Blob([mediaText]),
+                                { status: response.status, headers: { ...Object.fromEntries(response.headers), 'Content-Type': 'application/vnd.apple.mpegurl' } }
+                              );
+                            }
+                          }
+                        }
+                      }
+                    }
+                  } else {
+                    // This is the encodings M3U8 from Usher — return it directly
+                    log.info(`Replaced encodings M3U8 with clean stream (${backupType})`);
+                    consecutiveAdM3U8 = 0;
+                    return new Response(
+                      new Blob([cleanEncodings]),
+                      { status: response.status, headers: { ...Object.fromEntries(response.headers), 'Content-Type': 'application/vnd.apple.mpegurl' } }
+                    );
+                  }
+                } else {
+                  log.debug(`Backup ${backupType} also has ads, trying next`);
+                }
+              }
+            } catch (e) {
+              log.debug(`Backup fetch failed for ${backupType}:`, e);
+            }
+          }
+
+          // Fallback: advance cascade and try old replacement
           if (consecutiveAdM3U8 >= MAX_CONSECUTIVE_AD_M3U8 && currentUsherUrl && currentPlayerTypeIdx < PLAYER_TYPE_CASCADE.length - 1) {
             currentPlayerTypeIdx++;
             consecutiveAdM3U8 = 0;
-            log.info(`Advancing cascade to ${PLAYER_TYPE_CASCADE[currentPlayerTypeIdx]} due to repeated stitched ads`);
+            log.info(`Advancing cascade to ${PLAYER_TYPE_CASCADE[currentPlayerTypeIdx]} due to repeated ads`);
 
             try {
               const replacementUrl = currentUsherUrl.replace(
@@ -1228,10 +1514,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
               log.warn('Stream replacement error:', e);
             }
           }
-        } else if (hasAdMarkers) {
-          // Non-stitched ad markers — just clean
-          consecutiveAdM3U8 = 0;
-        } else {
+        } else if (!hasAnyAd) {
           // No ads — reset counter
           consecutiveAdM3U8 = 0;
         }
@@ -1948,7 +2231,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v49.0.4...');
+      log.info('Initializing Optimized Twitch Adblock Fix v51.0.0...');
 
       // Initial ad removal
       removeAds();
@@ -1978,7 +2261,7 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v49.0.4 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v51.0.0 initialized successfully');
     };
   })();
 
@@ -1996,7 +2279,9 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       const settings = JSON.parse(el.textContent);
       if (settings) {
         const adFlags = ['enableStreamDisplayAds', 'enablePauseAds', 'enableMidrollAds',
-          'enableOutstreamVideoAds', 'enableAudioAds', 'enableSdaEligibility'];
+          'enableOutstreamVideoAds', 'enableAudioAds', 'enableSdaEligibility',
+          'enableVlmHlsMidrolls', 'enableNabGate', 'enableSdaDynamicDurations',
+          'enableMafs', 'enableClientSideAdInsertion'];
         for (const key of Object.keys(settings)) {
           if (adFlags.includes(key)) settings[key] = false;
         }
@@ -2032,7 +2317,9 @@ headers:{"Content-Type":"application/vnd.apple.mpegurl"}})}return r})})};
       if (_seen.has(obj)) return;
       _seen.add(obj);
       const adFlags = ['enableStreamDisplayAds', 'enablePauseAds', 'enableMidrollAds',
-        'enableOutstreamVideoAds', 'enableAudioAds', 'enableSdaEligibility'];
+        'enableOutstreamVideoAds', 'enableAudioAds', 'enableSdaEligibility',
+        'enableVlmHlsMidrolls', 'enableNabGate', 'enableSdaDynamicDurations',
+        'enableMafs', 'enableClientSideAdInsertion'];
       for (const flag of adFlags) {
         if (flag in obj) {
           try { obj[flag] = false; } catch (e) {}
