@@ -302,7 +302,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v54.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v56.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -875,9 +875,7 @@ const isChatOrAuthUrl = (url) => {
           continue;
         }
 
-        // Skip all lines while inside an ad break — only exit on DISCONTINUITY
-        // (content-URL heuristic was removed: ad segment URLs are indistinguishable
-        //  from content URLs and caused premature ad-break exit, leaking ad segments)
+        // Skip all lines while inside an ad break — exit on DISCONTINUITY
         if (inAdBreak) {
           if (line === '#EXT-X-DISCONTINUITY') {
             inAdBreak = false;
@@ -1160,10 +1158,21 @@ return r;})})};
           // Worker requests a clean M3U8 — use vaft approach (independent GQL + Usher)
           (async () => {
             let cleanText = null;
-            if (currentChannelName) {
+            let channelName = currentChannelName;
+            if (!channelName && msg.url) {
+              const chMatch = msg.url.match(/\/hls\/([^/.]+)/);
+              if (chMatch) channelName = chMatch[1];
+            }
+            if (!channelName) {
+              try {
+                const pMatch = location.pathname.match(/^\/(popout\/)?([^/]+)/);
+                if (pMatch && pMatch[2] && !['directory','videos','settings','friends','inventory','payments','subscriptions','tags',' Following','followers'].includes(pMatch[2])) channelName = pMatch[2];
+              } catch(e) {}
+            }
+            if (channelName) {
               for (const backupType of BACKUP_PLAYER_TYPES) {
                 try {
-                  const encodings = await fetchCleanM3U8(currentChannelName, backupType);
+                  const encodings = await fetchCleanM3U8(channelName, backupType);
                   if (encodings) {
                     const backupHasAd = encodings.includes('stitched') ||
                       encodings.includes('X-TTV-MAF-AD') ||
@@ -2244,7 +2253,7 @@ return r;})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v54.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v56.0.0...');
 
       // Initial ad removal
       removeAds();
@@ -2274,7 +2283,7 @@ return r;})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v54.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v56.0.0 initialized successfully');
     };
   })();
 
