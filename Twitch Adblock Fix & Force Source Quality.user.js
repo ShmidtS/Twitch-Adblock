@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 53.0.0
+// @version 54.0.0
 // @description Twitch ad-blocking with window.__vat interception, playerType cascade, M3U8 stitched-ad replacement, PBYP blocking, fake ad-quartile
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -302,7 +302,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v53.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v54.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -860,11 +860,6 @@ const isChatOrAuthUrl = (url) => {
 
         // Check for ad break start markers (compiled single regex)
         if (markersCombined.test(line)) {
-          // Self-contained marker: if this line also matches end markers, skip it
-          // without entering ad-break mode (both START-DATE and END-DATE on same line)
-          if (endMarkersCombined.test(line)) {
-            continue;
-          }
           inAdBreak = true;
           continue;
         }
@@ -1064,7 +1059,7 @@ self.fetch=function(input,init){
 var url=(input instanceof Request?input.url:input)+"";
 var _uk=url.split("?")[0];
 var _now=Date.now();
-if(_mc[_uk]&&_now-_mc[_uk]<2000){return _wf(input,init)}
+if(_mc[_uk]&&_now-_mc[_uk].t<2000){return Promise.resolve(new Response(new Blob([_mc[_uk].text]),{status:200,headers:{"Content-Type":"application/vnd.apple.mpegurl"}}))}
 try{var h=new URL(url).hostname;
 var bd=["edge.ads.twitch.tv","amazon-adsystem.com","sq-tungsten-ts.amazon-adsystem.com","ads.ttvnw.net","ad.twitch.tv",
 "video.ad.twitch.tv","stream-display-ad.twitch.tv","doubleclick.net","googlesyndication.com",
@@ -1094,9 +1089,8 @@ text.indexOf("X-TV-TWITCH-AD")!==-1||text.indexOf("SCTE35-AD")!==-1||
 text.indexOf("AD_BREAK")!==-1||text.indexOf("FREEWHEEL")!==-1;
 if(hasAd){
 self.postMessage({__ttv_adblock:true,type:"ad_detected",url:url});
-_mc[_uk]=_now;
 return reqCleanM3U8(url).then(function(cleanText){
-if(cleanText){_mc[_uk]=_now;
+if(cleanText){_mc[_uk]={t:_now,text:cleanText};
 try{self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url})}catch(e){}
 return new Response(new Blob([cleanText]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
 var ls=text.split("\\n"),fl=[],iab=false;
@@ -1124,7 +1118,7 @@ var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
 "X-TTV-MAF-AD-FALLBACK-FORMATS",'CLASS="AD_BREAK"','CLASS="FREEWHEEL"'].join("|"));
 for(var i=0;i<ls.length;i++){var l=ls[i],isS=false,isE=false;
 for(var j=0;j<am.length;j++){if(am[j].test(l)){isS=true;break}}
-if(isS){for(var j=0;j<em.length;j++){if(em[j].test(l)){isE=true;break}}if(isE){continue}iab=true;continue}
+if(isS){iab=true;continue}
 for(var j=0;j<em.length;j++){if(em[j].test(l)){isE=true;break}}
 if(isE){iab=false;continue}
 if(as.test(l))continue;
@@ -1135,12 +1129,12 @@ var c=fl.join("\\n");
 if(!c.match(/https?:\\/\\//))return r;
 var cm=c.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\\u0438\\u0441\\u0445\\u043e\\u0434\\u043d\\u043e\\u0435)[^\\n]*\\n([^\\n]+)/i);
 if(cm)c="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
-_mc[_uk]=_now;try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
+_mc[_uk]={t:_now,text:c};try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
 return new Response(new Blob([c]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});});
 }
 var cm=text.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\\u0438\\u0441\\u0445\\u043e\\u0434\\u043d\\u043e\\u0435)[^\\n]*\\n([^\\n]+)/i);
 if(cm){var cs="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
-if(cs!==text){_mc[_uk]=_now;return new Response(new Blob([cs]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}}
+if(cs!==text){_mc[_uk]={t:_now,text:cs};return new Response(new Blob([cs]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}}
 return r;})})};
 })();`;
 
@@ -2250,7 +2244,7 @@ return r;})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v53.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v54.0.0...');
 
       // Initial ad removal
       removeAds();
@@ -2280,7 +2274,7 @@ return r;})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v53.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v54.0.0 initialized successfully');
     };
   })();
 
