@@ -1048,6 +1048,18 @@ if(e.data&&e.data.__ttv_adblock&&e.data.type==='clean_m3u8_response'){
 var id=e.data.requestId;
 if(_ac.has(id)){var cb=_ac.get(id);_ac.delete(id);cb(e.data.m3u8);}}
 });
+// M3U8 replacement counter to prevent infinite loops
+var _rc={};
+
+function hasAdMarkers(text){
+return text.indexOf('stitched')!==-1||text.indexOf('X-TTV-MAF-AD')!==-1||
+text.indexOf('twitch-maf-ad')!==-1||text.indexOf('twitch-ad-quartile')!==-1||
+text.indexOf('X-TV-TWITCH-AD')!==-1||text.indexOf('SCTE35-AD')!==-1||
+/#EXT-X-DATERANGE:.*CLASS='(com\.twitch\.ttv\.pts\.dai|twitch_ad|twitch-maf-ad|twitch-ad-quartile|stitched_ad)'/.test(text)||
+/#EXT-X-DATERANGE:.*ID='stitched-ad-'/.test(text)||/#EXT-X-TWITCH-ADS/.test(text)||
+text.indexOf('AD_BREAK')!==-1||text.indexOf('FREEWHEEL')!==-1;
+}
+
 function reqCleanM3U8(url){
 return new Promise(function(resolve){
 var id=++_rid;
@@ -1088,8 +1100,10 @@ text.indexOf("X-TV-TWITCH-AD")!==-1||text.indexOf("SCTE35-AD")!==-1||
 text.indexOf("AD_BREAK")!==-1||text.indexOf("FREEWHEEL")!==-1;
 if(hasAd){
 self.postMessage({__ttv_adblock:true,type:"ad_detected",url:url});
+_rc[_uk]=(_rc[_uk]||0)+1;
+if(_rc[_uk]>3){self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url,loop:"prevented"});return r;}
 return reqCleanM3U8(url).then(function(cleanText){
-if(cleanText){if(cleanText.indexOf("#EXT-X-STREAM-INF")!==-1)_mc[_uk]={t:_now,text:cleanText};
+if(cleanText){if(hasAdMarkers(cleanText)){return r;}if(cleanText.indexOf("#EXT-X-STREAM-INF")!==-1)_mc[_uk]={t:_now,text:cleanText};
 try{self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url})}catch(e){}
 return new Response(new Blob([cleanText]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
 var ls=text.split("\\n"),fl=[],iab=false;
