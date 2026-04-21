@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 54.0.0
+// @version 58.0.0
 // @description Twitch ad-blocking with window.__vat interception, playerType cascade, M3U8 stitched-ad replacement, PBYP blocking, fake ad-quartile
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -302,7 +302,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v56.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v58.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -440,6 +440,7 @@ const isChatOrAuthUrl = (url) => {
   let pendingReplacement = null;
   let currentChannelName = null;
   let backupEncodingsCache = {};
+  const ENCODINGS_CACHE_TTL = 30000;
   const GQL_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
   let gqlDeviceId = null;
   let gqlAuthorization = undefined;
@@ -1057,7 +1058,7 @@ self.fetch=function(input,init){
 var url=(input instanceof Request?input.url:input)+"";
 var _uk=url.split("?")[0];
 var _now=Date.now();
-if(_mc[_uk]&&_now-_mc[_uk].t<2000){return Promise.resolve(new Response(new Blob([_mc[_uk].text]),{status:200,headers:{"Content-Type":"application/vnd.apple.mpegurl"}}))}
+if(_mc[_uk]&&_now-_mc[_uk].t<30000){return Promise.resolve(new Response(new Blob([_mc[_uk].text]),{status:200,headers:{"Content-Type":"application/vnd.apple.mpegurl"}}))}
 try{var h=new URL(url).hostname;
 var bd=["edge.ads.twitch.tv","amazon-adsystem.com","sq-tungsten-ts.amazon-adsystem.com","ads.ttvnw.net","ad.twitch.tv",
 "video.ad.twitch.tv","stream-display-ad.twitch.tv","doubleclick.net","googlesyndication.com",
@@ -1158,58 +1159,96 @@ return r;})})};
           // Worker requests a clean M3U8 — use vaft approach (independent GQL + Usher)
           (async () => {
             let cleanText = null;
-            let channelName = currentChannelName;
-            if (!channelName && msg.url) {
-              const chMatch = msg.url.match(/\/hls\/([^/.]+)/);
-              if (chMatch) channelName = chMatch[1];
-            }
-            if (!channelName) {
-              try {
-                const pMatch = location.pathname.match(/^\/(popout\/)?([^/]+)/);
-                if (pMatch && pMatch[2] && !['directory','videos','settings','friends','inventory','payments','subscriptions','tags',' Following','followers'].includes(pMatch[2])) channelName = pMatch[2];
-              } catch(e) {}
-            }
-            if (channelName) {
-              for (const backupType of BACKUP_PLAYER_TYPES) {
+            const cacheKey = msg.url?.split('?')[0];
+            // Check cache first to avoid GQL spam
+            const cached = cacheKey ? backupEncodingsCache[cacheKey] : null;
+            if (cached && Date.now() - cached.t < ENCODINGS_CACHE_TTL) {
+              cleanText = cached.text;
+            } else {
+              let channelName = currentChannelName;
+              if (!channelName && msg.url) {
+                const chMatch = msg.url.match(/\/hls\/([^/.]+)/);
+                if (chMatch) channelName = chMatch[1];
+              }
+              if (!channelName) {
                 try {
-                  const encodings = await fetchCleanM3U8(channelName, backupType);
-                  if (encodings) {
-                    const backupHasAd = encodings.includes('stitched') ||
-                      encodings.includes('X-TTV-MAF-AD') ||
-                      CONFIG.M3U8_AD_MARKERS.some(regex => regex.test(encodings));
-                    if (!backupHasAd) {
-                      // For media playlist requests, find matching resolution
-                      if (msg.url && !msg.url.includes('usher.ttvnw.net') && msg.url.endsWith('.m3u8')) {
-                        const currentResolution = msg.url.match(/RESOLUTION=([^,]+)/)?.[1];
-                        const lines = encodings.replaceAll('\r', '').split('\n');
+                  const pMatch = location.pathname.match(/^\/(popout\/)?([^/]+)/);
+                  if (pMatch && pMatch[2] && !['directory','videos','settings','friends','inventory','payments','subscriptions','tags',' Following','followers'].includes(pMatch[2])) channelName = pMatch[2];
+                } catch(e) {}
+              }
+              if (channelName) {
+                for (const backupType of BACKUP_PLAYER_TYPES) {
+                  try {
+                    const encodings = await fetchCleanM3U8(channelName, backupType);
+                    if (encodings) {
+                      // Always use encodings — clean ads from it if present
+                      const cleanEncodings = cleanM3U8(encodings);
+                      // Media playlist request — must return media playlist, never master playlist
+                      if (msg.url && !msg.url.includes('usher.ttvnw.net')) {
+                        const lines = cleanEncodings.replaceAll('\r', '').split('\n');
+                        // Prefer chunked/Source quality
                         for (let i = 0; i < lines.length - 1; i++) {
-                          if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('.m3u8')) {
-                            const streamUrl = lines[i + 1].trim();
-                            if (streamUrl.includes('://')) {
-                              const streamResp = await originalFetch(streamUrl);
-                              if (streamResp.ok) {
-                                const streamText = await streamResp.text();
-                                if (streamText.includes('#EXTM3U') && !streamText.includes('stitched')) {
-                                  cleanText = streamText;
-                                  log.info(`Worker backup stream found (${backupType})`);
-                                  break;
+                          if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('://')) {
+                            const isChunked = /VIDEO="chunked"|NAME="Source"|исходное/.test(lines[i]);
+                            if (isChunked) {
+                              const streamUrl = lines[i + 1].trim();
+                              try {
+                                const streamResp = await originalFetch(streamUrl);
+                                if (streamResp.ok) {
+                                  const streamText = await streamResp.text();
+                                  if (streamText.includes('#EXTM3U') && streamText.includes('#EXTINF')) {
+                                    const cleanMedia = cleanM3U8(streamText);
+                                    if (cleanMedia.includes('#EXTINF')) {
+                                      cleanText = cleanMedia;
+                                      log.info(`Worker backup stream found (${backupType}, chunked)`);
+                                      break;
+                                    }
+                                  }
                                 }
-                              }
+                              } catch (e) {}
                             }
                           }
                         }
-                        // If no resolution match found, return full encodings M3U8
-                        if (!cleanText && !encodings.includes('stitched')) {
-                          cleanText = encodings;
+                        // Fallback: highest bandwidth media playlist
+                        if (!cleanText) {
+                          const candidates = [];
+                          for (let i = 0; i < lines.length - 1; i++) {
+                            if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('://')) {
+                              const bw = parseInt(lines[i].match(/BANDWIDTH=(\d+)/)?.[1] || '0', 10);
+                              candidates.push({ url: lines[i + 1].trim(), bandwidth: bw });
+                            }
+                          }
+                          candidates.sort((a, b) => b.bandwidth - a.bandwidth);
+                          for (const { url: streamUrl, bandwidth } of candidates) {
+                            try {
+                              const streamResp = await originalFetch(streamUrl);
+                              if (streamResp.ok) {
+                                const streamText = await streamResp.text();
+                                if (streamText.includes('#EXTM3U') && streamText.includes('#EXTINF')) {
+                                  const cleanMedia = cleanM3U8(streamText);
+                                  if (cleanMedia.includes('#EXTINF')) {
+                                    cleanText = cleanMedia;
+                                    log.info(`Worker backup stream found (${backupType}, ${bandwidth}bps)`);
+                                    break;
+                                  }
+                                }
+                              }
+                            } catch (e) { log.debug('Media playlist fetch failed:', e.message); }
+                          }
                         }
                       } else {
-                        cleanText = encodings;
+                        // Encodings M3U8 from Usher — return cleaned directly
+                        cleanText = cleanEncodings;
                       }
-                      if (cleanText) break;
+                      if (cleanText) {
+                        // Cache the result
+                        if (cacheKey) backupEncodingsCache[cacheKey] = { t: Date.now(), text: cleanText };
+                        break;
+                      }
                     }
+                  } catch (e) {
+                    log.debug(`Worker backup fetch failed for ${backupType}:`, e);
                   }
-                } catch (e) {
-                  log.debug(`Worker backup fetch failed for ${backupType}:`, e);
                 }
               }
             }
@@ -1438,54 +1477,78 @@ return r;})})};
           sendFakeAdQuartile();
 
           // vaft approach: try backup player types with independent GQL + Usher fetch
-          let replaced = false;
           for (const backupType of BACKUP_PLAYER_TYPES) {
             try {
-              const cleanEncodings = await fetchCleanM3U8(currentChannelName, backupType);
-              if (cleanEncodings) {
-                // Check if this backup stream actually has no ads
-                const backupHasAd = cleanEncodings.includes('stitched-ad') ||
-                  cleanEncodings.includes('stitched_ad') ||
-                  CONFIG.M3U8_AD_MARKERS.some(regex => regex.test(cleanEncodings)) ||
-                  CONFIG.M3U8_AD_STRINGS.some(s => cleanEncodings.includes(s));
-
-                if (!backupHasAd) {
-                  // For media playlists: find matching resolution URL in the clean encodings M3U8
-                  if (!url.includes('usher.ttvnw.net') && url.endsWith('.m3u8')) {
-                    // This is a media playlist — try to get the same resolution from backup
-                    const currentResolution = text.match(/RESOLUTION=([^,]+)/)?.[1];
-                    if (currentResolution) {
-                      const lines = cleanEncodings.replaceAll('\r', '').split('\n');
-                      for (let i = 0; i < lines.length - 1; i++) {
-                        if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i].includes(currentResolution) && lines[i + 1].includes('.m3u8')) {
-                          const mediaUrl = lines[i + 1].trim();
+              const rawEncodings = await fetchCleanM3U8(currentChannelName, backupType);
+              if (rawEncodings) {
+                // Always clean ads from backup — don't skip if ads present
+                const cleanEncodings = cleanM3U8(rawEncodings);
+                // Media playlist request — must return media playlist, never master playlist
+                if (!url.includes('usher.ttvnw.net')) {
+                  const lines = cleanEncodings.replaceAll('\r', '').split('\n');
+                  // Prefer chunked/Source quality
+                  for (let i = 0; i < lines.length - 1; i++) {
+                    if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('://')) {
+                      if (/VIDEO="chunked"|NAME="Source"|исходное/.test(lines[i])) {
+                        const mediaUrl = lines[i + 1].trim();
+                        try {
                           const mediaResp = await originalFetch(mediaUrl);
                           if (mediaResp.ok) {
                             const mediaText = await mediaResp.text();
-                            if (mediaText.includes('#EXTM3U') && !mediaText.includes('stitched')) {
-                              log.info(`Replaced with clean stream (${backupType}, ${currentResolution})`);
-                              consecutiveAdM3U8 = 0;
-                              return new Response(
-                                new Blob([mediaText]),
-                                { status: response.status, headers: { ...Object.fromEntries(response.headers), 'Content-Type': 'application/vnd.apple.mpegurl' } }
-                              );
+                            if (mediaText.includes('#EXTM3U') && mediaText.includes('#EXTINF')) {
+                              const cleanMedia = cleanM3U8(mediaText);
+                              if (cleanMedia.includes('#EXTINF')) {
+                                log.info(`Replaced with clean stream (${backupType}, chunked)`);
+                                consecutiveAdM3U8 = 0;
+                                return new Response(
+                                  new Blob([cleanMedia]),
+                                  { status: response.status, headers: { ...Object.fromEntries(response.headers), 'Content-Type': 'application/vnd.apple.mpegurl' } }
+                                );
+                              }
                             }
+                          }
+                        } catch (e) {}
+                      }
+                    }
+                  }
+                  // Fallback: highest bandwidth media playlist
+                  const candidates = [];
+                  for (let i = 0; i < lines.length - 1; i++) {
+                    if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('://')) {
+                      const bw = parseInt(lines[i].match(/BANDWIDTH=(\d+)/)?.[1] || '0', 10);
+                      candidates.push({ url: lines[i + 1].trim(), bandwidth: bw });
+                    }
+                  }
+                  candidates.sort((a, b) => b.bandwidth - a.bandwidth);
+                  for (const { url: mediaUrl, bandwidth } of candidates) {
+                    try {
+                      const mediaResp = await originalFetch(mediaUrl);
+                      if (mediaResp.ok) {
+                        const mediaText = await mediaResp.text();
+                        if (mediaText.includes('#EXTM3U') && mediaText.includes('#EXTINF')) {
+                          const cleanMedia = cleanM3U8(mediaText);
+                          if (cleanMedia.includes('#EXTINF')) {
+                            log.info(`Replaced with clean stream (${backupType}, ${bandwidth}bps)`);
+                            consecutiveAdM3U8 = 0;
+                            return new Response(
+                              new Blob([cleanMedia]),
+                              { status: response.status, headers: { ...Object.fromEntries(response.headers), 'Content-Type': 'application/vnd.apple.mpegurl' } }
+                            );
                           }
                         }
                       }
-                    }
-                  } else {
-                    // This is the encodings M3U8 from Usher — return it directly
-                    log.info(`Replaced encodings M3U8 with clean stream (${backupType})`);
-                    consecutiveAdM3U8 = 0;
-                    return new Response(
-                      new Blob([cleanEncodings]),
-                      { status: response.status, headers: { ...Object.fromEntries(response.headers), 'Content-Type': 'application/vnd.apple.mpegurl' } }
-                    );
+                    } catch (e) { log.debug('Media playlist fetch failed:', e.message); }
                   }
+                  // No clean media playlist found — continue to next backup type
                 } else {
-                  log.debug(`Backup ${backupType} also has ads, trying next`);
-                }
+                  // This is the encodings M3U8 from Usher — return cleaned version
+                  log.info(`Replaced encodings M3U8 with clean stream (${backupType})`);
+                  consecutiveAdM3U8 = 0;
+                  return new Response(
+                    new Blob([cleanEncodings]),
+                    { status: response.status, headers: { ...Object.fromEntries(response.headers), 'Content-Type': 'application/vnd.apple.mpegurl' } }
+                  );
+                  }
               }
             } catch (e) {
               log.debug(`Backup fetch failed for ${backupType}:`, e);
@@ -2253,7 +2316,7 @@ return r;})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v56.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v58.0.0...');
 
       // Initial ad removal
       removeAds();
@@ -2283,7 +2346,7 @@ return r;})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v56.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v58.0.0 initialized successfully');
     };
   })();
 
