@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 58.0.0
+// @version 59.0.0
 // @description Twitch ad-blocking with window.__vat interception, playerType cascade, M3U8 stitched-ad replacement, PBYP blocking, fake ad-quartile
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -302,7 +302,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v58.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v59.0.0]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -1089,7 +1089,7 @@ text.indexOf("AD_BREAK")!==-1||text.indexOf("FREEWHEEL")!==-1;
 if(hasAd){
 self.postMessage({__ttv_adblock:true,type:"ad_detected",url:url});
 return reqCleanM3U8(url).then(function(cleanText){
-if(cleanText){_mc[_uk]={t:_now,text:cleanText};
+if(cleanText){if(cleanText.indexOf("#EXT-X-STREAM-INF")!==-1)_mc[_uk]={t:_now,text:cleanText};
 try{self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url})}catch(e){}
 return new Response(new Blob([cleanText]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
 var ls=text.split("\\n"),fl=[],iab=false;
@@ -1128,12 +1128,12 @@ var c=fl.join("\\n");
 if(!c.match(/https?:\\/\\//))return r;
 var cm=c.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\\u0438\\u0441\\u0445\\u043e\\u0434\\u043d\\u043e\\u0435)[^\\n]*\\n([^\\n]+)/i);
 if(cm)c="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
-_mc[_uk]={t:_now,text:c};try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
+if(c.indexOf("#EXT-X-STREAM-INF")!==-1)_mc[_uk]={t:_now,text:c};try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
 return new Response(new Blob([c]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});});
 }
 var cm=text.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\\u0438\\u0441\\u0445\\u043e\\u0434\\u043d\\u043e\\u0435)[^\\n]*\\n([^\\n]+)/i);
 if(cm){var cs="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
-if(cs!==text){_mc[_uk]={t:_now,text:cs};return new Response(new Blob([cs]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}}
+if(cs!==text){if(cs.indexOf("#EXT-X-STREAM-INF")!==-1)_mc[_uk]={t:_now,text:cs};return new Response(new Blob([cs]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}}
 return r;})})};
 })();`;
 
@@ -2177,7 +2177,7 @@ return r;})})};
       const handleStall = () => {
         setTimeout(() => {
           const currentVideo = document.querySelector('video');
-          if (currentVideo && currentVideo.readyState === 0) {
+          if (currentVideo && currentVideo.readyState <= 1) {
             scheduleReload('stalled');
           }
         }, 4000);
@@ -2186,7 +2186,7 @@ return r;})})};
       const handleWaiting = () => {
         setTimeout(() => {
           const currentVideo = document.querySelector('video');
-          if (currentVideo && currentVideo.readyState === 0) {
+          if (currentVideo && currentVideo.readyState <= 1) {
             scheduleReload('waiting');
           }
         }, 5000);
@@ -2266,17 +2266,26 @@ return r;})})};
         }
 
         if (CONFIG.SWITCH_FIX && location.pathname !== lastPath) {
-          lastPath = location.pathname;
-          playerErrorHandler.resetAttempts();
-          currentPlayerTypeIdx = 0;
-          consecutiveAdM3U8 = 0;
-          currentUsherUrl = null;
-          if (unsafeWindow.__vat) {
-            const vat = unsafeWindow.__vat;
-            vat.playerType = PLAYER_TYPE_CASCADE[0];
-            log.info('SPA navigation: reset __vat playerType');
+          const newPath = location.pathname;
+          const newChannelMatch = newPath.match(/^\/(popout\/)?([^/]+)/);
+          const newChannel = newChannelMatch?.[2] || '';
+          const isChannelChange = newChannel !== currentChannelName;
+
+          if (isChannelChange) {
+            lastPath = newPath;
+            playerErrorHandler.resetAttempts();
+            currentPlayerTypeIdx = 0;
+            consecutiveAdM3U8 = 0;
+            currentUsherUrl = null;
+            if (unsafeWindow.__vat) {
+              const vat = unsafeWindow.__vat;
+              vat.playerType = PLAYER_TYPE_CASCADE[0];
+              log.info('SPA navigation: reset __vat playerType');
+            }
+            log.info('SPA navigation detected — reset cascade state');
+          } else {
+            lastPath = newPath;
           }
-          log.info('SPA navigation detected — reset cascade state');
           setTimeout(() => {
             removeAds();
           }, 300);
@@ -2316,7 +2325,7 @@ return r;})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v58.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v59.0.0...');
 
       // Initial ad removal
       removeAds();
@@ -2346,7 +2355,7 @@ return r;})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v58.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v59.0.0 initialized successfully');
     };
   })();
 
