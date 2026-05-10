@@ -1384,9 +1384,7 @@ return r;})})};
           if (ahead <= 1.5) continue;
           log.info('Buffer flush: fast-forward', ahead.toFixed(1), 's');
           const origRate = video.playbackRate;
-          const origMuted = video.muted;
           video.playbackRate = 16.0;
-          video.muted = true;
           let ticks = 0;
           const id = setInterval(() => {
             ticks++;
@@ -1402,7 +1400,6 @@ return r;})})};
             if (done) {
               clearInterval(id);
               video.playbackRate = origRate;
-              video.muted = origMuted;
             }
           }, 100);
         }
