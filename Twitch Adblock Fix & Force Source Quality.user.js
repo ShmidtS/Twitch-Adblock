@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 60.0.0
+// @version 60.0.20
 // @description Twitch ad-blocking with parallel M3U8 fetch, Set-based domain matching, optimized DOM traversal
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -19,6 +19,7 @@
 // @connect gql.twitch.tv
 // @connect assets.twitch.tv
 // @connect raw.githubusercontent.com
+// @connect *
 // @updateURL https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
 // @downloadURL https://github.com/ShmidtS/Twitch-Adblock/raw/refs/heads/main/Twitch%20Adblock%20Fix%20&%20Force%20Source%20Quality.user.js
 // @run-at document-start
@@ -36,12 +37,12 @@
 
     // Core features
     SWITCH_FIX: true,
-    FORCE_CHUNKED: true,
+    FORCE_CHUNKED: GM_getValue('TTV_ForceChunked', true),
     AUTO_RELOAD_ON_PLAYER_ERROR: GM_getValue('TTV_AutoReload', true),
     AUTO_RELOAD_ON_AD_DETECTED: GM_getValue('TTV_AutoReloadOnAd', true),
 
     // Intervals and timeouts (optimized for faster reaction)
-    DEBOUNCE_DELAY: 75,
+    DEBOUNCE_DELAY: 16,
     MAIN_INTERVAL: 15000,
     AD_CHECK_INTERVAL: 10000,
     USER_ACTIVITY_TIMEOUT: 30000,
@@ -236,7 +237,6 @@
       /#EXT-X-DATERANGE:.*CLASS="twitch_ad"/,
       /#EXT-X-DATERANGE:.*CLASS="twitch-maf-ad"/,
       /#EXT-X-DATERANGE:.*CLASS="twitch-ad-quartile"/,
-      /#EXT-X-DATERANGE:.*CLASS="twitch-stream-source"/,
       /#EXT-X-DATERANGE:.*CLASS="stitched_ad"/,
       /#EXT-X-DATERANGE:.*ID="stitched-ad-/,
       /#EXT-X-SCTE35-OUT.*ad/i,
@@ -245,10 +245,17 @@
       /#EXT-X-DATERANGE:.*CLASS="twitch-[^"]*ad[^"]*"/i,
       /#EXT-X-DATERANGE:.*CLASS="AD_BREAK"/,
       /#EXT-X-DATERANGE:.*CLASS="FREEWHEEL"/,
+      /#EXT-X-TTV-MAF-AD/,
+      /#EXT-X-TWITCH-AD-PLUGIN/,
+      /#EXT-X-TWITCH-AD-CREATIVE/,
+      /#EXT-X-CUE-OUT/,
+      /#EXT-OATCLS-SCTE35/,
+      /#EXT-X-SPLICEPOINT-SCTE35/,
     ],
     M3U8_AD_END_MARKERS: [
       /#EXT-X-DATERANGE:.*END-DATE/,
       /#EXT-X-SCTE35-IN/,
+      /#EXT-X-CUE-IN/,
     ],
     // Legacy string markers for direct matching
     M3U8_AD_STRINGS: [
@@ -263,6 +270,7 @@
       'X-TTV-MAF-AD-PRIMARY-POD', 'X-TTV-MAF-AD-RADS-TOKEN',
       'X-TTV-MAF-AD-DECISION', 'X-TTV-MAF-AD-SDA-SEQUENCE-LENGTH',
       'X-TTV-MAF-AD-FALLBACK-FORMATS',
+      'EXT-X-CUE-OUT', 'EXT-OATCLS-SCTE35', 'EXT-X-SPLICEPOINT-SCTE35',
       'CLASS="AD_BREAK"', 'CLASS="FREEWHEEL"',
     ],
   };
@@ -302,7 +310,7 @@
 
   // Logging with performance optimization
   const createLogger = () => {
-    const prefix = '[TTV ADBLOCK FIX v60.0.0]';
+    const prefix = '[TTV ADBLOCK FIX v60.0.18]';
     const enabled = CONFIG.DEBUG;
 
     return {
@@ -341,13 +349,78 @@ const isChatOrAuthUrl = (url) => {
     return false;
   };
 
+  // CORS-bypass fetch via GM_xmlhttpRequest for cross-origin M3U8/media URLs
+  const gmFetch = (url, options = {}) => new Promise((resolve, reject) => {
+    GM_xmlhttpRequest({
+      method: options.method || 'GET',
+      url: url,
+      headers: options.headers || {},
+      data: options.body || null,
+      responseType: 'text',
+      onload: (resp) => resolve({
+        ok: resp.status >= 200 && resp.status < 300,
+        status: resp.status,
+        statusText: resp.statusText || '',
+        text: () => Promise.resolve(resp.responseText),
+        clone: function() { return this; }
+      }),
+      onerror: () => reject(new TypeError('NetworkError')),
+      ontimeout: () => reject(new TypeError('NetworkError'))
+    });
+  });
+
+  // Protect player containers and generic Twitch layout elements from removal/hiding
+  const isProtectedElement = (el) => {
+    if (!el) return false;
+    // Protect elements containing a video element
+    if (el.querySelector && el.querySelector('video')) return true;
+    // Protect known player container selectors
+    const playerSelectors = ['.video-ref', '.channel-root__player', '.persistent-player', '.channel-root__info'];
+    for (const sel of playerSelectors) {
+      if (el.matches && el.matches(sel)) return true;
+      if (el.closest && el.closest(sel)) return true;
+    }
+    // Protect generic Twitch layout wrappers unless they carry explicit ad classes
+    const className = el.className || '';
+    if (typeof className === 'string' && className.includes('Layout-sc-')) {
+      const hasAdClass = className.includes('stream-display-ad') ||
+                         className.includes('video-ad') ||
+                         className.includes('ad-overlay') ||
+                         className.includes('sda-') ||
+                         className.includes('pushdown') ||
+                         className.includes('squeezeback') ||
+                         className.includes('lower-third') ||
+                         className.includes('left-third') ||
+                         className.includes('skyscraper') ||
+                         className.includes('pause-ad') ||
+                         className.includes('outstream') ||
+                         className.includes('picture-by-picture') ||
+                         className.includes('audio-ad') ||
+                         className.includes('ivs-ad') ||
+                         className.includes('animated-audio') ||
+                         className.includes('prime-offers') ||
+                         className.includes('chan-sub') ||
+                         className.includes('content-overlay-gate') ||
+                         className.includes('consent-banner') ||
+                         className.includes('native-ad') ||
+                         className.includes('promo-banner') ||
+                         className.includes('sponsored') ||
+                         className.includes('advertisement');
+      if (!hasAdClass) {
+        if (CONFIG.DEBUG) log.debug('Protecting Layout element:', className.slice(0, 60));
+        return true;
+      }
+    }
+    return false;
+  };
+
   // Optimized batch remover with throttling
   class OptimizedBatchRemover {
     constructor() {
       this.elements = new Set();
       this.timeout = null;
       this.lastFlushTime = 0;
-      this.flushInterval = CONFIG.PERFORMANCE_MODE ? 250 : 150;
+      this.flushInterval = CONFIG.PERFORMANCE_MODE ? 50 : 16;
       this.maxElementsPerFlush = CONFIG.MAX_AD_ELEMENTS_TO_REMOVE;
     }
 
@@ -390,6 +463,9 @@ const isChatOrAuthUrl = (url) => {
         for (let element of elementsArray) {
           if (element.parentNode && !isChatElement(element)) {
             try {
+              if (CONFIG.DEBUG) {
+                log.debug('Removing element:', element.tagName, element.className?.slice(0, 60), element.id?.slice(0, 30));
+              }
               element.remove();
               removedCount++;
             } catch (e) {
@@ -419,7 +495,7 @@ const isChatOrAuthUrl = (url) => {
 
   // Stream ad bypass state — playerType cascade + M3U8 replacement
   const PLAYER_TYPE_CASCADE = ['site', 'embed', 'thunderdome'];
-  const BACKUP_PLAYER_TYPES = ['embed', 'popout', 'autoplay'];
+  const BACKUP_PLAYER_TYPES = ['channel_home', 'frontpage', 'embed', 'popout', 'autoplay'];
   let currentPlayerTypeIdx = 0;
   let consecutiveAdM3U8 = 0;
   const MAX_CONSECUTIVE_AD_M3U8 = 3;
@@ -427,7 +503,21 @@ const isChatOrAuthUrl = (url) => {
   const GLOBAL_MAX_RELOADS = 6;
   let currentUsherUrl = null;
   let pendingReplacement = null;
-  let currentChannelName = null;
+  let currentChannelName = (() => {
+    try {
+      const m = location.pathname.match(/^\/(popout\/)?([^/]+)/);
+      if (m && m[2] && !['directory','videos','settings','friends','inventory','payments','subscriptions','tags','followers'].includes(m[2])) return m[2];
+      const link = document.querySelector('a[data-a-target="channel-header-channel-link"], a[data-test-selector="channel-header__channel-link"], .channel-info-content a[href^="/"]');
+      if (link) {
+        const href = link.getAttribute('href');
+        if (href) {
+          const name = href.replace(/^\/+/, '').split('/')[0];
+          if (name && !['directory','videos','settings','friends','inventory','payments','subscriptions','tags','followers'].includes(name)) return name;
+        }
+      }
+    } catch (e) {}
+    return null;
+  })();
   let backupEncodingsCache = {};
   const ENCODINGS_CACHE_TTL = 30000;
   const GQL_CLIENT_ID = 'kimne78kx3ncx6brgo4mv6wki5h1ko';
@@ -501,10 +591,13 @@ const isChatOrAuthUrl = (url) => {
           }
         } catch (e) {}
       }
-      // Remove parent_domains — Twitch uses it to determine embed context and inject ads
-      usherUrl.searchParams.delete('parent_domains');
+      if (playerType === 'embed') {
+        usherUrl.searchParams.set('parent_domains', 'www.twitch.tv');
+      } else {
+        usherUrl.searchParams.delete('parent_domains');
+      }
       usherUrl.searchParams.set('player_type', playerType);
-      const m3u8Resp = await originalFetch(usherUrl.toString());
+      const m3u8Resp = await gmFetch(usherUrl.toString());
       if (m3u8Resp.ok) {
         const text = await m3u8Resp.text();
         if (text.includes('#EXTM3U')) return text;
@@ -571,7 +664,7 @@ const isChatOrAuthUrl = (url) => {
       if (!vat || patchedVATs.has(vat)) return;
       patchedVATs.add(vat);
 
-      const desiredPlayerType = PLAYER_TYPE_CASCADE[currentPlayerTypeIdx] || 'embed';
+      const desiredPlayerType = 'embed';
 
       if (vat.playerType !== desiredPlayerType) {
         log.info(`__vat playerType=${vat.playerType}, changing to ${desiredPlayerType} to force cache miss`);
@@ -757,7 +850,7 @@ const isChatOrAuthUrl = (url) => {
     const _sponsorRegex = /^Sponsor(?!shipAccessToken)/i;
     const _marketingRegex = /^Marketing/i;
     const _promoRegex = /^Promo(?!tionAccessToken)/i;
-    const LEGITIMATE_OPS = new Set(['PlaybackAccessToken', 'VideoPlayerStreamOverlay', 'VideoPlayerStreamInfo', 'StreamMetadata', 'AddChannel', 'AdjustPlayback', 'AddStreamTag']);
+    const LEGITIMATE_OPS = new Set(['PlaybackAccessToken', 'VideoPlayerStreamOverlay', 'VideoPlayerStreamInfo', 'StreamMetadata', 'AddChannel', 'AdjustPlayback', 'AddStreamTag', 'VideoAdRequestDecline', 'AdRequestDecline']);
     const _pbypRegex = /^(?:Video)?PictureByPicture|^Midroll/i;
 
     return (body) => {
@@ -774,7 +867,7 @@ const isChatOrAuthUrl = (url) => {
 
           if (operation.operationName === 'PlaybackAccessToken') {
             const vars = operation.variables || {};
-            vars.playerType = PLAYER_TYPE_CASCADE[currentPlayerTypeIdx] || 'embed';
+            vars.playerType = 'embed';
             operation.variables = vars;
             modified = true;
             log.info(`PlaybackAccessToken: playerType=${vars.playerType}`);
@@ -796,7 +889,7 @@ const isChatOrAuthUrl = (url) => {
             log.info(`Catch-all matched unknown ad operation: ${opName}`);
           }
 
-          if (isAdOperation) {
+          if (isAdOperation && !LEGITIMATE_OPS.has(opName)) {
             // Neutralize ad operations: preserve variable names with safe values
             // to prevent GraphQL schema errors that trigger Twitch retry/fallback
             operation.extensions = operation.extensions || {};
@@ -832,8 +925,19 @@ const isChatOrAuthUrl = (url) => {
   // Optimized M3U8 cleaner
   const cleanM3U8 = (() => {
     const markerRegex = new RegExp(CONFIG.M3U8_AD_STRINGS.join('|'));
-    const markersCombined = new RegExp(CONFIG.M3U8_AD_MARKERS.map(r => r.source).join('|'));
-    const endMarkersCombined = new RegExp(CONFIG.M3U8_AD_END_MARKERS.map(r => r.source).join('|'));
+
+    const isAdMarker = (line) => {
+      for (const re of CONFIG.M3U8_AD_MARKERS) {
+        if (re.test(line)) return true;
+      }
+      return false;
+    };
+    const isEndMarker = (line) => {
+      for (const re of CONFIG.M3U8_AD_END_MARKERS) {
+        if (re.test(line)) return true;
+      }
+      return false;
+    };
 
     return (text) => {
       // Fast path: cheap string checks before regex
@@ -841,7 +945,7 @@ const isChatOrAuthUrl = (url) => {
           text.indexOf('twitch-maf-ad') === -1 && text.indexOf('twitch-ad-quartile') === -1 &&
           text.indexOf('AD_BREAK') === -1 && text.indexOf('FREEWHEEL') === -1 &&
           text.indexOf('SCTE35-AD') === -1 && text.indexOf('X-TV-TWITCH-AD') === -1 &&
-          !markerRegex.test(text) && !markersCombined.test(text)) {
+          !markerRegex.test(text) && !isAdMarker(text)) {
         return text;
       }
 
@@ -852,14 +956,14 @@ const isChatOrAuthUrl = (url) => {
       for (let i = 0; i < lines.length; i++) {
         const line = lines[i];
 
-        // Check for ad break start markers (compiled single regex)
-        if (markersCombined.test(line)) {
+        // Check for ad break start markers
+        if (isAdMarker(line)) {
           inAdBreak = true;
           continue;
         }
 
-        // Check for ad break end markers (compiled single regex)
-        if (endMarkersCombined.test(line)) {
+        // Check for ad break end markers
+        if (isEndMarker(line)) {
           inAdBreak = false;
           continue;
         }
@@ -871,7 +975,7 @@ const isChatOrAuthUrl = (url) => {
 
         // Skip all lines while inside an ad break — exit on DISCONTINUITY
         if (inAdBreak) {
-          if (line === '#EXT-X-DISCONTINUITY') {
+          if (line.trim() === '#EXT-X-DISCONTINUITY') {
             inAdBreak = false;
             filteredLines.push('#EXT-X-DISCONTINUITY');
             continue;
@@ -882,28 +986,52 @@ const isChatOrAuthUrl = (url) => {
         filteredLines.push(line);
       }
 
-      let cleaned = filteredLines.join('\n');
-
-      // Safety net: if cleaning removed all content segments, return original
-      const hasContentSegments = filteredLines.some(line =>
-        line.trim() && !line.startsWith('#') && line.includes('://')
-      );
-      if (!hasContentSegments && text.split('\n').some(line =>
-        line.trim() && !line.startsWith('#') && line.includes('://')
-      )) {
-        log.warn('M3U8 cleaning removed all segments — returning original');
-        return text;
+      if (inAdBreak) {
+        log.warn('Ad break never closed — forcing end at EOF');
+        inAdBreak = false;
       }
 
-      // Force chunked quality if enabled
-      if (CONFIG.FORCE_CHUNKED) {
-        const chunkedMatch = cleaned.match(/#EXT-X-STREAM-INF:[^\n]*?(?:VIDEO="chunked"|NAME="Source"|исходное)[^\n]*\n([^\n]+)/i);
+      let cleaned = filteredLines.join('\n');
+
+      // Safety net: if cleaning removed all content segments, return empty playlist
+      const hasContentSegments = filteredLines.some(line =>
+        line.trim() && !line.trim().startsWith('#')
+      );
+      if (!hasContentSegments && text.split('\n').some(line =>
+        line.trim() && !line.trim().startsWith('#')
+      )) {
+        log.warn('M3U8 cleaning removed all segments — returning empty playlist');
+        return '#EXTM3U\n#EXT-X-ENDLIST\n';
+      }
+
+      // Force chunked/source quality if enabled (master playlist only)
+      if (CONFIG.FORCE_CHUNKED && cleaned.includes('#EXT-X-STREAM-INF')) {
+        let chunkedMatch = cleaned.match(/#EXT-X-STREAM-INF:[^\n]*?(?:VIDEO="chunked"|NAME="Source"|исходное)[^\n]*\n([^\n]+)/i);
+
+        if (!chunkedMatch) {
+          // Fallback: select highest bandwidth variant
+          const variants = [];
+          const streamInfRegex = /#EXT-X-STREAM-INF:([^\n]*)\n([^\n]+)/g;
+          let m;
+          while ((m = streamInfRegex.exec(cleaned)) !== null) {
+            const attrs = m[1];
+            const url = m[2].trim();
+            const bwMatch = attrs.match(/BANDWIDTH=(\d+)/);
+            const bandwidth = bwMatch ? parseInt(bwMatch[1], 10) : 0;
+            variants.push({ url, bandwidth });
+          }
+          if (variants.length > 0) {
+            variants.sort((a, b) => b.bandwidth - a.bandwidth);
+            chunkedMatch = { 1: variants[0].url };
+            log.info(`FORCE_CHUNKED: using highest bandwidth variant (${variants[0].bandwidth}bps)`);
+          }
+        }
 
         if (chunkedMatch) {
           const chunkedUrl = chunkedMatch[1].trim();
           cleaned = `#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO="chunked"\n${chunkedUrl}`;
         } else {
-          log.warn('FORCE_CHUNKED: no chunked/Source stream found in M3U8');
+          log.warn('FORCE_CHUNKED: no variants found in M3U8');
         }
       }
 
@@ -1051,27 +1179,36 @@ if(_ac.has(id)){var cb=_ac.get(id);_ac.delete(id);cb(e.data.m3u8);}}
 });
 // M3U8 replacement counter to prevent infinite loops
 var _rc={};
+// In-flight deduplication for clean M3U8 requests
+var _reqInflight=new Map();
 
 function hasAdMarkers(text){
 return text.indexOf('stitched')!==-1||text.indexOf('X-TTV-MAF-AD')!==-1||
 text.indexOf('twitch-maf-ad')!==-1||text.indexOf('twitch-ad-quartile')!==-1||
 text.indexOf('X-TV-TWITCH-AD')!==-1||text.indexOf('SCTE35-AD')!==-1||
-/#EXT-X-DATERANGE:.*CLASS='(com\.twitch\.ttv\.pts\.dai|twitch_ad|twitch-maf-ad|twitch-ad-quartile|stitched_ad)'/.test(text)||
-/#EXT-X-DATERANGE:.*ID='stitched-ad-'/.test(text)||/#EXT-X-TWITCH-ADS/.test(text)||
-text.indexOf('AD_BREAK')!==-1||text.indexOf('FREEWHEEL')!==-1;
+/#EXT-X-DATERANGE:.*CLASS="(com\.twitch\.ttv\.pts\.dai|twitch_ad|twitch-maf-ad|twitch-ad-quartile|stitched_ad)"/.test(text)||
+/#EXT-X-DATERANGE:.*ID="stitched-ad-/.test(text)||/#EXT-X-TWITCH-ADS/.test(text)||
+text.indexOf('AD_BREAK')!==-1||text.indexOf('FREEWHEEL')!==-1||
+text.indexOf('EXT-X-CUE-OUT')!==-1||text.indexOf('EXT-OATCLS-SCTE35')!==-1||text.indexOf('EXT-X-SPLICEPOINT-SCTE35')!==-1;
 }
 
 function reqCleanM3U8(url){
-return new Promise(function(resolve){
+var existing=_reqInflight.get(url);
+if(existing){return existing;}
+var p=new Promise(function(resolve){
 var id=++_rid;
 _ac.set(id,resolve);
 self.postMessage({__ttv_adblock:true,type:'clean_m3u8_request',url:url,requestId:id});});
+_reqInflight.set(url,p);
+p.then(function(){_reqInflight.delete(url);},function(){_reqInflight.delete(url);});
+return p;
 }
+function resolveUrls(txt,base){var bu=new URL(base);var bp=bu.href.replace(/[^/]*$/,'');return txt.split('\\n').map(function(l){var t=l.trim();if(!t||t.charAt(0)==='#')return l;if(/^[a-z][a-z0-9+.-]*:/i.test(t))return l;if(t.charAt(0)==='/')return bu.origin+t;return bp+t;}).join('\\n');}
 self.fetch=function(input,init){
 var url=(input instanceof Request?input.url:input)+"";
 var _uk=url.split("?")[0];
 var _now=Date.now();
-if(_mc[_uk]&&_now-_mc[_uk].t<30000){return Promise.resolve(new Response(new Blob([_mc[_uk].text]),{status:200,headers:{"Content-Type":"application/vnd.apple.mpegurl"}}))}
+if(_mc[_uk]&&_now-_mc[_uk].t<(_mc[_uk].ttl||30000)){return Promise.resolve(new Response(new Blob([_mc[_uk].text]),{status:200,headers:{"Content-Type":"application/vnd.apple.mpegurl"}}))}
 try{var h=new URL(url).hostname;
 var bd=["edge.ads.twitch.tv","amazon-adsystem.com","sq-tungsten-ts.amazon-adsystem.com","ads.ttvnw.net","ad.twitch.tv",
 "video.ad.twitch.tv","stream-display-ad.twitch.tv","doubleclick.net","googlesyndication.com",
@@ -1098,29 +1235,34 @@ text.indexOf("twitch-maf-ad")!==-1||text.indexOf("twitch-ad-quartile")!==-1||
 text.indexOf("X-TV-TWITCH-AD")!==-1||text.indexOf("SCTE35-AD")!==-1||
 /#EXT-X-DATERANGE:.*CLASS="(com\\.twitch\\.ttv\\.pts\\.dai|twitch_ad|twitch-maf-ad|twitch-ad-quartile|stitched_ad)"/.test(text)||
 /#EXT-X-DATERANGE:.*ID="stitched-ad-/.test(text)||/#EXT-X-TWITCH-ADS/.test(text)||
-text.indexOf("AD_BREAK")!==-1||text.indexOf("FREEWHEEL")!==-1;
+text.indexOf("AD_BREAK")!==-1||text.indexOf("FREEWHEEL")!==-1||
+text.indexOf("EXT-X-CUE-OUT")!==-1||text.indexOf("EXT-OATCLS-SCTE35")!==-1||text.indexOf("EXT-X-SPLICEPOINT-SCTE35")!==-1;
 if(hasAd){
 self.postMessage({__ttv_adblock:true,type:"ad_detected",url:url});
 _rc[_uk]=(_rc[_uk]||0)+1;
-if(_rc[_uk]>3){self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url,loop:"prevented"});return r;}
-return reqCleanM3U8(url).then(function(cleanText){
-if(cleanText){if(hasAdMarkers(cleanText)){return r;}if(cleanText.indexOf("#EXT-X-STREAM-INF")!==-1)_mc[_uk]={t:_now,text:cleanText};
-try{self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url})}catch(e){}
-return new Response(new Blob([cleanText]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
+if(_rc[_uk]>10){self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url,loop:"prevented"});return new Response(new Blob(['#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-TARGETDURATION:1\\n#EXTINF:1.000,\\n'+_tinyVid+'\\n#EXT-X-ENDLIST\\n']),{status:200,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
+var isMediaPlaylist=text.indexOf("#EXTINF")!==-1&&text.indexOf("#EXT-X-STREAM-INF")===-1;
+if(isMediaPlaylist&&url.indexOf("playlist.ttvnw.net")!==-1){
+// Media playlist: clean inline, do NOT replace with master playlist from backup
 var ls=text.split("\\n"),fl=[],iab=false;
 var am=[/#EXT-X-DATERANGE:.*CLASS="com\\.twitch\\.ttv\\.pts\\.dai"/,
 /#EXT-X-DATERANGE:.*CLASS="twitch_ad"/,
 /#EXT-X-DATERANGE:.*CLASS="twitch-maf-ad"/,
 /#EXT-X-DATERANGE:.*CLASS="twitch-ad-quartile"/,
-/#EXT-X-DATERANGE:.*CLASS="twitch-stream-source"/,
 /#EXT-X-DATERANGE:.*CLASS="stitched_ad"/,
 /#EXT-X-DATERANGE:.*ID="stitched-ad-/,
 /#EXT-X-SCTE35-OUT.*ad/i,/#EXT-X-TWITCH-ADS/,
 /#EXT-X-DATERANGE:.*CLASS="[^"]*_ad"/i,
 /#EXT-X-DATERANGE:.*CLASS="twitch-[^"]*ad[^"]*"/i,
 /#EXT-X-DATERANGE:.*CLASS="AD_BREAK"/,
-/#EXT-X-DATERANGE:.*CLASS="FREEWHEEL"/];
-var em=[/#EXT-X-DATERANGE:.*END-DATE/,/#EXT-X-SCTE35-IN/];
+/#EXT-X-DATERANGE:.*CLASS="FREEWHEEL"/,
+/#EXT-X-TTV-MAF-AD/,
+/#EXT-X-TWITCH-AD-PLUGIN/,
+/#EXT-X-TWITCH-AD-CREATIVE/,
+/#EXT-X-CUE-OUT/,
+/#EXT-OATCLS-SCTE35/,
+/#EXT-X-SPLICEPOINT-SCTE35/];
+var em=[/#EXT-X-DATERANGE:.*END-DATE/,/#EXT-X-SCTE35-IN/,/#EXT-X-CUE-IN/];
 var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
 "EXT-X-TWITCH-PREROLL-AD","EXT-X-TWITCH-MIDROLL-AD","EXT-X-TWITCH-POSTROLL-AD",
 "EXT-X-TWITCH-AD-PLUGIN","EXT-X-TWITCH-AD-CREATIVE","EXT-X-TWITCH-PREROLL",
@@ -1129,7 +1271,9 @@ var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
 "X-TTV-MAF-AD-COMMERCIAL-ID","X-TTV-MAF-AD-AD-SESSION-ID",
 "X-TTV-MAF-AD-PRIMARY-POD","X-TTV-MAF-AD-RADS-TOKEN",
 "X-TTV-MAF-AD-DECISION","X-TTV-MAF-AD-SDA-SEQUENCE-LENGTH",
-"X-TTV-MAF-AD-FALLBACK-FORMATS",'CLASS="AD_BREAK"','CLASS="FREEWHEEL"'].join("|"));
+"X-TTV-MAF-AD-FALLBACK-FORMATS",
+"EXT-X-CUE-OUT","EXT-OATCLS-SCTE35","EXT-X-SPLICEPOINT-SCTE35",
+'CLASS="AD_BREAK"','CLASS="FREEWHEEL"'].join("|"));
 for(var i=0;i<ls.length;i++){var l=ls[i],isS=false,isE=false;
 for(var j=0;j<am.length;j++){if(am[j].test(l)){isS=true;break}}
 if(isS){iab=true;continue}
@@ -1139,23 +1283,95 @@ if(as.test(l))continue;
 if(iab){if(l.indexOf("#EXT-X-DISCONTINUITY")===0){
 iab=false;fl.push("#EXT-X-DISCONTINUITY");continue}continue}
 fl.push(l)}
+if(iab){iab=false;fl.push("#EXT-X-DISCONTINUITY");}
+var segBefore=text.split("\\n").filter(function(l){var t=l.trim();return t&&t.charAt(0)!=='#';}).length;
+var segAfter=fl.filter(function(l){var t=l.trim();return t&&t.charAt(0)!=='#';}).length;
+try{self.postMessage({__ttv_adblock:true,type:"m3u8_debug",url:url,segBefore:segBefore,segAfter:segAfter})}catch(e){}
 var c=fl.join("\\n");
-if(!c.match(/https?:\\/\\//))return r;
-var cm=c.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\\u0438\\u0441\\u0445\\u043e\\u0434\\u043d\\u043e\\u0435)[^\\n]*\\n([^\\n]+)/i);
-if(cm)c="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
-if(c.indexOf("#EXT-X-STREAM-INF")!==-1)_mc[_uk]={t:_now,text:c};try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
-return new Response(new Blob([c]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});});
+var hasSeg=c.split("\\n").some(function(line){return line.trim()&&!line.trim().startsWith("#");});
+if(!hasSeg){
+return reqCleanM3U8(url).then(function(cleanText){
+if(cleanText&&cleanText.indexOf("#EXTM3U")!==-1){
+_rc[_uk]=0;
+try{self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url})}catch(e){}
+return new Response(new Blob([resolveUrls(cleanText,url)]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
+try{self.postMessage({__ttv_adblock:true,type:"m3u8_fallback_failed",url:url})}catch(e){}
+return new Response(new Blob(['#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-TARGETDURATION:1\\n#EXTINF:1.000,\\n'+_tinyVid+'\\n#EXT-X-ENDLIST\\n']),{status:200,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});});
 }
-var cm=text.match(/#EXT-X-STREAM-INF:[^\\n]*?(?:VIDEO="chunked"|NAME="Source"|\\u0438\\u0441\\u0445\\u043e\\u0434\\u043d\\u043e\\u0435)[^\\n]*\\n([^\\n]+)/i);
-if(cm){var cs="#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-STREAM-INF:BANDWIDTH=9999999,VIDEO=\\"chunked\\"\\n"+cm[1].trim();
-if(cs!==text){if(cs.indexOf("#EXT-X-STREAM-INF")!==-1)_mc[_uk]={t:_now,text:cs};return new Response(new Blob([cs]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}}
+if(c.indexOf("#EXTM3U")!==-1)_mc[_uk]={t:_now,text:resolveUrls(c,url),ttl:2000};
+_rc[_uk]=0;
+try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
+return new Response(new Blob([resolveUrls(c,url)]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
+return reqCleanM3U8(url).then(function(cleanText){
+if(cleanText&&cleanText.indexOf("#EXTM3U")!==-1){_mc[_uk]={t:_now,text:resolveUrls(cleanText,url),ttl:cleanText.indexOf("#EXTINF")!==-1?2000:30000};
+_rc[_uk]=0;
+try{self.postMessage({__ttv_adblock:true,type:"m3u8_replaced",url:url})}catch(e){}
+return new Response(new Blob([resolveUrls(cleanText,url)]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
+var ls=text.split("\\n"),fl=[],iab=false;
+var am=[/#EXT-X-DATERANGE:.*CLASS="com\\.twitch\\.ttv\\.pts\\.dai"/,
+/#EXT-X-DATERANGE:.*CLASS="twitch_ad"/,
+/#EXT-X-DATERANGE:.*CLASS="twitch-maf-ad"/,
+/#EXT-X-DATERANGE:.*CLASS="twitch-ad-quartile"/,
+/#EXT-X-DATERANGE:.*CLASS="stitched_ad"/,
+/#EXT-X-DATERANGE:.*ID="stitched-ad-/,
+/#EXT-X-SCTE35-OUT.*ad/i,/#EXT-X-TWITCH-ADS/,
+/#EXT-X-DATERANGE:.*CLASS="[^"]*_ad"/i,
+/#EXT-X-DATERANGE:.*CLASS="twitch-[^"]*ad[^"]*"/i,
+/#EXT-X-DATERANGE:.*CLASS="AD_BREAK"/,
+/#EXT-X-DATERANGE:.*CLASS="FREEWHEEL"/,
+/#EXT-X-TTV-MAF-AD/,
+/#EXT-X-TWITCH-AD-PLUGIN/,
+/#EXT-X-TWITCH-AD-CREATIVE/,
+/#EXT-X-CUE-OUT/,
+/#EXT-OATCLS-SCTE35/,
+/#EXT-X-SPLICEPOINT-SCTE35/];
+var em=[/#EXT-X-DATERANGE:.*END-DATE/,/#EXT-X-SCTE35-IN/,/#EXT-X-CUE-IN/];
+var as=new RegExp(["SCTE35-AD","EXT-X-TWITCH-AD","STREAM-DISPLAY-AD","EXT-X-AD",
+"EXT-X-TWITCH-PREROLL-AD","EXT-X-TWITCH-MIDROLL-AD","EXT-X-TWITCH-POSTROLL-AD",
+"EXT-X-TWITCH-AD-PLUGIN","EXT-X-TWITCH-AD-CREATIVE","EXT-X-TWITCH-PREROLL",
+"EXT-X-TWITCH-MIDROLL","EXT-X-TWITCH-POSTROLL",'URI="ad"',"stitched-ad",
+"X-TTV-MAF-AD","X-TV-TWITCH-AD","twitch-maf-ad","twitch-ad-quartile",
+"X-TTV-MAF-AD-COMMERCIAL-ID","X-TTV-MAF-AD-AD-SESSION-ID",
+"X-TTV-MAF-AD-PRIMARY-POD","X-TTV-MAF-AD-RADS-TOKEN",
+"X-TTV-MAF-AD-DECISION","X-TTV-MAF-AD-SDA-SEQUENCE-LENGTH",
+"X-TTV-MAF-AD-FALLBACK-FORMATS",
+"EXT-X-CUE-OUT","EXT-OATCLS-SCTE35","EXT-X-SPLICEPOINT-SCTE35",
+'CLASS="AD_BREAK"','CLASS="FREEWHEEL"'].join("|"));
+for(var i=0;i<ls.length;i++){var l=ls[i],isS=false,isE=false;
+for(var j=0;j<am.length;j++){if(am[j].test(l)){isS=true;break}}
+if(isS){iab=true;continue}
+for(var j=0;j<em.length;j++){if(em[j].test(l)){isE=true;break}}
+if(isE){iab=false;continue}
+if(as.test(l))continue;
+if(iab){if(l.indexOf("#EXT-X-DISCONTINUITY")===0){
+iab=false;fl.push("#EXT-X-DISCONTINUITY");continue}continue}
+fl.push(l)}
+if(iab){iab=false;fl.push("#EXT-X-DISCONTINUITY");}
+var c=fl.join("\\n");
+if(c.indexOf('#EXT-X-STREAM-INF')!==-1){var variants=[];var lines2=c.split('\\n');for(var k=0;k<lines2.length-1;k++){if(lines2[k].indexOf('#EXT-X-STREAM-INF')===0){var bwMatch=lines2[k].match(/BANDWIDTH=(\d+)/);var bandwidth=bwMatch?parseInt(bwMatch[1],10):0;var isChunked=/VIDEO=\"chunked\"|NAME=\"Source\"|исходное/.test(lines2[k]);variants.push({line:lines2[k],url:lines2[k+1],bandwidth:bandwidth,isChunked:isChunked});}}if(variants.length>0){var selected=variants.find(function(v){return v.isChunked;});if(!selected){variants.sort(function(a,b){return b.bandwidth-a.bandwidth;});selected=variants[0];}c='#EXTM3U\\n#EXT-X-VERSION:3\\n'+selected.line+'\\n'+selected.url+'\\n';}}
+var hasSeg=c.split("\\n").some(function(line){return line.trim()&&!line.trim().startsWith("#");});
+if(!hasSeg){
+return new Response(new Blob(['#EXTM3U\\n#EXT-X-VERSION:3\\n#EXT-X-TARGETDURATION:1\\n#EXTINF:1.000,\\n'+_tinyVid+'\\n#EXT-X-ENDLIST\\n']),{status:200,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});
+}
+// Media playlist: return cleaned directly (no encoding reconstruction)
+if(c.indexOf("#EXTINF")!==-1&&c.indexOf("#EXT-X-STREAM-INF")===-1){
+if(c.indexOf("#EXTM3U")!==-1)_mc[_uk]={t:_now,text:resolveUrls(c,url),ttl:2000};
+_rc[_uk]=0;
+try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
+return new Response(new Blob([resolveUrls(c,url)]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});}
+if(c.indexOf("#EXTM3U")!==-1)_mc[_uk]={t:_now,text:resolveUrls(c,url),ttl:c.indexOf("#EXTINF")!==-1?2000:30000};
+_rc[_uk]=0;
+try{self.postMessage({__ttv_adblock:true,type:"m3u8_cleaned",url:url})}catch(e){}
+return new Response(new Blob([resolveUrls(c,url)]),{status:r.status,headers:{"Content-Type":"application/vnd.apple.mpegurl"}});});
+}
+// Non-ad path: return original response without reconstruction
 return r;})})};
 })();`;
 
   unsafeWindow.Worker = function (scriptUrl, options) {
     const url = String(scriptUrl);
 
-    if (!url.includes('twitch') && !url.includes('ttvnw') && !url.includes('amazon-ivs') && !url.startsWith('blob:')) {
+    if (!url.includes('twitch') && !url.includes('ttvnw') && !url.includes('amazon-ivs') && !url.startsWith('blob:') && !url.includes('ivs') && !url.includes('cloudfront') && !url.includes('amazonaws')) {
       return new _OriginalWorker(scriptUrl, options);
     }
 
@@ -1170,6 +1386,23 @@ return r;})})};
           log.info('Worker ad detected in M3U8:', msg.url?.substring(0, 60));
         } else if (msg.type === 'm3u8_replaced') {
           log.info('Worker M3U8 replaced with clean stream:', msg.url?.substring(0, 60));
+        } else if (msg.type === 'm3u8_debug') {
+          if (msg.segAfter === 0 || msg.segBefore > msg.segAfter) {
+            log.info(`Worker M3U8 segments ${msg.segBefore}→${msg.segAfter}:`, msg.url?.substring(0, 60));
+          }
+        } else if (msg.type === 'm3u8_fallback_failed') {
+          log.error('Worker M3U8 fallback failed — returning placeholder:', msg.url?.substring(0, 60));
+          if (CONFIG.AUTO_RELOAD_ON_AD_DETECTED) {
+            const _wff = window.__ttv_fallback_failures || (window.__ttv_fallback_failures = { count: 0, last: 0 });
+            const now = Date.now();
+            if (now - _wff.last > 15000) { _wff.count = 0; }
+            _wff.count++;
+            _wff.last = now;
+            if (_wff.count >= 3) {
+              log.warn('Multiple worker fallback failures — scheduling reload');
+              setTimeout(() => window.location.reload(), 500);
+            }
+          }
         } else if (msg.type === 'clean_m3u8_request') {
           // Worker requests a clean M3U8 — use vaft approach (independent GQL + Usher)
           (async () => {
@@ -1187,8 +1420,15 @@ return r;})})};
               }
               if (!channelName) {
                 try {
-                  const pMatch = location.pathname.match(/^\/(popout\/)?([^/]+)/);
-                  if (pMatch && pMatch[2] && !['directory','videos','settings','friends','inventory','payments','subscriptions','tags',' Following','followers'].includes(pMatch[2])) channelName = pMatch[2];
+                  const link = document.querySelector('a[data-a-target="channel-header-channel-link"], a[data-test-selector="channel-header__channel-link"], .channel-info-content a[href^="/"]');
+                  if (link) {
+                    const href = link.getAttribute('href');
+                    if (href) channelName = href.replace(/^\/+/, '').split('/')[0];
+                  }
+                  if (!channelName) {
+                    const pMatch = location.pathname.match(/^\/(popout\/)?([^/]+)/);
+                    if (pMatch && pMatch[2] && !['directory','videos','settings','friends','inventory','payments','subscriptions','tags',' Following','followers'].includes(pMatch[2])) channelName = pMatch[2];
+                  }
                 } catch(e) {}
               }
               if (channelName) {
@@ -1200,12 +1440,12 @@ return r;})})};
                       if (msg.url && !msg.url.includes('usher.ttvnw.net')) {
                         const lines = cleanEncodings.replaceAll('\r', '').split('\n');
                         for (let i = 0; i < lines.length - 1; i++) {
-                          if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('://')) {
+                          if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].trim() && !lines[i + 1].trim().startsWith('#')) {
                             const isChunked = /VIDEO="chunked"|NAME="Source"|исходное/.test(lines[i]);
                             if (isChunked) {
                               const streamUrl = lines[i + 1].trim();
                               try {
-                                const streamResp = await originalFetch(streamUrl);
+                                const streamResp = await gmFetch(streamUrl);
                                 if (streamResp.ok) {
                                   const streamText = await streamResp.text();
                                   if (streamText.includes('#EXTM3U') && streamText.includes('#EXTINF')) {
@@ -1221,7 +1461,7 @@ return r;})})};
                         }
                         const candidates = [];
                         for (let i = 0; i < lines.length - 1; i++) {
-                          if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('://')) {
+                          if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].trim() && !lines[i + 1].trim().startsWith('#')) {
                             const bw = parseInt(lines[i].match(/BANDWIDTH=(\d+)/)?.[1] || '0', 10);
                             candidates.push({ url: lines[i + 1].trim(), bandwidth: bw });
                           }
@@ -1229,7 +1469,7 @@ return r;})})};
                         candidates.sort((a, b) => b.bandwidth - a.bandwidth);
                         for (const { url: streamUrl, bandwidth } of candidates) {
                           try {
-                            const streamResp = await originalFetch(streamUrl);
+                            const streamResp = await gmFetch(streamUrl);
                             if (streamResp.ok) {
                               const streamText = await streamResp.text();
                               if (streamText.includes('#EXTM3U') && streamText.includes('#EXTINF')) {
@@ -1491,11 +1731,11 @@ return r;})})};
                 if (!url.includes('usher.ttvnw.net')) {
                   const lines = cleanEncodings.replaceAll('\r', '').split('\n');
                   for (let i = 0; i < lines.length - 1; i++) {
-                    if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('://')) {
+                    if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].trim() && !lines[i + 1].trim().startsWith('#')) {
                       if (/VIDEO="chunked"|NAME="Source"|исходное/.test(lines[i])) {
                         const mediaUrl = lines[i + 1].trim();
                         try {
-                          const mediaResp = await originalFetch(mediaUrl);
+                          const mediaResp = await gmFetch(mediaUrl);
                           if (mediaResp.ok) {
                             const mediaText = await mediaResp.text();
                             if (mediaText.includes('#EXTM3U') && mediaText.includes('#EXTINF')) {
@@ -1511,7 +1751,7 @@ return r;})})};
                   }
                   const candidates = [];
                   for (let i = 0; i < lines.length - 1; i++) {
-                    if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].includes('://')) {
+                    if (lines[i].startsWith('#EXT-X-STREAM-INF') && lines[i + 1].trim() && !lines[i + 1].trim().startsWith('#')) {
                       const bw = parseInt(lines[i].match(/BANDWIDTH=(\d+)/)?.[1] || '0', 10);
                       candidates.push({ url: lines[i + 1].trim(), bandwidth: bw });
                     }
@@ -1519,7 +1759,7 @@ return r;})})};
                   candidates.sort((a, b) => b.bandwidth - a.bandwidth);
                   for (const { url: mediaUrl, bandwidth } of candidates) {
                     try {
-                      const mediaResp = await originalFetch(mediaUrl);
+                      const mediaResp = await gmFetch(mediaUrl);
                       if (mediaResp.ok) {
                         const mediaText = await mediaResp.text();
                         if (mediaText.includes('#EXTM3U') && mediaText.includes('#EXTINF')) {
@@ -1564,13 +1804,13 @@ return r;})})};
                 `player_type=${PLAYER_TYPE_CASCADE[currentPlayerTypeIdx]}`
               );
               if (replacementUrl !== currentUsherUrl) {
-                const replaceResp = await originalFetch(replacementUrl, init);
+                const replaceResp = await gmFetch(replacementUrl);
                 if (replaceResp.ok) {
                   const replaceText = await replaceResp.clone().text();
-                  if (replaceText.includes('#EXTM3U8')) {
+                  if (replaceText.includes('#EXTM3U')) {
                     const replaceCleaned = cleanM3U8(replaceText);
                     const hasSegments = replaceCleaned.split('\n').some(line =>
-                      line.trim() && !line.startsWith('#') && line.includes('://')
+                      line.trim() && !line.trim().startsWith('#')
                     );
                     if (hasSegments) {
                       log.info('Stream replacement successful');
@@ -1602,11 +1842,20 @@ return r;})})};
 
         if (cleaned !== text) {
           const hasSegments = cleaned.split('\n').some(line =>
-            line.trim() && !line.startsWith('#') && line.includes('://')
+            line.trim() && !line.trim().startsWith('#')
           );
           if (!hasSegments) {
-            log.warn('M3U8 cleaning removed all segments — returning original');
-            return response;
+            log.warn('M3U8 cleaning removed all segments — returning empty playlist');
+            return new Response(
+              new Blob(['#EXTM3U\n#EXT-X-ENDLIST\n']),
+              {
+                status: response.status,
+                headers: {
+                  ...Object.fromEntries(response.headers),
+                  'Content-Type': 'application/vnd.apple.mpegurl'
+                }
+              }
+            );
           }
 
           return new Response(
@@ -1835,7 +2084,7 @@ return r;})})};
     return () => {
       if (cssInjected) return;
 
-      let css = `${AD_SELECTOR_STRING} {\n  display:none!important;\n  opacity:0!important;\n  pointer-events:none!important;\n}\n\n`;
+      let css = `${AD_SELECTOR_STRING} {\n  display:none!important;\n  opacity:0!important;\n  pointer-events:none!important;\n  visibility:hidden!important;\n  max-height:0!important;\n  max-width:0!important;\n  overflow:hidden!important;\n}\n\n`;
 
       for (const [selector, rules] of Object.entries(FORMAT_OVERRIDES)) {
         css += `${selector} {\n  ${rules}\n}\n\n`;
@@ -1849,7 +2098,7 @@ return r;})})};
   // Optimized ad removal
   const removeAds = (() => {
     let lastCheckTime = 0;
-    const minCheckInterval = CONFIG.PERFORMANCE_MODE ? 200 : 100;
+    const minCheckInterval = CONFIG.PERFORMANCE_MODE ? 50 : 16;
 
     return () => {
       const now = Date.now();
@@ -1866,6 +2115,10 @@ return r;})})};
 
         for (let element of adElements) {
           if (element.querySelector('video')) continue;
+          if (isProtectedElement(element)) continue;
+          if (CONFIG.DEBUG) {
+            log.debug('Queueing ad element:', element.tagName, element.className?.slice(0, 60), element.id?.slice(0, 30));
+          }
           batchRemover.add(element);
         }
       } catch (error) {
@@ -1884,13 +2137,14 @@ return r;})})};
         const sdaElements = document.querySelectorAll(sdaSelectors.join(','));
         for (const sda of sdaElements) {
           if (sda.querySelector('video')) continue;
+          if (isProtectedElement(sda)) continue;
           sda.style.setProperty('display', 'none', 'important');
           sda.style.setProperty('visibility', 'hidden', 'important');
           sda.style.setProperty('opacity', '0', 'important');
           if (sda.parentElement) {
             if (sda.parentElement.querySelector('video') && !sda.parentElement.matches('[class*="stream-display-ad"],[class*="sda"]')) {
               sda.parentElement.style.setProperty('overflow', 'hidden', 'important');
-            } else {
+            } else if (!isProtectedElement(sda.parentElement)) {
               sda.parentElement.style.setProperty('height', '0', 'important');
               sda.parentElement.style.setProperty('overflow', 'hidden', 'important');
               sda.parentElement.style.setProperty('transition', 'none', 'important');
@@ -1929,7 +2183,7 @@ return r;})})};
             const text = node.textContent.toLowerCase();
             for (let keyword of CONFIG.FALLBACK_KEYWORDS) {
               if (text.includes(keyword)) {
-                if (!node.matches(AD_SELECTOR_STRING)) {
+                if (!node.matches(AD_SELECTOR_STRING) && !isProtectedElement(node)) {
                   batchRemover.add(node);
                 }
                 break;
@@ -2269,7 +2523,7 @@ return r;})})};
           const newChannel = newChannelMatch?.[2] || '';
           const isChannelChange = newChannel !== currentChannelName;
 
-          if (isChannelChange) {
+          if (isChannelChange && newChannel) {
             lastPath = newPath;
             playerErrorHandler.resetAttempts();
             currentPlayerTypeIdx = 0;
@@ -2277,7 +2531,7 @@ return r;})})};
             currentUsherUrl = null;
             if (unsafeWindow.__vat) {
               const vat = unsafeWindow.__vat;
-              vat.playerType = PLAYER_TYPE_CASCADE[0];
+              vat.playerType = 'embed';
               log.info('SPA navigation: reset __vat playerType');
             }
             log.info('SPA navigation detected — reset cascade state');
@@ -2323,7 +2577,7 @@ return r;})})};
       if (initialized) return;
       initialized = true;
 
-      log.info('Initializing Optimized Twitch Adblock Fix v60.0.0...');
+      log.info('Initializing Optimized Twitch Adblock Fix v60.0.18...');
 
       // Initial ad removal
       removeAds();
@@ -2337,6 +2591,12 @@ return r;})})};
         removeAds();
         batchRemover.flush();
       }, CONFIG.MAIN_INTERVAL);
+
+      // Rapid DOM ad removal for Stream Display Ads and overlays
+      setInterval(() => {
+        removeAds();
+        batchRemover.flush();
+      }, 300);
 
       // Ad detection interval
       if (CONFIG.AUTO_RELOAD_ON_AD_DETECTED) {
@@ -2353,7 +2613,7 @@ return r;})})};
         }, 30000);
       }
 
-      log.info('Optimized Twitch Adblock Fix v60.0.0 initialized successfully');
+      log.info('Optimized Twitch Adblock Fix v60.0.18 initialized successfully');
     };
   })();
 
