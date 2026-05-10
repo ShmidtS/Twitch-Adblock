@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name Twitch Adblock Ultimate
 // @namespace TwitchAdblockUltimate
-// @version 60.0.20
+// @version 60.0.21
 // @description Twitch ad-blocking with parallel M3U8 fetch, Set-based domain matching, optimized DOM traversal
 // @author ShmidtS
 // @match https://www.twitch.tv/*
@@ -1375,6 +1375,42 @@ return r;})})};
       return new _OriginalWorker(scriptUrl, options);
     }
 
+    function flushVideoBuffer() {
+      try {
+        const videos = document.querySelectorAll('video');
+        for (const video of videos) {
+          if (!video.buffered || video.buffered.length === 0) continue;
+          const ahead = video.buffered.end(video.buffered.length - 1) - video.currentTime;
+          if (ahead <= 1.5) continue;
+          log.info('Buffer flush: fast-forward', ahead.toFixed(1), 's');
+          const origRate = video.playbackRate;
+          const origMuted = video.muted;
+          video.playbackRate = 16.0;
+          video.muted = true;
+          let ticks = 0;
+          const id = setInterval(() => {
+            ticks++;
+            let done = ticks > 25;
+            if (!done) {
+              try {
+                const remaining = video.buffered.length > 0
+                  ? video.buffered.end(video.buffered.length - 1) - video.currentTime
+                  : 0;
+                if (remaining < 0.5) done = true;
+              } catch (_) { done = true; }
+            }
+            if (done) {
+              clearInterval(id);
+              video.playbackRate = origRate;
+              video.muted = origMuted;
+            }
+          }, 100);
+        }
+      } catch (e) {
+        log.error('flushVideoBuffer error:', e.message);
+      }
+    }
+
     function attachWorkerListener(worker) {
       worker.addEventListener('message', (e) => {
         if (!e.data?.__ttv_adblock) return;
@@ -1384,8 +1420,10 @@ return r;})})};
           log.info('Worker M3U8 cleaned:', msg.url?.substring(0, 60));
         } else if (msg.type === 'ad_detected') {
           log.info('Worker ad detected in M3U8:', msg.url?.substring(0, 60));
+          flushVideoBuffer();
         } else if (msg.type === 'm3u8_replaced') {
           log.info('Worker M3U8 replaced with clean stream:', msg.url?.substring(0, 60));
+          flushVideoBuffer();
         } else if (msg.type === 'm3u8_debug') {
           if (msg.segAfter === 0 || msg.segBefore > msg.segAfter) {
             log.info(`Worker M3U8 segments ${msg.segBefore}→${msg.segAfter}:`, msg.url?.substring(0, 60));
